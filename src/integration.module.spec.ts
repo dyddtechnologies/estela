@@ -40,7 +40,7 @@ class OrderPersistence {
   @ServiceActivator('orders.persist')
   async persist(payload: unknown): Promise<void> {
     this.persisted.push(payload as Record<string, unknown>);
-    // §17.8: el activator de persist reenvía a 'orders.country' (regla direct 1-subscriber)
+    // sec.17.8: el activator de persist forward a 'orders.country' (rule direct 1-subscriber)
     await this.registry.send('orders.country', payload);
   }
 }
@@ -88,7 +88,7 @@ const RouteByCountryFlow: FlowDefinition = {
     }),
 };
 
-describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', () => {
+describe('IntegrationModule.forRoot — bootstrap orders (topologia sec.17.8)', () => {
   let moduleRef: Awaited<ReturnType<typeof compileApp>> | undefined;
 
   const compileApp = async () => {
@@ -128,10 +128,10 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
   afterAll(async () => {
     if (moduleRef === undefined) return;
     const { app } = moduleRef;
-    await app.close(); // dispara onApplicationShutdown → drain de queues
+    await app.close(); // dispara onApplicationShutdown -> drain de queues
   });
 
-  it('bootstrap: error.channel auto-creado; providers exportados resolubles', () => {
+  it('bootstrap: error.channel auto-created; providers exportados resolubles', () => {
     const { module } = moduleRef!;
     const registry = module.get(ChannelRegistry);
     expect(registry.get('error.channel').kind).toBe('pubsub');
@@ -142,7 +142,7 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
     expect(options.flows).toHaveLength(2);
   });
 
-  it('e2e: place-order → persist → country → route local (GT)', async () => {
+  it('e2e: place-order -> persist -> country -> route local (GT)', async () => {
     const { module } = moduleRef!;
     const registry = module.get(ChannelRegistry);
     const persistence = module.get(OrderPersistence);
@@ -163,7 +163,7 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
     expect(local).toEqual([{ orderId: 'ord-A', qty: 2, sku: 'A', total: 20, country: 'GT' }]);
   });
 
-  it('grafo refleja los dos flows + activators descubiertos', () => {
+  it('graph refleja los dos flows + activators descubiertos', () => {
     const { module } = moduleRef!;
     const graph = module.get(ChannelGraph);
     const registry = module.get(ChannelRegistry);
@@ -187,7 +187,7 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
     expect(controller.mermaid()).toContain('flowchart LR');
   });
 
-  it('module es global: FeatureModule SIN imports resuelve ChannelRegistry (spec §11)', () => {
+  it('module es global: FeatureModule SIN imports resuelve ChannelRegistry (spec sec.11)', () => {
     const { module } = moduleRef!;
     const probe = module.get(FeatureProbe);
     expect(probe.registry.get('error.channel').kind).toBe('pubsub');

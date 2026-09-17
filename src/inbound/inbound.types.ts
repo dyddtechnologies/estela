@@ -1,7 +1,7 @@
 import type { IntegrationMessage } from '../message';
 import { ChannelError } from '../channel';
 
-/** Transportes inbound (spec §7.2 + extensión GraphQL ADR-015). */
+/** Transportes inbound (spec sec.7.2 + extension GraphQL ADR-015). */
 export type InboundTransport = 'rest' | 'grpc' | 'rabbit' | 'graphql';
 
 export type GraphqlOperation = 'query' | 'mutation' | 'subscription';
@@ -9,10 +9,10 @@ export type GraphqlOperation = 'query' | 'mutation' | 'subscription';
 export interface InboundSpec {
   channel: string;
   transport: InboundTransport;
-  /** default false — true requiere ReplyGateway (Fase 8). */
+  /** default false — true requires ReplyGateway (Fase 8). */
   requestReply?: boolean;
   timeoutMs?: number;
-  /** default 'return' con fallback a body (spec §7.2). */
+  /** default 'return' con fallback a body (spec sec.7.2). */
   payload?: 'return' | 'body';
   /** default true en REST (swagger helpers, Parte B). */
   swagger?: boolean;
@@ -26,7 +26,7 @@ export function readInboundSpec(handler: object): InboundSpec | undefined {
   return Reflect.getMetadata(INBOUND_SPEC_METADATA, handler) as InboundSpec | undefined;
 }
 
-// ---------- Shapes de respuesta (spec §7.2) ----------
+// ---------- Shapes de respuesta (spec sec.7.2) ----------
 
 export interface InboundAcceptedResponse {
   status: 'accepted';
@@ -68,7 +68,7 @@ export function acceptedResponse(
     correlationId: msg.headers.correlationId,
   };
   if (merge === undefined) return base;
-  return Object.assign({}, merge, base); // canónicos ganan (spec: "+ merge")
+  return Object.assign({}, merge, base); // canonical win (spec: "+ merge")
 }
 
 export function replyResponse(msg: IntegrationMessage, result: unknown): InboundReplyResponse {

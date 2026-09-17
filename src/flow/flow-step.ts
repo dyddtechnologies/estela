@@ -3,8 +3,8 @@ import type { IntegrationMessage } from '../message';
 import type { TraceContext } from '../trace/trace-context';
 
 /**
- * Contrato Command de un step del pipeline (plan §3.4, ADR-009).
- * Archivo de dominio: sin deps npm (enforzado por dependency-cruiser).
+ * Contract Command de un step del pipeline (plan sec.3.4, ADR-009).
+ * Archivo de domain: sin deps npm (enforced por dependency-cruiser).
  */
 
 export type FlowStepKind =
@@ -21,7 +21,7 @@ export type FlowStepKind =
 
 export interface FlowStepContext {
   msg: IntegrationMessage;
-  registry: ChannelRegistry; // puerto de salida (Mediator)
+  registry: ChannelRegistry; // port de output (Mediator)
   trace: TraceContext;
   errorChannel: string;
   flowName: string;
@@ -38,7 +38,7 @@ export interface FlowStep {
   execute(ctx: FlowStepContext): Promise<StepOutcome>;
 }
 
-// ---------- Destinos mixtos (spec §6.2) ----------
+// ---------- Destinos mixtos (spec sec.6.2) ----------
 
 export interface FanoutTargetInput {
   channel: string;
@@ -59,7 +59,7 @@ export class JumpTimeoutError extends Error {
   }
 }
 
-/** Serialización segura para envelopes de error. */
+/** Serializacion segura para envelopes de error. */
 export function serializeError(error: unknown): Record<string, unknown> {
   if (error instanceof Error) return { name: error.name, message: error.message };
   return { value: error };

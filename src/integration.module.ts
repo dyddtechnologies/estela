@@ -38,10 +38,10 @@ export interface IntegrationIdempotencyOptions {
 
 export interface IntegrationModuleOptions {
   channels: readonly ChannelSpec[];
-  /** default 'error.channel' (auto-creado pubsub, spec §5/§11). */
+  /** default 'error.channel' (auto-created pubsub, spec sec.5/sec.11). */
   errorChannel?: string;
   idempotency?: IntegrationIdempotencyOptions;
-  /** Puerto AMQP opcional — si falta, explorer hace warn y no lanza (spec §7.2). */
+  /** Port AMQP opcional — si falta, explorer hace warn y no lanza (spec sec.7.2). */
   rabbitChannel?: AmqpLikeChannel;
   rabbitMappings?: readonly RabbitInboundMapping[];
 }
@@ -171,9 +171,9 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     private readonly options: ResolvedIntegrationOptions,
   ) {}
 
-  /** Orden estricto (spec §11): canales → activators → flows → explorer. */
+  /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
   async onModuleInit(): Promise<void> {
-    // 1. error channel (auto) + canales declarados
+    // 1. error channel (auto) + channels declared
     if (this.registry.tryGet(this.options.errorChannel) === undefined) {
       this.registry.create({ name: this.options.errorChannel, type: 'pubsub' });
     }
@@ -188,7 +188,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     // 2. activators (DiscoveryModule)
     this.subscribeDiscoveredActivators();
 
-    // 3. flows: graph.recordFlow + flow.bind + attach (spec §11 paso 3)
+    // 3. flows: graph.recordFlow + flow.bind + attach (spec sec.11 step 3)
     for (const definition of this.options.flows) {
       const built = definition.build().build();
       this.graph.recordFlow(definition.name, built);
@@ -205,18 +205,18 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       executor.attachTo(this.registry);
     }
 
-    // 4. explorer (rabbit) — último
+    // 4. explorer (rabbit) — ultimo
     await this.explorer.onModuleInit();
   }
 
-  /** Shutdown: drain de queues (plan §8.6/§9.10). */
+  /** Shutdown: drain de queues (plan sec.8.6/sec.9.10). */
   async onApplicationShutdown(): Promise<void> {
     for (const channel of this.registry.list()) {
       if (channel.kind === 'queue') await channel.close?.();
     }
   }
 
-  // Reflexión sobre metadata propia (escrita por nuestro decorador).
+  // Reflexion sobre metadata own (escrita por nuestro decorador).
   /* eslint-disable @typescript-eslint/no-unsafe-assignment */
   private subscribeDiscoveredActivators(): void {
     for (const wrapper of this.discovery.getProviders()) {
@@ -234,7 +234,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
             `${instance.constructor.name}.${methodName}`,
           );
           this.logger.log(
-            `activator: ${instance.constructor.name}.${methodName} → ${metadata.channel}`,
+            `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
           );
         }
         proto = Object.getPrototypeOf(proto);

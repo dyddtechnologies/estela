@@ -1,6 +1,6 @@
 /**
- * @dyddtechnologies/estela/testing — subpath público de testing (spec §14).
- * Regla (enforzada por dependency-cruiser): NUNCA importa de src/inbound
+ * @dyddtechnologies/estela/testing — subpath publico de testing (spec sec.14).
+ * Rule (enforzada por dependency-cruiser): Never importa de src/inbound
  * ni src/adapters.
  */
 import { awaitFirstMessage } from '../channels/one-shot';
@@ -13,7 +13,7 @@ import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store'
 
 export { MemoryIdempotencyStore };
 
-/** Alias semántico del spec §14 — mismas invariantes que `createMessage`. */
+/** Alias semantico del spec sec.14 — mismas invariants que `createMessage`. */
 export function createTestMessage<T>(
   payload: T,
   headers?: MessageHeadersInit,
@@ -29,8 +29,8 @@ export interface BindFlowOptions {
 }
 
 /**
- * `bindFlow(flow, registry)` (spec §14): asegura error.channel y canal fuente,
- * construye el executor con defaults y lo suscribe al canal fuente.
+ * `bindFlow(flow, registry)` (spec sec.14): asegura error.channel y channel source,
+ * builds el executor con defaults y lo subscribes al channel source.
  */
 export function bindFlow(
   definition: FlowDefinition,
@@ -58,7 +58,7 @@ export function bindFlow(
   return executor;
 }
 
-/** `waitFor(channel, timeout)` (spec §14): primer mensaje del canal o throw. */
+/** `waitFor(channel, timeout)` (spec sec.14): primer message del channel o throw. */
 export async function waitFor(
   registry: ChannelRegistry,
   channel: string,
@@ -71,7 +71,7 @@ export async function waitFor(
   });
 }
 
-/** Helper extra: suscripción de colección para asserts deterministas. */
+/** Helper extra: subscription de coleccion para asserts deterministas. */
 export function collect<T = unknown>(
   registry: ChannelRegistry,
   channel: string,

@@ -21,7 +21,7 @@ export class CreatePolicySkeletonDto {
   quoteId!: string;
 }
 
-/** Endpoints espejo de `quotes/` de ms-asg-core — requestReply vía flows ESTELA. */
+/** Endpoints espejo de `quotes/` de ms-asg-core — requestReply via flows ESTELA. */
 @Controller('insurance')
 @ApiTags('insurance')
 export class InsuranceController {
@@ -29,7 +29,7 @@ export class InsuranceController {
   @InboundRest({ channel: 'insurance.quotes.create', requestReply: true, timeoutMs: 15_000 })
   @ApiBody({ type: CreateQuoteSkeletonDto })
   createQuote(@Body() _dto: CreateQuoteSkeletonDto): void {
-    // El reply lo cierra s12.update-price (terminal → return = auto-reply).
+    // El reply lo cierra s12.update-price (terminal -> return = auto-reply).
   }
 
   @Post('policies')

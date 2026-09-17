@@ -16,7 +16,7 @@ export interface BuiltFlow {
   steps: readonly FlowStep[];
 }
 
-/** Definición declarativa consumida por `forRoot` (spec §6). */
+/** Definicion declarativa consumida por `forRoot` (spec sec.6). */
 export interface FlowDefinition {
   name: string;
   build(): IntegrationFlow;
@@ -30,8 +30,8 @@ export type RouteFn = (
 ) => string | string[] | Promise<string | string[]>;
 
 /**
- * Builder fluido (GoF Builder — spec §6). Acumula steps; `build()` congela.
- * Los flows hablan con canales, no con clases (spec §17.1).
+ * Builder fluido (GoF Builder — spec sec.6). Acumula steps; `build()` congela.
+ * Los flows hablan con channels, no con classes (spec sec.17.1).
  */
 export class IntegrationFlow {
   private readonly steps: FlowStep[] = [];
@@ -100,7 +100,7 @@ export class IntegrationFlow {
     return this;
   }
 
-  /** Sin funciones (plan §9.4) — alimenta `inspect()` y el grafo (Fase 9). */
+  /** Sin functions (plan sec.9.4) — alimenta `inspect()` y el graph (Fase 9). */
   inspect(): { source: string; steps: Record<string, unknown>[] } {
     return { source: this.source, steps: this.steps.map((step) => step.describe()) };
   }

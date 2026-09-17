@@ -25,8 +25,8 @@ export interface RestOutOptions {
 const mapper = new HttpHeaderMapper();
 
 /**
- * REST outbound (spec §9): fetch JSON + headers de traza (tabla §4).
- * `!ok` → throw (el subscriber del canal propaga — awaited §8.2).
+ * REST outbound (spec sec.9): fetch JSON + headers de trace (tabla sec.4).
+ * `!ok` -> throw (el subscriber del channel propaga — awaited sec.8.2).
  */
 export function bindRestOut(
   registry: ChannelRegistry,
@@ -48,7 +48,7 @@ export function bindRestOut(
     if (!response.ok) {
       throw new Error(`restOut ${method} ${options.url} → HTTP ${response.status}`);
     }
-    await response.text(); // drena el body; el resultado útil viaja por canales
+    await response.text(); // drena el body; el resultado util viaja por channels
     return undefined;
   };
   return registry.get(channel).subscribe(handler);

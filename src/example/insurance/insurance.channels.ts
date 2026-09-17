@@ -2,13 +2,13 @@ import { IntegrationFlow, type FlowDefinition } from '../../flow/integration-flo
 import type { ChannelSpec } from '../../channel-factory';
 
 /**
- * Esqueleto ESTELA del dominio SEGUROS (replica ms-asg-core):
- * `quote.service.create()` (12 pasos) y `policy.service.create()` (6 bloques).
- * Cada paso real de ms-asg-core mapea a un canal + activator esqueleto.
+ * Skeleton ESTELA del domain Insurance (replica ms-asg-core):
+ * `quote.service.create()` (12 steps) y `policy.service.create()` (6 blocks).
+ * Cada step real de ms-asg-core mapea a un channel + activator skeleton.
  */
 
 export const INSURANCE_CHANNELS: readonly ChannelSpec[] = [
-  // ---- Quote creation pipeline (quote.service.create §STEPS 1-12) ----
+  // ---- Quote creation pipeline (quote.service.create sec.STEPS 1-12) ----
   { name: 'insurance.quotes.create', type: 'direct' }, // HTTP entry (requestReply)
   { name: 'insurance.quotes.s1.validate-rules', type: 'direct' }, // STEP_1 validateQuoteRules()
   { name: 'insurance.quotes.s2.content-validate', type: 'direct' }, // STEP_2 quoteHandlerService.validate()
@@ -21,9 +21,9 @@ export const INSURANCE_CHANNELS: readonly ChannelSpec[] = [
   { name: 'insurance.quotes.s9.finalizer', type: 'direct' }, // STEP_9 finalizerService.execute()
   { name: 'insurance.quotes.s10.finalizer-status', type: 'direct' }, // STEP_10 saveFinalizerStatus()
   { name: 'insurance.quotes.s11.price', type: 'direct' }, // STEP_11 planService.getPrice() (bloquea si 0)
-  { name: 'insurance.quotes.s12.update-price', type: 'direct' }, // STEP_12 updatePrice() → created
-  { name: 'insurance.quotes.created', type: 'pubsub' }, // evento de dominio: quote lista
-  // ---- Policy creation pipeline (policy.service.create §STEPS 1-6) ----
+  { name: 'insurance.quotes.s12.update-price', type: 'direct' }, // STEP_12 updatePrice() -> created
+  { name: 'insurance.quotes.created', type: 'pubsub' }, // evento de domain: quote lista
+  // ---- Policy creation pipeline (policy.service.create sec.STEPS 1-6) ----
   { name: 'insurance.policies.create', type: 'direct' }, // HTTP entry (requestReply)
   { name: 'insurance.policies.p1.validate-quote', type: 'direct' }, // STEP_1/1B quote no-failed + voucher
   { name: 'insurance.policies.p2.business-validations', type: 'direct' }, // STEP_2 businessValidations()
@@ -31,10 +31,10 @@ export const INSURANCE_CHANNELS: readonly ChannelSpec[] = [
   { name: 'insurance.policies.p4.quote-context', type: 'direct' }, // STEP_4/4A/4B/4C quote + rules
   { name: 'insurance.policies.p5.prepare-data', type: 'direct' }, // STEP_5 quoteSimpleData
   { name: 'insurance.policies.p6.policy-record', type: 'direct' }, // STEP_6+ record + external + billing
-  { name: 'insurance.policies.created', type: 'pubsub' }, // evento de dominio: policy emitida
+  { name: 'insurance.policies.created', type: 'pubsub' }, // evento de domain: policy emitida
 ];
 
-/** El entry delega al primer canal del pipeline; los activators encadenan el resto. */
+/** El entry delega al primer channel del pipeline; los activators chain el rest. */
 export const CreateQuoteFlow: FlowDefinition = {
   name: 'create-quote',
   build: () =>

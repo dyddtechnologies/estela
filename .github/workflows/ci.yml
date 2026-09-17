@@ -16,6 +16,9 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run format:check
+      # Advisory hasta completar la traducción de los 183 comentarios restantes:
+      - run: npm run comments:en
+        continue-on-error: true
 
   test:
     name: test + build (node ${{ matrix.node }})

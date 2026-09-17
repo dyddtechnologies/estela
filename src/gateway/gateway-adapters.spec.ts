@@ -32,7 +32,7 @@ describe('ReplyGateway — test 7 del spec (request/reply, spec §8)', () => {
       { traceId: 't-7' },
     );
     expect(result).toEqual({ persisted: true });
-    expect(registry.list()).toHaveLength(sizeBefore); // leak-free (plan §8.3)
+    expect(registry.list()).toHaveLength(sizeBefore); // leak-free (plan sec.8.3)
   });
 
   it('timeout → ReplyTimeoutError + deregistro en finally', async () => {

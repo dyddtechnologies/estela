@@ -37,7 +37,7 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
 
   afterAll(async () => {
     if (app === undefined) return;
-    await app.close(); // drain de queues (plan §8.6)
+    await app.close(); // drain de queues (plan sec.8.6)
   });
 
   const post = async (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -58,7 +58,7 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
     expect(body.status).toBe('ok');
     expect(body.result.orderId).toBe('ord-A');
     expect(body.result.total).toBe(20);
-    // .reply() default 'current' → payload SIN jumpReplies (spec §6.3); los
+    // .reply() default 'current' -> payload SIN jumpReplies (spec sec.6.3); los
     // jumpReplies viven en headers y se exponen con reply({payload:'jumpMerge'})
     expect(body.result.jumpReplies).toBeUndefined();
     expect(body.headers.traceId).toBeTruthy();
@@ -106,7 +106,7 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
     const response = await post('/orders/fanout', { sku: 'FAN' });
     expect(response.status).toBe(201);
     const body = (await response.json()) as { status: string };
-    expect(body.status).toBe('accepted'); // no espera handlers (spec §5 fanout vía canal)
+    expect(body.status).toBe('accepted'); // no awaits handlers (spec sec.5 fanout via channel)
     await delay(80);
     expect(inventory.calls).toBe(inventoryCallsBefore + 1);
     expect(billing.calls).toBe(billingCallsBefore + 1);

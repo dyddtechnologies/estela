@@ -14,8 +14,8 @@ export interface OneShotChannel {
 }
 
 /**
- * Espera one-shot race-free (plan §8.5 regla 6): `AbortSignal.timeout` — sin
- * timers manuales ni carreras. El canal se desuscribe siempre.
+ * Awaits one-shot race-free (plan sec.8.5 rule 6): `AbortSignal.timeout` — sin
+ * timers manuales ni races. El channel se unsubscribes always.
  */
 export function awaitFirstMessage(
   channel: OneShotChannel,

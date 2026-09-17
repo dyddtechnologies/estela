@@ -44,7 +44,7 @@ describe('QueueChannel (spec §5, plan §8.5)', () => {
       handled = true;
     });
     await channel.send(createMessage('p'));
-    expect(handled).toBe(false); // aún bufferizado / pump pendiente
+    expect(handled).toBe(false); // aun bufferizado / pump pending
     release();
     await delay(30);
     expect(handled).toBe(true);

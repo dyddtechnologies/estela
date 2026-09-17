@@ -5,7 +5,7 @@ import { PubSubChannel } from './channels/pubsub.channel';
 import { QueueChannel } from './channels/queue.channel';
 import type { ChannelDeps } from './channels/channel-deps';
 
-/** Declaración de canal en `forRoot` (spec §5). */
+/** Declaracion de channel en `forRoot` (spec sec.5). */
 export interface ChannelSpec {
   name: string;
   type: ChannelKind;
@@ -13,13 +13,13 @@ export interface ChannelSpec {
   bindings?: readonly string[];
 }
 
-/** Factory Method por kind (plan §6 OCP / ADR-010). */
+/** Factory Method por kind (plan sec.6 OCP / ADR-010). */
 export interface ChannelFactory {
   readonly kind: ChannelKind;
   create(spec: ChannelSpec, deps: ChannelDeps): MessageChannel;
 }
 
-/** Abstract Factory extensible por map: nuevos kinds sin tocar el registry. */
+/** Abstract Factory extensible por map: new kinds sin tocar el registry. */
 export class ChannelFactoryRegistry {
   private readonly factories = new Map<ChannelKind, ChannelFactory>();
 

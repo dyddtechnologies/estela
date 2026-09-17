@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 /**
- * Dominio puro del mensaje (spec §4).
- * Reglas del plan §9.1: los helpers NUNCA mutan el mensaje de entrada —
- * siempre devuelven copias (Prototype, GoF).
+ * Domain puro del message (spec sec.4).
+ * Rules del plan sec.9.1: los helpers Never mutan el message de input —
+ * always devuelven copias (Prototype, GoF).
  */
 
-/** Un salto recorrido por el mensaje (spec §4). */
+/** Un hop traversed por el message (spec sec.4). */
 export interface HistoryHop {
   channel: string;
   component?: string;
@@ -46,7 +46,7 @@ export interface IntegrationMessage<T = unknown> {
   headers: MessageHeaders;
 }
 
-/** Init parcial para `createMessage`; claves desconocidas pasan como headers custom. */
+/** Init parcial para `createMessage`; keys desconocidas pasan como headers custom. */
 export interface MessageHeadersInit {
   id?: string;
   timestamp?: number;
@@ -67,21 +67,21 @@ export interface MessageHeadersInit {
 }
 
 /**
- * Precedencia del `replyChannel` del hop (plan §8.1 — obligatoria):
- * - `'inherit'`: copia el del padre (to/route — el activator destino puede cerrar el inbound).
- * - `'none'`: sin reply (wireTap/fanout/publish — nunca cierra el inbound).
- * - `string`: canal efímero propio (jump → `reply.<uuid>`).
+ * Precedencia del `replyChannel` del hop (plan sec.8.1 — obligatoria):
+ * - `'inherit'`: copy el del padre (to/route — el activator destino puede cerrar el inbound).
+ * - `'none'`: sin reply (wireTap/fanout/publish — never cierra el inbound).
+ * - `string`: channel efimero propio (jump -> `reply.<uuid>`).
  */
 export type ReplyHopOption = 'inherit' | 'none' | (string & {});
 
-/** Marcador interno del hop efímero de jump (ADR-014) — informativo, no público. */
+/** Marcador internal del hop efimero de jump (ADR-014) — informativo, no publico. */
 export const JUMP_REPLY_HEADER = 'x-integration-jump-reply';
 
 export interface NextHopOptions {
   reply?: ReplyHopOption;
 }
 
-/** ID único; `crypto.randomUUID` con fallback simple para entornos degradados. */
+/** ID unico; `crypto.randomUUID` con fallback simple para entornos degradados. */
 export function newId(): string {
   try {
     return randomUUID();
@@ -104,7 +104,7 @@ function makeHop(hop: HistoryHopInput): HistoryHop {
 
 /**
  * Genera `id`, `traceId` (fallback = id), `spanId`, `correlationId` (fallback = id)
- * e `history: []` (spec §4). Headers provistos tienen precedencia; las claves
+ * e `history: []` (spec sec.4). Headers provistos tienen precedencia; las keys
  * desconocidas se copian como headers custom.
  */
 export function createMessage<T>(payload: T, init?: MessageHeadersInit): IntegrationMessage<T> {
@@ -135,12 +135,12 @@ export function createMessage<T>(payload: T, init?: MessageHeadersInit): Integra
   return { payload, headers };
 }
 
-/** WireTap: misma id; history copiado a un array nuevo. */
+/** WireTap: same id; history copied a un array new. */
 export function copyMessage<T>(msg: IntegrationMessage<T>): IntegrationMessage<T> {
   return { payload: msg.payload, headers: { ...msg.headers, history: [...msg.headers.history] } };
 }
 
-/** Anexa un hop conservando la id (uso del dispatcher al pasar por un canal). */
+/** Anexa un hop conservando la id (uso del dispatcher al pasar por un channel). */
 export function recordHop<T>(
   msg: IntegrationMessage<T>,
   hop: HistoryHopInput,
@@ -152,10 +152,10 @@ export function recordHop<T>(
 }
 
 /**
- * Nuevo hop del pipeline: conserva `traceId`, `correlationId`, `idempotencyKey`,
- * `jumpReplies` (y extras); nuevo `id`/`spanId`; `causationId = prev.id`;
- * `parentSpanId = prev.spanId`; append a history (spec §4).
- * El `replyChannel` se decide por `options.reply` (plan §8.1).
+ * New hop del pipeline: keeps `traceId`, `correlationId`, `idempotencyKey`,
+ * `jumpReplies` (y extras); new `id`/`spanId`; `causationId = prev.id`;
+ * `parentSpanId = prev.spanId`; append a history (spec sec.4).
+ * El `replyChannel` se decide por `options.reply` (plan sec.8.1).
  */
 export function nextHop<T>(
   msg: IntegrationMessage<T>,

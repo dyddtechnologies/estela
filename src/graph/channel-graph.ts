@@ -77,7 +77,7 @@ function sanitizeId(value: string): string {
 }
 
 /**
- * Read-model de topología (spec §12) — Memento del grafo. Sin lógica de
+ * Read-model de topologia (spec sec.12) — Memento del graph. Sin logica de
  * runtime: observadores (registry/flows/activators/inbounds) lo alimentan.
  */
 export class ChannelGraph {

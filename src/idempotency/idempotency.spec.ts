@@ -16,7 +16,7 @@ describe('MemoryIdempotencyStore (spec §10)', () => {
     expect(await store.begin('flow:x', 'k1', 60_000)).toBe(true);
     expect(await store.begin('flow:x', 'k1', 60_000)).toBe(false);
     await store.complete('flow:x', 'k1', { completed: true });
-    expect(await store.begin('flow:x', 'k1', 60_000)).toBe(false); // vivo = duplicado
+    expect(await store.begin('flow:x', 'k1', 60_000)).toBe(false); // vivo = duplicate
     const record = await store.get('flow:x', 'k1');
     expect(record?.status).toBe('completed');
     expect(record?.result).toEqual({ completed: true });

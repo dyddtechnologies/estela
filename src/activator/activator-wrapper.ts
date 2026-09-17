@@ -20,8 +20,8 @@ export interface ActivatorBinding {
   metadata: ActivatorMetadata;
 }
 
-/** Lee los bindings decorados de una jerarquía de prototipos (Discovery, Fase 10). */
-// Reflexión sobre prototipos — falsos positivos de any/unknown aquí.
+/** Lee los bindings decorados de una jerarquia de prototipos (Discovery, Fase 10). */
+// Reflexion sobre prototipos — falsos positivos de any/unknown aqui.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unnecessary-type-assertion */
 export function discoverActivators(instances: readonly object[]): ActivatorBinding[] {
   const bindings: ActivatorBinding[] = [];
@@ -50,7 +50,7 @@ export function subscribeActivators(
   return bindings.map((binding) => subscribeActivator(binding, deps));
 }
 
-/** Suscribe un binding: el canal define group/routingKey (spec §7.1). */
+/** Subscribes un binding: el channel define group/routingKey (spec sec.7.1). */
 export function subscribeActivator(binding: ActivatorBinding, deps: ActivatorDeps): Unsubscribe {
   const channel = deps.registry.get(binding.metadata.channel);
   const className = binding.instance.constructor.name;
@@ -65,10 +65,10 @@ export function subscribeActivator(binding: ActivatorBinding, deps: ActivatorDep
 }
 
 /**
- * Template Method (spec §7.1): trace.run → idem.begin(scope activator) → método →
- * `return !== undefined` + `replyChannel` → responder (jump efímero incluido —
- * protocolo jump; ver plan §9.5 corregido). Duplicado + cachedResult → reenvía
- * cache. Error → idem.fail + error.channel + rethrow (§8.2 awaited).
+ * Template Method (spec sec.7.1): trace.run -> idem.begin(scope activator) -> method ->
+ * `return !== undefined` + `replyChannel` -> responder (jump efimero incluido —
+ * protocolo jump; ver plan sec.9.5 corregido). Duplicate + cachedResult -> forward
+ * cache. Error -> idem.fail + error.channel + rethrow (sec.8.2 awaited).
  */
 export async function invokeActivator(
   binding: ActivatorBinding,
@@ -84,7 +84,7 @@ export async function invokeActivator(
     const acquired = await idem.begin(scope, key, deps.idempotencyTtlMs);
     if (!acquired) {
       await resendCachedResult(scope, key, msg, deps);
-      return; // duplicado silencioso (spec §7.1 paso 6)
+      return; // duplicate silent (spec sec.7.1 step 6)
     }
   }
   const method = (
@@ -145,7 +145,7 @@ async function resendCachedResult(
     record?.result !== undefined && 'cachedResult' in record.result
       ? record.result.cachedResult
       : undefined;
-  if (cached === undefined) return; // sin cache → silencio (spec §7.1)
+  if (cached === undefined) return; // sin cache -> silence (spec sec.7.1)
   await replyToCaller(cached, msg, deps.registry);
 }
 

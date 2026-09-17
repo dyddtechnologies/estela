@@ -1,23 +1,23 @@
 /**
- * @dyddtechnologies/estela — barrel público.
+ * @dyddtechnologies/estela — barrel publico.
  *
  * Fase 0 (scaffolding): placeholder compilable.
- * Los exports reales llegan por fase (PLAN-arquitectura.md §10):
- * Fase 1 → message/trace · Fase 2 → canales · Fase 3 → registry/dispatcher ·
- * Fase 4 → flow · Fase 5 → idempotencia · Fase 6 → decoradores ·
- * Fase 7 → inbound · Fase 8 → gateway/adapters · Fase 9 → grafo ·
- * Fase 10 → IntegrationModule.
+ * Los exports reales llegan por fase (PLAN-arquitectura.md sec.10):
+ * Fase 1 -> message/trace · Fase 2 -> channels · Fase 3 -> registry/dispatcher ·
+ * Fase 4 -> flow · Fase 5 -> idempotency · Fase 6 -> decoradores ·
+ * Fase 7 -> inbound · Fase 8 -> gateway/adapters · Fase 9 -> graph ·
+ * Fase 10 -> IntegrationModule.
  *
- * Regla (enforzada por dependency-cruiser): este archivo NUNCA importa
+ * Rule (enforzada por dependency-cruiser): este archivo Never importa
  * amqplib ni @grpc/grpc-js, ni directa ni transitivamente.
  */
 export const INTEGRATION_LIBRARY_VERSION = '0.1.0' as const;
 
-// ---------- Fase 1: kernel de mensaje + traza ----------
+// ---------- Fase 1: kernel de message + trace ----------
 export * from './message';
 export * from './trace/trace-context';
 
-// ---------- Fase 2: canales ----------
+// ---------- Fase 2: channels ----------
 export * from './channel';
 export * from './channels/channel-deps';
 export * from './channels/glob';
@@ -36,7 +36,7 @@ export * from './flow/flow-step';
 export * from './flow/integration-flow';
 export * from './flow/flow-executor';
 
-// ---------- Fase 5: idempotencia ----------
+// ---------- Fase 5: idempotency ----------
 export * from './idempotency/idempotency-store';
 export * from './idempotency/memory-idempotency.store';
 export * from './idempotency/noop-idempotency.store';
@@ -61,9 +61,9 @@ export * from './adapters/rest.adapter';
 export * from './adapters/grpc.adapter';
 export * from './adapters/rabbit.adapter';
 
-// ---------- Fase 9: grafo ----------
+// ---------- Fase 9: graph ----------
 export * from './graph/channel-graph';
 export * from './graph/channel-graph.controller';
 
-// ---------- Fase 10: módulo raíz ----------
+// ---------- Fase 10: modulo root ----------
 export * from './integration.module';

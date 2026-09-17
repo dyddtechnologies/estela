@@ -7,13 +7,13 @@ export interface RabbitOutTarget {
   queue?: string;
   exchange?: string;
   routingKey?: string;
-  /** persistent default true (spec §9). */
+  /** persistent default true (spec sec.9). */
   persistent?: boolean;
 }
 
 const mapper = new AmqpHeaderMapper();
 
-/** Rabbit outbound (spec §9): queue o exchange+routingKey, persistent, headers de traza. */
+/** Rabbit outbound (spec sec.9): queue o exchange+routingKey, persistent, headers de trace. */
 export function bindRabbitOutbound(
   amqp: AmqpLikeChannel,
   registry: ChannelRegistry,

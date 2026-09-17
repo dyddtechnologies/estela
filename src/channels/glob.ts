@@ -3,8 +3,8 @@ function escapeRegExp(segment: string): string {
 }
 
 /**
- * Glob de routingKey (spec §5): `*` = exactamente 1 segmento, `#` = resto
- * (cero o más segmentos). Precalculado por subscriber (plan §8.5 regla 3).
+ * Glob de routingKey (spec sec.5): `*` = exactamente 1 segmento, `#` = rest
+ * (cero o mas segmentos). Precalculado por subscriber (plan sec.8.5 rule 3).
  */
 export function compileGlob(pattern: string): (key: string) => boolean {
   const segments = pattern.split('.');

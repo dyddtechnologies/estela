@@ -12,7 +12,7 @@ import type { IntegrationMessage, MessageHeadersInit } from './message';
 import type { TraceContext } from './trace/trace-context';
 
 /**
- * Mediator (GoF): catálogo de canales + API pública de envío (spec §5).
+ * Mediator (GoF): catalogo de channels + API publishes de envio (spec sec.5).
  * `ChannelRegistry.send/sendMessage` delegan en `MessageDispatcher` (ADR-011).
  */
 export class ChannelRegistry implements ChannelResolver {
@@ -30,7 +30,7 @@ export class ChannelRegistry implements ChannelResolver {
     return this.deps.trace;
   }
 
-  /** Crea vía factory y registra. `deps.resolver` apunta al registry (bindings). */
+  /** Creates via factory y registra. `deps.resolver` apunta al registry (bindings). */
   create(spec: ChannelSpec): MessageChannel {
     const channel = this.factories.create(spec, { ...this.deps, resolver: this });
     return this.register(channel);
@@ -38,7 +38,7 @@ export class ChannelRegistry implements ChannelResolver {
 
   register(channel: MessageChannel): MessageChannel {
     if (this.channels.has(channel.name)) {
-      throw new ChannelError(`canal duplicado: '${channel.name}'`);
+      throw new ChannelError(`channel duplicate: '${channel.name}'`);
     }
     this.channels.set(channel.name, channel);
     return channel;
@@ -58,7 +58,7 @@ export class ChannelRegistry implements ChannelResolver {
     this.channels.delete(name);
   }
 
-  /** Helper spec §5: crea o devuelve el fanout con los bindings dados. */
+  /** Helper spec sec.5: creates o devuelve el fanout con los bindings dados. */
   fanout(name: string, bindings: readonly string[] = []): FanoutChannel {
     const existing = this.tryGet(name);
     if (existing !== undefined) return existing as FanoutChannel;
@@ -69,7 +69,7 @@ export class ChannelRegistry implements ChannelResolver {
     return [...this.channels.values()];
   }
 
-  // ---------- API pública de envío (spec §5) ----------
+  // ---------- API publishes de envio (spec sec.5) ----------
 
   send(channelName: string, payload: unknown, headers?: MessageHeadersInit): Promise<void> {
     return this.dispatcher.send(channelName, payload, headers);

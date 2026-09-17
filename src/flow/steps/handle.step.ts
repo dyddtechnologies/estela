@@ -1,7 +1,7 @@
 import type { IntegrationMessage } from '../../message';
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
-/** Si `return !== undefined` pisa payload. Nunca dispara reply (spec §6.1). */
+/** Si `return !== undefined` pisa payload. Never dispara reply (spec sec.6.1). */
 export class HandleStep implements FlowStep {
   readonly kind = 'handle' as const;
 

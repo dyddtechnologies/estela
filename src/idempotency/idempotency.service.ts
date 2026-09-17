@@ -6,13 +6,13 @@ import { NoopIdempotencyStore } from './noop-idempotency.store';
 export interface IdempotencyOptions {
   enabled?: boolean; // default true
   ttlMs?: number; // default 1h
-  store?: IdempotencyStore; // default MemoryIdempotencyStore (spec §10)
+  store?: IdempotencyStore; // default MemoryIdempotencyStore (spec sec.10)
 }
 
 /**
- * Política de idempotencia (SRP): scopes, enable/disable, TTL default.
- * NO almacena — delega en el `IdempotencyStore` (D, plan §6).
- * Sin `idempotencyKey` en el mensaje el executor ni siquiera llama aquí.
+ * Politica de idempotency (SRP): scopes, enable/disable, TTL default.
+ * NO almacena — delega en el `IdempotencyStore` (D, plan sec.6).
+ * Sin `idempotencyKey` en el message el executor ni siquiera calls aqui.
  */
 export class IdempotencyService implements FlowIdempotencyPort {
   private readonly store: IdempotencyStore;

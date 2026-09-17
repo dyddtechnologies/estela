@@ -34,7 +34,7 @@ import {
   type InboundSpec,
 } from './inbound.types';
 
-/** Puerto request/reply — implementado por ReplyGateway en Fase 8. */
+/** Port request/reply — implementado por ReplyGateway en Fase 8. */
 export interface RequestReplyPort {
   sendAndReceive(
     channel: string,
@@ -52,7 +52,7 @@ export interface InboundInterceptorDeps {
   strategies?: readonly InboundTransportStrategy[];
 }
 
-/** Token DI del bundle de deps — resuelve en cualquier módulo (global). */
+/** Token DI del bundle de deps — resuelve en cualquier modulo (global). */
 export const INBOUND_DEPS = 'INTEGRATION_INBOUND_DEPS';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -60,10 +60,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * NestInterceptor (spec §7.2): ejecuta el handler (pipes/guards intactos),
- * extrae payload + headers crudos, mapea trazas y despacha:
- * requestReply → ReplyGateway (`{status:'ok'}`) | si no → canal (`{status:'accepted'}`)
- * | replay de idempotencia → `{status:'duplicate'}`.
+ * NestInterceptor (spec sec.7.2): executes el handler (pipes/guards intactos),
+ * extrae payload + headers crudos, mapea tracing y despacha:
+ * requestReply -> ReplyGateway (`{status:'ok'}`) | si no -> channel (`{status:'accepted'}`)
+ * | replay de idempotency -> `{status:'duplicate'}`.
  */
 @Injectable()
 export class InboundInterceptor implements NestInterceptor {
@@ -189,7 +189,7 @@ export class InboundInterceptor implements NestInterceptor {
   }
 
   private acceptedWithMerge(accepted: InboundAcceptedResponse, handlerResult: unknown): unknown {
-    // "+ merge" (spec §7.2): los campos canónicos del accepted ganan
+    // "+ merge" (spec sec.7.2): los campos canonical del accepted win
     if (isPlainObject(handlerResult)) return Object.assign({}, handlerResult, accepted);
     return accepted;
   }

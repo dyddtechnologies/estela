@@ -1,7 +1,7 @@
 import type { MessageHeaders, MessageHeadersInit } from '../message';
 
 /**
- * Tabla de headers de protocolo (spec §4):
+ * Tabla de headers de protocolo (spec sec.4):
  * x-trace-id/x-span-id/x-parent-span-id/x-correlation-id/x-causation-id +
  * idempotency-key|x-idempotency-key.
  */
@@ -79,7 +79,7 @@ export class HttpHeaderMapper implements HeaderMapper<RawRecord> {
   }
 }
 
-/** gRPC metadata (claves lower-case, valores string|Buffer|array). */
+/** gRPC metadata (keys lower-case, values string|Buffer|array). */
 export class GrpcHeaderMapper implements HeaderMapper<RawRecord> {
   readonly protocol = 'grpc';
   mapIn(raw: RawRecord): MessageHeadersInit {
@@ -90,7 +90,7 @@ export class GrpcHeaderMapper implements HeaderMapper<RawRecord> {
   }
 }
 
-/** AMQP properties.headers (valores Buffer|string). */
+/** AMQP properties.headers (values Buffer|string). */
 export class AmqpHeaderMapper implements HeaderMapper<RawRecord> {
   readonly protocol = 'amqp';
   mapIn(raw: RawRecord): MessageHeadersInit {
@@ -105,11 +105,11 @@ export interface GraphqlRawSource {
   /** req.headers cuando el transporte subyacente es HTTP. */
   req?: { headers?: RawRecord };
   headers?: RawRecord;
-  /** extensions con claves de traza planas (ADR-017). */
+  /** extensions con keys de trace planas (ADR-017). */
   extensions?: RawRecord;
 }
 
-/** GraphQL: headers HTTP si existen; si no, `extensions` con claves planas. */
+/** GraphQL: headers HTTP si existen; si no, `extensions` con keys planas. */
 export class GraphQLHeaderMapper implements HeaderMapper<GraphqlRawSource> {
   readonly protocol = 'graphql';
   mapIn(raw: GraphqlRawSource): MessageHeadersInit {

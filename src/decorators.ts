@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 
-/** Metadatos de activators (spec §7.1). Único punto que toca APIs de metadata. */
+/** Metadatos de activators (spec sec.7.1). Unico punto que toca APIs de metadata. */
 export const ACTIVATOR_METADATA = 'integration:activator';
 
 export type ActivatorKind = 'service-activator' | 'pubsub';
@@ -29,12 +29,12 @@ function defineActivator(
   };
 }
 
-/** `@ServiceActivator(channel, { group?, routingKey? })` (spec §7.1). */
+/** `@ServiceActivator(channel, { group?, routingKey? })` (spec sec.7.1). */
 export function ServiceActivator(channel: string, options: ActivatorOptions = {}): MethodDecorator {
   return defineActivator('service-activator', channel, options);
 }
 
-/** Alias semántico de pubsub (spec §7.1). */
+/** Alias semantico de pubsub (spec sec.7.1). */
 export function PubSub(channel: string, options: ActivatorOptions = {}): MethodDecorator {
   return defineActivator('pubsub', channel, options);
 }

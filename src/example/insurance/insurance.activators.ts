@@ -4,10 +4,10 @@ import type { IntegrationMessage } from '../../message';
 import { ChannelRegistry } from '../../channel-registry';
 
 /**
- * Esqueleto 1:1 de `quote.service.create()` (ms-asg-core, 5804 líneas → 12 steps).
- * Cada activator = un STEP_N del original. Lógica real: pendiente de migración.
- * Los pasos intermedios reenvían el MISMO mensaje (`sendMessage` preserva
- * replyChannel/trace); el paso terminal retorna → auto-reply al HTTP (spec §7.1).
+ * Skeleton 1:1 de `quote.service.create()` (ms-asg-core, 5804 lines -> 12 steps).
+ * Cada activator = un STEP_N del original. Logica real: pending de migration.
+ * Los steps intermedios forward el Same message (`sendMessage` preserves
+ * replyChannel/trace); el step terminal retorna -> auto-reply al HTTP (spec sec.7.1).
  */
 @Injectable()
 export class QuoteCreationActivators {
@@ -68,7 +68,7 @@ export class QuoteCreationActivators {
     await this.forward('insurance.quotes.s9.finalizer', msg);
   }
 
-  /** STEP_9 — ms-asg-core: `finalizerService.execute(merged, QUOTE_FINALIZER_TARGET, ...)` (FAILED → throw). */
+  /** STEP_9 — ms-asg-core: `finalizerService.execute(merged, QUOTE_FINALIZER_TARGET, ...)` (FAILED -> throw). */
   @ServiceActivator('insurance.quotes.s9.finalizer')
   async s9Finalizer(_payload: unknown, msg: IntegrationMessage): Promise<void> {
     await this.forward('insurance.quotes.s10.finalizer-status', msg);
@@ -80,13 +80,13 @@ export class QuoteCreationActivators {
     await this.forward('insurance.quotes.s11.price', msg);
   }
 
-  /** STEP_11 — ms-asg-core: `planService.getPrice(...)` por edad; **precio 0 → softDelete + throw**. */
+  /** STEP_11 — ms-asg-core: `planService.getPrice(...)` por edad; **precio 0 -> softDelete + throw**. */
   @ServiceActivator('insurance.quotes.s11.price')
   async s11Price(_payload: unknown, msg: IntegrationMessage): Promise<void> {
     await this.forward('insurance.quotes.s12.update-price', msg);
   }
 
-  /** STEP_12 — ms-asg-core: `updatePrice(merged.id, lastPrice)`. Terminal: publica + auto-reply HTTP. */
+  /** STEP_12 — ms-asg-core: `updatePrice(merged.id, lastPrice)`. Terminal: publishes + auto-reply HTTP. */
   @ServiceActivator('insurance.quotes.s12.update-price')
   async s12UpdatePrice(payload: unknown, msg: IntegrationMessage): Promise<unknown> {
     const response = { ...(payload as Record<string, unknown>), status: 'QUOTED' };
@@ -100,7 +100,7 @@ export class QuoteCreationActivators {
 }
 
 /**
- * Esqueleto 1:1 de `policy.service.create()` (ms-asg-core, 2223 líneas → 6 bloques).
+ * Skeleton 1:1 de `policy.service.create()` (ms-asg-core, 2223 lines -> 6 blocks).
  */
 @Injectable()
 export class PolicyCreationActivators {

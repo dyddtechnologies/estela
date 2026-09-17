@@ -23,9 +23,9 @@ interface LocalSubscriber {
 }
 
 /**
- * Composite (GoF): copia a bindings (otros canales, awaited) + subscribers
- * locales; sin filtro (spec §5, §17.3). Contexto reconstruido por destino;
- * cycle guard por binding (plan §8.6, ADR-019).
+ * Composite (GoF): copy a bindings (otros channels, awaited) + subscribers
+ * locales; sin filtro (spec sec.5, sec.17.3). Contexto reconstruido por destino;
+ * cycle guard por binding (plan sec.8.6, ADR-019).
  */
 export class FanoutChannel implements MessageChannel {
   readonly kind: ChannelKind = 'fanout';
@@ -46,7 +46,7 @@ export class FanoutChannel implements MessageChannel {
     this.bindingsList = options?.bindings ?? [];
   }
 
-  /** Bindings declarados — alimenta el grafo (plan §9.9). */
+  /** Bindings declared — alimenta el graph (plan sec.9.9). */
   get bindings(): readonly string[] {
     return this.bindingsList;
   }

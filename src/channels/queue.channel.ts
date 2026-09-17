@@ -21,10 +21,10 @@ const yieldToEventLoop = (): Promise<void> =>
   });
 
 /**
- * Buffer FIFO + round-robin con capacity (spec §5, plan §8.5 regla 5).
- * `send` resuelve al bufferizar (no espera handlers); el pump cede el event
- * loop con `setImmediate`. Overflow → `CapacityExceededError` (nunca drop
- * silencioso). `close()` hace drain (shutdown-safe, plan §8.6).
+ * Buffer FIFO + round-robin con capacity (spec sec.5, plan sec.8.5 rule 5).
+ * `send` resuelve al bufferizar (no awaits handlers); el pump cede el event
+ * loop con `setImmediate`. Overflow -> `CapacityExceededError` (never drop
+ * silent). `close()` hace drain (shutdown-safe, plan sec.8.6).
  */
 export class QueueChannel implements MessageChannel {
   readonly kind: ChannelKind = 'queue';
@@ -64,8 +64,8 @@ export class QueueChannel implements MessageChannel {
 
   async close(): Promise<void> {
     this.closed = true;
-    // Drain determinista: el pump normal se detiene con `closed`; este loop
-    // procesa el remanente respetando FIFO y round-robin.
+    // Drain deterministic: el pump normal se stops con `closed`; este loop
+    // processes el remainder respecting FIFO y round-robin.
     while (this.buffer.length > 0 && this.consumers.length > 0) {
       await this.processNext();
     }

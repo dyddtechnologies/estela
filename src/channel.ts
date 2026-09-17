@@ -3,8 +3,8 @@ import type { IntegrationMessage } from './message';
 export type { IntegrationMessage };
 
 /**
- * Dominio puro de canales (spec §5). Sin dependencias npm (enforzado por
- * dependency-cruiser): solo tipos del mensaje y errores de dominio.
+ * Domain puro de channels (spec sec.5). Sin dependencies npm (enforced por
+ * dependency-cruiser): solo tipos del message y errores de domain.
  */
 
 export type ChannelKind = 'direct' | 'queue' | 'pubsub' | 'fanout';
@@ -23,16 +23,16 @@ export interface MessageChannel {
   readonly kind: ChannelKind;
   send(msg: IntegrationMessage): Promise<void>;
   subscribe(handler: MessageHandlerFn, options?: SubscribeOptions): Unsubscribe;
-  /** Shutdown limpio (drain); opcional — ver plan §8.6. */
+  /** Shutdown limpio (drain); opcional — ver plan sec.8.6. */
   close?(): Promise<void>;
 }
 
-/** Puerto de resolución de canales (lo implementa ChannelRegistry en Fase 3). */
+/** Port de resolution de channels (lo implementa ChannelRegistry en Fase 3). */
 export interface ChannelResolver {
   get(name: string): MessageChannel | undefined;
 }
 
-// ---------- Errores de dominio (plan §8.2) ----------
+// ---------- Errores de domain (plan sec.8.2) ----------
 
 export class ChannelError extends Error {
   constructor(message: string) {
@@ -61,15 +61,15 @@ export class CapacityExceededError extends ChannelError {
 
 export class FanoutCycleError extends ChannelError {}
 
-// ---------- Cycle guard (plan §8.6 / ADR-019) ----------
+// ---------- Cycle guard (plan sec.8.6 / ADR-019) ----------
 
 export const MAX_HOP_DEPTH = 50;
 
 /**
  * Verifica ANTES de despachar un fanout hacia `targetChannel`:
  * - profundidad de history bajo `MAX_HOP_DEPTH`;
- * - `targetChannel` no aparezca ya 2+ veces (un tercer cruce = ciclo A↔B).
- * Sin esto, dos fanouts enlazados mutuamente = loop infinito.
+ * - `targetChannel` no aparezca ya 2+ veces (un tercer cruce = cycle A<->B).
+ * Sin esto, dos fanouts linked mutuamente = loop infinite.
  */
 export function assertNoFanoutCycle(msg: IntegrationMessage, targetChannel: string): void {
   const depth = msg.headers.history.length + 1;

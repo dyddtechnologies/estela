@@ -8,7 +8,7 @@ const mapper = new GrpcHeaderMapper();
 
 export type GrpcStubFn = (payload: unknown, metadata: Record<string, string>) => unknown;
 
-/** gRPC outbound (spec §9): stub inyectado — cero imports de @grpc/grpc-js. */
+/** gRPC outbound (spec sec.9): stub inyectado — cero imports de @grpc/grpc-js. */
 export function bindGrpcOut(
   registry: ChannelRegistry,
   fromChannel: string,
@@ -37,7 +37,7 @@ export interface GrpcInboundDeps {
   defaultTimeoutMs?: number;
 }
 
-/** `grpcIn.handleInbound(channel, data, metadata, requestReply?)` — spec §9. */
+/** `grpcIn.handleInbound(channel, data, metadata, requestReply?)` — spec sec.9. */
 export async function handleGrpcInbound(
   deps: GrpcInboundDeps,
   channel: string,

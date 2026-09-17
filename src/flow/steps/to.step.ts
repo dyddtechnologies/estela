@@ -1,7 +1,7 @@
 import { nextHop } from '../../message';
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
-/** `nextHop(..., { reply: 'inherit' })` + send + TERMINA el pipeline (spec §6.2). */
+/** `nextHop(..., { reply: 'inherit' })` + send + TERMINA el pipeline (spec sec.6.2). */
 export class ToStep implements FlowStep {
   readonly kind = 'to' as const;
 

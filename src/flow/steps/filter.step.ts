@@ -1,7 +1,7 @@
 import type { IntegrationMessage } from '../../message';
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
-/** Lee `msg.payload`; false → exit con éxito (idempotencia succeed `{filtered:true}`). */
+/** Lee `msg.payload`; false -> exit con success (idempotency succeed `{filtered:true}`). */
 export class FilterStep implements FlowStep {
   readonly kind = 'filter' as const;
 

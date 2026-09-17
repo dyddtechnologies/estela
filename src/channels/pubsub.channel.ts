@@ -17,9 +17,9 @@ interface Subscriber {
 }
 
 /**
- * Broadcast con glob `*`/`#` y grupos round-robin (spec §5, plan §8.5 regla 3).
- * Dispatch `Promise.allSettled`: el fallo de un subscriber no afecta a los
- * demás y se reporta por `deps.onError` — nunca tumba el send.
+ * Broadcast con glob `*`/`#` y grupos round-robin (spec sec.5, plan sec.8.5 rule 3).
+ * Dispatch `Promise.allSettled`: el failure de un subscriber no afecta a los
+ * demas y se reporta por `deps.onError` — never tumba el send.
  */
 export class PubSubChannel implements MessageChannel {
   readonly kind: ChannelKind = 'pubsub';

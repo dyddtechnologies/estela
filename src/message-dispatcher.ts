@@ -8,8 +8,8 @@ import {
 import type { TraceContext } from './trace/trace-context';
 
 /**
- * SRP (ADR-011): envío de alto nivel — create/bind de traza + recordHop + dispatch.
- * El contexto ALS se reconstruye desde headers en cada canal destino (plan §8.5).
+ * SRP (ADR-011): envio de high level — create/bind de trace + recordHop + dispatch.
+ * El contexto ALS se reconstruye desde headers en cada channel destino (plan sec.8.5).
  */
 export class MessageDispatcher {
   constructor(

@@ -84,7 +84,7 @@ describe('HeaderMappers — tabla spec §4', () => {
     expect(out['x-correlation-id']).toBe('c-3');
     expect(out['idempotency-key']).toBe('k-3');
     expect(out['x-span-id']).toBe(headers.spanId); // generado por createMessage
-    expect(out['x-parent-span-id']).toBeUndefined(); // ausente → omitido
+    expect(out['x-parent-span-id']).toBeUndefined(); // ausente -> omitido
   });
 
   it('Amqp: valores Buffer → string', () => {
@@ -252,7 +252,7 @@ describe('InboundInterceptor — test 10 del spec', () => {
     expect(response.status).toBe('accepted');
     expect(response.traceId).toBe('t-10');
     expect(response.id).toBeTruthy();
-    expect(received).toEqual([]); // aún en vuelo — accepted no espera (spec test 10)
+    expect(received).toEqual([]); // aun en flight — accepted no awaits (spec test 10)
     await delay(60);
     expect(received).toEqual([{ orderId: 'o-1' }]);
   });
@@ -289,7 +289,7 @@ describe('InboundInterceptor — test 10 del spec', () => {
     expect(second.idempotencyKey).toBe('k-1');
     expect(second.replayed).toBe(true);
     await delay(60);
-    expect(received).toEqual([{ orderId: 'o-2' }]); // una sola entrega
+    expect(received).toEqual([{ orderId: 'o-2' }]); // una sola delivery
   });
 
   it('requestReply:true sin gateway → InboundError explícito (Fase 8 lo cierra)', async () => {

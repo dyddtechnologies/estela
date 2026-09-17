@@ -1,7 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 
 /**
- * DTOs del envelope inbound para Swagger (spec §7.3). El body lo documenta el
+ * DTOs del envelope inbound para Swagger (spec sec.7.3). El body lo documenta el
  * consumidor con @ApiBody + su DTO.
  */
 export class InboundAcceptedDto {
@@ -59,13 +59,13 @@ export interface SetupIntegrationSwaggerOptions {
   title?: string;
   description?: string;
   version?: string;
-  /** default '/docs' — solo se monta si el consumidor llama (spec §7.3). */
+  /** default '/docs' — solo se monta si el consumidor calls (spec sec.7.3). */
   path?: string;
 }
 
 /**
- * Registra extraModels + tags del grafo y monta Swagger UI **solo si** el
- * consumidor lo llama (spec §15/§7.3).
+ * Registra extraModels + tags del graph y monta Swagger UI **solo si** el
+ * consumidor lo calls (spec sec.15/sec.7.3).
  */
 export function setupIntegrationSwagger(
   app: object,

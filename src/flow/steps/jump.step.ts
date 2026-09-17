@@ -13,8 +13,8 @@ import { reportFireAndForget } from './forget';
 const DEFAULT_JUMP_TIMEOUT_MS = 10_000;
 
 /**
- * Jump: reply efímero propio `reply.<uuid>`; el padre conserva su `replyChannel`
- * (plan §8.1). Awaited → timeout/errores fallan el flow; forget → error.channel.
+ * Jump: reply efimero propio `reply.<uuid>`; el padre keeps su `replyChannel`
+ * (plan sec.8.1). Awaited -> timeout/errores fail el flow; forget -> error.channel.
  * Resultado en `headers.jumpReplies[channel]`; payload del padre no se pisa.
  */
 export class JumpStep implements FlowStep {
@@ -66,7 +66,7 @@ export class JumpStep implements FlowStep {
         { channel, component: `jump:${ctx.flowName}` },
         { reply: replyName },
       );
-      hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: metadato del efímero
+      hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: metadato del efimero
       await ctx.registry.sendMessage(channel, hop);
       const reply = await first;
       jumpReplies[channel] = reply.payload;

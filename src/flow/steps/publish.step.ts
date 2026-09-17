@@ -1,7 +1,7 @@
 import { nextHop } from '../../message';
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
-/** `nextHop` + routingKey; no corta; await del send (spec §6.2). */
+/** `nextHop` + routingKey; no corta; await del send (spec sec.6.2). */
 export class PublishStep implements FlowStep {
   readonly kind = 'publish' as const;
 

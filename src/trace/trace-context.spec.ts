@@ -62,9 +62,9 @@ describe('TraceContext', () => {
     );
     expect(bound.headers.traceId).toBe('t-amb');
     expect(bound.headers.spanId).not.toBe('');
-    expect(bound.headers.correlationId).toBe('m-1'); // fallback = id (spec §4)
+    expect(bound.headers.correlationId).toBe('m-1'); // fallback = id (spec sec.4)
     expect(bound.headers.parentSpanId).toBe('s-amb');
-    expect(msg.headers.traceId).toBe(''); // entrada intacta
+    expect(msg.headers.traceId).toBe(''); // input intact
   });
 
   it('bindMessage sin ambiente: traceId/correlation caen al id', () => {

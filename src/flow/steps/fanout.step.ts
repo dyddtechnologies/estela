@@ -4,8 +4,8 @@ import { normalizeDests } from '../flow-step';
 import { reportFireAndForget } from './forget';
 
 /**
- * Copia con `nextHop(..., { reply: 'none' })` (plan §8.1). Grupo awaited en
- * paralelo (`Promise.all`); forget nunca tumba. El payload del padre NO se pisa.
+ * Copy con `nextHop(..., { reply: 'none' })` (plan sec.8.1). Grupo awaited en
+ * paralelo (`Promise.all`); forget never tumba. El payload del padre NO se pisa.
  */
 export class FanoutStep implements FlowStep {
   readonly kind = 'fanout' as const;

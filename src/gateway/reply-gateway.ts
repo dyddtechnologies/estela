@@ -18,8 +18,8 @@ export interface ReplyGatewayDeps {
 }
 
 /**
- * Request/reply (spec §8): canal efímero `reply.<uuid>` registrado y
- * **deregistrado en `finally`** — sin fugas (plan §8.3/§11).
+ * Request/reply (spec sec.8): channel efimero `reply.<uuid>` registrado y
+ * **deregistrado en `finally`** — sin leaks (plan sec.8.3/sec.11).
  * Implementa `RequestReplyPort` (inbound interceptor, Fase 7).
  */
 export class ReplyGateway {

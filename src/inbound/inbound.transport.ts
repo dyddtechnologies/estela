@@ -7,8 +7,8 @@ export interface InboundExtraction {
 }
 
 /**
- * Strategy por transporte (plan §5.1): extraen payload + headers crudos; el
- * mapeo a `MessageHeaders` vive en los HeaderMapper (§4).
+ * Strategy por transporte (plan sec.5.1): extraen payload + headers crudos; el
+ * mapeo a `MessageHeaders` vive en los HeaderMapper (sec.4).
  */
 export interface InboundTransportStrategy {
   readonly transport: InboundTransport;

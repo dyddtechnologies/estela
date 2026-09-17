@@ -1,4 +1,4 @@
-/** Mensaje crudo AMQP normalizado (ISP — plan §5.1). */
+/** Message crudo AMQP normalizado (ISP — plan sec.5.1). */
 export interface AmqpMessage {
   content: Buffer;
   fields?: Record<string, unknown>;
@@ -10,8 +10,8 @@ export interface AmqpMessage {
 }
 
 /**
- * Puerto AMQP (ISP, plan §5.1): solo lo que los adapters usan — NUNCA la
- * superficie completa de amqplib. Implementado por el consumidor vía token.
+ * Port AMQP (ISP, plan sec.5.1): solo lo que los adapters use — Never la
+ * superficie completa de amqplib. Implementado por el consumidor via token.
  */
 export interface AmqpLikeChannel {
   assertQueue(queue: string, options?: unknown): Promise<unknown>;
@@ -25,5 +25,5 @@ export interface AmqpLikeChannel {
   publish?(exchange: string, routingKey: string, content: Buffer, options?: unknown): boolean;
 }
 
-/** Token de inyección opcional (spec §9): ausente → warn, no throw. */
+/** Token de injection opcional (spec sec.9): ausente -> warn, no throw. */
 export const AMQP_CHANNEL = 'INTEGRATION_AMQP_CHANNEL';

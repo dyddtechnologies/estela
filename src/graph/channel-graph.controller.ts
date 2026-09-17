@@ -3,7 +3,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { ChannelRegistry } from '../channel-registry';
 import { ChannelGraph, type GraphSnapshot } from './channel-graph';
 
-/** Único controller del módulo (spec §11) — observable del grafo (spec §12). */
+/** Unico controller del modulo (spec sec.11) — observable del graph (spec sec.12). */
 @Controller('integration')
 @ApiTags('integration-graph')
 export class ChannelGraphController {

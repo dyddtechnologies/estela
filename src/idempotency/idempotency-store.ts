@@ -1,4 +1,4 @@
-/** Puerto de almacenamiento (spec §10) — implementable con Redis (contrato only). */
+/** Port de almacenamiento (spec sec.10) — implementable con Redis (contract only). */
 export interface IdempotencyRecord {
   status: 'in-flight' | 'completed' | 'failed';
   result?: Record<string, unknown>;
@@ -6,7 +6,7 @@ export interface IdempotencyRecord {
 }
 
 export interface IdempotencyStore {
-  /** false si existe y no expiró (spec §10). */
+  /** false si existe y no expiro (spec sec.10). */
   begin(scope: string, key: string, ttlMs: number): Promise<boolean>;
   complete(scope: string, key: string, result: Record<string, unknown>): Promise<void>;
   fail(scope: string, key: string, error: unknown): Promise<void>;
@@ -14,7 +14,7 @@ export interface IdempotencyStore {
   purgeExpired(): Promise<number>;
 }
 
-/** Clave de almacenamiento canónica (spec §10): `${scope}::${key}`. */
+/** Key de almacenamiento canonica (spec sec.10): `${scope}::${key}`. */
 export function idempotencyStorageKey(scope: string, key: string): string {
   return `${scope}::${key}`;
 }

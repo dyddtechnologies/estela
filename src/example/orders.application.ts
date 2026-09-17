@@ -13,7 +13,7 @@ import {
   QuoteCreationActivators,
 } from './insurance/insurance.activators';
 
-/** DTO de ejemplo — el body lo documenta el usuario (spec §7.3). */
+/** DTO de ejemplo — el body lo documenta el usuario (spec sec.7.3). */
 export class PlaceOrderDto {
   @ApiProperty({ example: 2 })
   qty!: number;
@@ -68,7 +68,7 @@ export class OrderPersistence {
 
   constructor(private readonly registry: ChannelRegistry) {}
 
-  /** §17.8: persist reenvía a 'orders.country' (direct 1-subscriber). */
+  /** sec.17.8: persist forward a 'orders.country' (direct 1-subscriber). */
   @ServiceActivator('orders.persist')
   async persist(payload: unknown): Promise<void> {
     this.persisted.push(payload as Record<string, unknown>);
@@ -79,7 +79,7 @@ export class OrderPersistence {
 @Controller('orders')
 @ApiTags('orders')
 export class OrdersController {
-  /** requestReply:true → el flow responde al HTTP con `{status:'ok', result}` (spec §6.3/§7.2). */
+  /** requestReply:true -> el flow responde al HTTP con `{status:'ok', result}` (spec sec.6.3/sec.7.2). */
   @Post()
   @InboundRest({ channel: 'orders.place', requestReply: true, timeoutMs: 5_000 })
   @ApiBody({ type: PlaceOrderDto })
@@ -87,12 +87,12 @@ export class OrdersController {
     // payload = body (handler void); el reply lo cierra el flow (.reply())
   }
 
-  /** Fanout (§5): copia a inventory.reserve + billing.charge vía bindings; accepted sin esperar. */
+  /** Fanout (sec.5): copy a inventory.reserve + billing.charge via bindings; accepted sin esperar. */
   @Post('fanout')
   @InboundRest({ channel: 'ops.fanout' })
   @ApiBody({ type: FanoutDto })
   fanout(@Body() _dto: FanoutDto): void {
-    // fire-into-fanout: bindings awaited por el canal; respuesta accepted
+    // fire-into-fanout: bindings awaited por el channel; respuesta accepted
   }
 }
 

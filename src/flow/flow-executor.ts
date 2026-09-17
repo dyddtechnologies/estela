@@ -5,7 +5,7 @@ import type { TraceContext } from '../trace/trace-context';
 import type { BuiltFlow } from './integration-flow';
 import type { FlowStepContext, StepOutcome } from './flow-step';
 
-/** Puerto mínimo de idempotencia (implementado por IdempotencyService en Fase 5). */
+/** Port minimo de idempotency (implementado por IdempotencyService en Fase 5). */
 export interface FlowIdempotencyPort {
   begin(scope: string, key: string, ttlMs: number): Promise<boolean>;
   complete(scope: string, key: string, result: Record<string, unknown>): Promise<void>;
@@ -30,8 +30,8 @@ export interface FlowExecutionResult {
 const DEFAULT_IDEMPOTENCY_TTL_MS = 3_600_000;
 
 /**
- * Template Method (GoF — plan §9.4): acquire idempotencia → TraceContext.run →
- * chain de steps → succeed | fail→error.channel | duplicate→silencio (spec §6.4).
+ * Template Method (GoF — plan sec.9.4): acquire idempotency -> TraceContext.run ->
+ * chain de steps -> succeed | fail->error.channel | duplicate->silence (spec sec.6.4).
  */
 export class FlowExecutor {
   constructor(
@@ -44,10 +44,10 @@ export class FlowExecutor {
     return { source: this.built.source, steps: this.built.steps.map((s) => s.describe()) };
   }
 
-  /** Suscribe la ejecución al canal fuente (el módulo lo usa en Fase 10). */
+  /** Subscribes la execution al channel source (el modulo lo uses en Fase 10). */
   attachTo(registry: ChannelRegistry): Unsubscribe {
-    // El handler RETORNA la promesa: en canales awaited (direct) el send
-    // del productor espera la ejecución completa del flow (spec §17.3).
+    // El handler RETORNA la promesa: en channels awaited (direct) el send
+    // del productor awaits la execution completa del flow (spec sec.17.3).
     return registry
       .get(this.built.source)
       .subscribe((msg) => this.execute(msg).then(() => undefined));

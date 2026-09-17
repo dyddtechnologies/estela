@@ -128,7 +128,7 @@ describe('ChannelGraph (spec §12)', () => {
     );
     const first = graph.snapshot(registry).mermaid;
     const second = graph.snapshot(registry).mermaid;
-    expect(first).toBe(second); // determinista
+    expect(first).toBe(second); // deterministic
     expect(first.startsWith('flowchart LR')).toBe(true);
     expect(first).toContain('"direct: orders.place"');
     expect(first).toContain('"queue: orders.local"');

@@ -17,14 +17,14 @@ export interface RabbitInboundMapping {
 export interface InboundExplorerOptions {
   registry: ChannelRegistry;
   trace: TraceContext;
-  /** Token `AMQP_CHANNEL` opcional (spec §7.2/§9). */
+  /** Token `AMQP_CHANNEL` opcional (spec sec.7.2/sec.9). */
   amqp?: AmqpLikeChannel;
   mappings?: readonly RabbitInboundMapping[];
   log?: (message: string) => void;
   onError?: (error: unknown) => void;
 }
 
-/** Bindea rabbit en `onModuleInit` solo si el token existe; si no → warn (spec §7.2). */
+/** Bindea rabbit en `onModuleInit` solo si el token existe; si no -> warn (spec sec.7.2). */
 export class InboundExplorer {
   constructor(private readonly options: InboundExplorerOptions) {}
 
@@ -79,7 +79,7 @@ export async function bindRabbitInbound(
         );
         amqp.ack(raw);
       } catch (error) {
-        amqp.nack(raw, false, false); // fail → nack requeue:false (spec §9)
+        amqp.nack(raw, false, false); // fail -> nack requeue:false (spec sec.9)
         deps.onError?.(error);
       }
     })();

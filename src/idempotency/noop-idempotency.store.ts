@@ -1,6 +1,6 @@
 import type { IdempotencyRecord, IdempotencyStore } from './idempotency-store';
 
-/** Null Object (GoF — plan §7.3 #20): `enabled:false` sin ramas `if` en runtime. */
+/** Null Object (GoF — plan sec.7.3 #20): `enabled:false` sin ramas `if` en runtime. */
 export class NoopIdempotencyStore implements IdempotencyStore {
   async begin(_scope: string, _key: string, _ttlMs: number): Promise<boolean> {
     return true;

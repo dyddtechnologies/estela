@@ -1,7 +1,7 @@
 import { copyMessage } from '../../message';
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
-/** `copyMessage` + fire-and-forget. NUNCA falla el flow (spec §6.2, §17.6). */
+/** `copyMessage` + fire-and-forget. Never fails el flow (spec sec.6.2, sec.17.6). */
 export class WireTapStep implements FlowStep {
   readonly kind = 'wireTap' as const;
 

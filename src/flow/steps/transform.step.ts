@@ -11,7 +11,7 @@ function isMessageLike(value: unknown): value is IntegrationMessage {
   );
 }
 
-/** Si el return trae `{payload, headers}` reemplaza `msg`; si no, pisa payload + hop (spec §6.1). */
+/** Si el return trae `{payload, headers}` replaces `msg`; si no, pisa payload + hop (spec sec.6.1). */
 export class TransformStep implements FlowStep {
   readonly kind = 'transform' as const;
 

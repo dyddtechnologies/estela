@@ -1,11 +1,11 @@
 import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 
 export interface ReplyOptions {
-  /** `'current'` (default) | `'jumpMerge'` = `{ ...payload, jumpReplies }` (spec §6.3). */
+  /** `'current'` (default) | `'jumpMerge'` = `{ ...payload, jumpReplies }` (spec sec.6.3). */
   payload?: 'current' | 'jumpMerge';
 }
 
-/** Envía al `replyChannel` si existe; no corta por sí solo (spec §6.3). */
+/** Sends al `replyChannel` si existe; no corta por si solo (spec sec.6.3). */
 export class ReplyStep implements FlowStep {
   readonly kind = 'reply' as const;
 
