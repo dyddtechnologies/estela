@@ -6,3 +6,4 @@ package-lock.json
 assets/
 *.md
 coverage/
+release/

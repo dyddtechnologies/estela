@@ -1,8 +1,8 @@
 name: Distribute (GitHub Release artifact)
 
+# Automatic cuts happen from CI on main (semantic-release).
+# This workflow is the manual fallback (pack current HEAD).
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 concurrency:

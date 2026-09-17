@@ -103,3 +103,27 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run audit:ci
+
+  release:
+    name: semver + GitHub Release artifact
+    needs: [lint, test, complexity, example-app, audit]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch tags
+        run: git fetch --tags --force
+      - uses: actions/setup-node@v5
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: semantic-release (bump · pack · GitHub Release)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release

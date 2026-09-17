@@ -11,7 +11,9 @@
  * Rule (enforzada por dependency-cruiser): este archivo Never importa
  * amqplib ni @grpc/grpc-js, ni directa ni transitivamente.
  */
-export const INTEGRATION_LIBRARY_VERSION = '0.1.0' as const;
+import { version } from '../package.json';
+
+export const INTEGRATION_LIBRARY_VERSION: string = version;
 
 // ---------- Fase 1: kernel de message + trace ----------
 export * from './message';
