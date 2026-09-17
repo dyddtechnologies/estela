@@ -205,8 +205,7 @@ domain (message · channel · flow-step)          ← zero dependencies, enforce
 
 Event-driven engine, 100% native Node ≥ 18: `node:events` · `AsyncLocalStorage` +
 `AsyncResource.bind` · `AbortSignal.timeout` · `Promise.all/allSettled` · `setImmediate` ·
-`OnApplicationShutdown` (queue drain). **Full design, ADRs and decision-by-decision rationale:
-[PLAN-arquitectura.md](./PLAN-arquitectura.md)** (Spanish, canonical) · Functional contract: [SPEC](./SPEC-nest-integration.md).
+`OnApplicationShutdown` (queue drain).
 
 ## Agent skills
 

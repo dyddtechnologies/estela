@@ -205,8 +205,7 @@ domain (message · channel · flow-step)          ← cero dependencias, enforce
 
 Motor event-driven 100% nativo Node ≥ 18: `node:events` · `AsyncLocalStorage` +
 `AsyncResource.bind` · `AbortSignal.timeout` · `Promise.all/allSettled` · `setImmediate` ·
-`OnApplicationShutdown` (drain de queues). **Diseño completo y ADRs:
-[PLAN-arquitectura.md](./PLAN-arquitectura.md)** · Contrato funcional: [SPEC](./SPEC-nest-integration.md).
+`OnApplicationShutdown` (drain de queues).
 
 ## Testing
 

@@ -174,7 +174,6 @@ Hexagonale (ports & adaptateurs) avec SOLID et GoF explicites :
 
 Moteur event-driven 100% natif Node ≥ 18 : `node:events` · `AsyncLocalStorage` ·
 `AbortSignal.timeout` · `Promise.all/allSettled` · `OnApplicationShutdown` (drain des queues).
-**Design complet et ADRs : [PLAN-arquitectura.md](./PLAN-arquitectura.md)** (espagnol) · Contrat : [SPEC](./SPEC-nest-integration.md).
 
 ## Testing
 
