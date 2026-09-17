@@ -1,0 +1,57 @@
+import type { MessageHandlerFn, Unsubscribe } from '../channel';
+import { HttpHeaderMapper } from './header-mapper';
+import { ChannelRegistry } from '../channel-registry';
+
+/** fetch estructural — evita depender del lib DOM para el tipo global. */
+export interface RestFetchResponse {
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+}
+
+export type RestFetch = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+) => Promise<RestFetchResponse>;
+
+export interface RestOutOptions {
+  url: string;
+  method?: 'POST' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  /** Inyectable para tests — default `globalThis.fetch`. */
+  fetchFn?: RestFetch;
+}
+
+const mapper = new HttpHeaderMapper();
+
+/**
+ * REST outbound (spec §9): fetch JSON + headers de traza (tabla §4).
+ * `!ok` → throw (el subscriber del canal propaga — awaited §8.2).
+ */
+export function bindRestOut(
+  registry: ChannelRegistry,
+  channel: string,
+  options: RestOutOptions,
+): Unsubscribe {
+  const fetchFn: RestFetch =
+    options.fetchFn ??
+    ((url, init) => globalThis.fetch(url, init) as unknown as Promise<RestFetchResponse>);
+  const method = options.method ?? 'POST';
+  const handler: MessageHandlerFn = async (msg) => {
+    const response = await fetchFn(options.url, {
+      method,
+      headers: {
+        'content-type': 'application/json',
+        ...options.headers,
+        ...mapper.mapOut(msg.headers),
+      },
+      body: JSON.stringify(msg.payload),
+    });
+    if (!response.ok) {
+      throw new Error(`restOut ${method} ${options.url} → HTTP ${response.status}`);
+    }
+    await response.text(); // drena el body; el resultado útil viaja por canales
+    return undefined;
+  };
+  return registry.get(channel).subscribe(handler);
+}
