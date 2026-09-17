@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Módulo NestJS derivable (EIP / homónimo de Spring Integration): canales, flow DSL, activators, inbound/outbound adapters (REST/gRPC/Rabbit/GraphQL), trazas e idempotencia.",
   "license": "MIT",
+  "author": "Eliu Diaz (https://www.linkedin.com/in/eliudiaz)",
+  "maintainers": [
+    "eliudiaz-dydd"
+  ],
   "type": "commonjs",
   "engines": {
     "node": ">=18"
