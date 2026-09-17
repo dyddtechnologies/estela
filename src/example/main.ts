@@ -5,7 +5,7 @@ import { OrdersApplicationModule } from './orders.application';
 export async function bootstrap(port = 3_000): Promise<void> {
   const app = await NestFactory.create(OrdersApplicationModule);
   setupIntegrationSwagger(app, {
-    title: 'Orders — @acme/nest-integration example',
+    title: 'Orders — @dyddtechnologies/estela example',
     description: 'EIP runtime: canales-no-clases',
   });
   await app.listen(port);

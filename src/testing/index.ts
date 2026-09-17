@@ -1,5 +1,5 @@
 /**
- * @acme/nest-integration/testing — subpath público de testing (spec §14).
+ * @dyddtechnologies/estela/testing — subpath público de testing (spec §14).
  * Regla (enforzada por dependency-cruiser): NUNCA importa de src/inbound
  * ni src/adapters.
  */

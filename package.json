@@ -1,25 +1,42 @@
 {
-  "name": "@acme/nest-integration",
+  "name": "@estela/nest",
   "version": "0.1.0",
-  "description": "Módulo NestJS derivable (EIP / homónimo de Spring Integration): canales, flow DSL, activators, inbound/outbound adapters (REST/gRPC/Rabbit/GraphQL), trazas e idempotencia.",
+  "description": "ESTELA — EIP runtime for NestJS (Spring Integration homolog): in-memory channels (direct/queue/pubsub/fanout), flow DSL, activators, inbound REST/gRPC/Rabbit/GraphQL, tracing, idempotency and a live topology graph.",
   "license": "MIT",
   "author": "Eliu Diaz (https://www.linkedin.com/in/eliudiaz)",
   "maintainers": [
     "eliudiaz-dydd"
   ],
+  "homepage": "https://github.com/dyddtechnologies/estela#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dyddtechnologies/estela.git"
   },
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org"
+  "bugs": {
+    "url": "https://github.com/dyddtechnologies/estela/issues"
   },
-  "type": "commonjs",
+  "keywords": [
+    "nestjs",
+    "eip",
+    "enterprise-integration-patterns",
+    "spring-integration",
+    "messaging",
+    "channels",
+    "pubsub",
+    "fanout",
+    "request-reply",
+    "idempotency",
+    "tracing",
+    "flow",
+    "dsl",
+    "mermaid"
+  ],
   "engines": {
     "node": ">=18"
   },
+  "type": "commonjs",
   "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -34,8 +51,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -47,8 +70,8 @@
     "@nestjs/common": "^10 || ^11",
     "@nestjs/core": "^10 || ^11",
     "@nestjs/swagger": "^7 || ^8",
-    "reflect-metadata": ">=0.1.12",
-    "rxjs": "^7.8"
+    "reflect-metadata": ">=0.1.13",
+    "rxjs": "^7"
   },
   "peerDependenciesMeta": {
     "amqplib": {
@@ -64,9 +87,9 @@
   "devDependencies": {
     "@nestjs/common": "^10.4.1",
     "@nestjs/core": "^10.4.1",
-    "@nestjs/platform-express": "^10.4.22",
+    "@nestjs/platform-express": "^10.4.1",
     "@nestjs/swagger": "^7.4.0",
-    "@nestjs/testing": "^10.4.22",
+    "@nestjs/testing": "^10.4.1",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.14.0",
     "dependency-cruiser": "^16.3.0",

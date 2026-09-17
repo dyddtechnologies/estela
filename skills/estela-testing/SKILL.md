@@ -5,12 +5,12 @@ description: Test ESTELA flows, channels and activators deterministically with t
 
 # estela-testing — deterministic tests for ESTELA
 
-## Helpers (`@acme/nest-integration/testing`)
+## Helpers (`@estela/nest/testing`)
 
 ```ts
 import { bindFlow, createTestMessage, waitFor, collect, MemoryIdempotencyStore }
-  from '@acme/nest-integration/testing';
-import { IdempotencyService } from '@acme/nest-integration';
+  from '@estela/nest/testing';
+import { IdempotencyService } from '@estela/nest';
 
 bindFlow(PlaceOrderFlow, registry, {
   idempotency: new IdempotencyService({ store: new MemoryIdempotencyStore() }),

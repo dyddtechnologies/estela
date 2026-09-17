@@ -1,4 +1,4 @@
-# Plan de Arquitectura — `@acme/nest-integration`
+# Plan de Arquitectura — `@dyddtechnologies/estela`
 
 > Documento de diseño derivado de `SPEC-nest-integration.md`.
 > Audiencia: implementadores del paquete. Idioma: español. APIs en inglés.
@@ -32,7 +32,7 @@ de infraestructura que entra solo por decoradores, DI e interceptor.
 
 | Aspecto | Decisión |
 |---|---|
-| Producto | Paquete npm `@acme/nest-integration` + subpath `/testing` + example app (no publicada) |
+| Producto | Paquete npm `@dyddtechnologies/estela` + subpath `/testing` + example app (no publicada) |
 | Consumidor | Apps Nest 10/11 que importan `IntegrationModule.forRoot({ channels, idempotency }, [flows])` |
 | Deps de implementación | **Prohibidas**: amqplib, `@grpc/grpc-js` en el barrel (solo optional peers tipados en adapters) |
 | Peers obligatorios | `@nestjs/common`, `@nestjs/core` ^10‖^11, `@nestjs/swagger` ^7‖^8, `reflect-metadata`, `rxjs` |
@@ -62,7 +62,7 @@ de infraestructura que entra solo por decoradores, DI e interceptor.
 
 ```mermaid
 flowchart LR
-  App[App Nest consumidora] -->|forRoot + flows + controllers| Lib["@acme/nest-integration"]
+  App[App Nest consumidora] -->|forRoot + flows + controllers| Lib["@dyddtechnologies/estela"]
   Lib -->|REST/gRPC/Rabbit in| Ext[Clientes externos]
   Lib -->|REST out / gRPC / AMQP| Ext2[Servicios externos]
 ```
@@ -71,8 +71,8 @@ flowchart LR
 
 | Contenedor | Descripción | Publica |
 |---|---|---|
-| **core lib** | Runtime de mensajería, flows, trazas, idempotencia, grafo, adapters | `@acme/nest-integration` |
-| **testing lib** | Utilidades deterministas para tests de consumidores | `@acme/nest-integration/testing` |
+| **core lib** | Runtime de mensajería, flows, trazas, idempotencia, grafo, adapters | `@dyddtechnologies/estela` |
+| **testing lib** | Utilidades deterministas para tests de consumidores | `@dyddtechnologies/estela/testing` |
 | **example orders** | App Nest de demostración (flujo PlaceOrder + RouteByCountry corregido §17.8) | no se publica |
 
 ### 3.3 Nivel 3 — Componentes (mapa src/)

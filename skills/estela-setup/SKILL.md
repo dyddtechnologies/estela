@@ -8,7 +8,7 @@ description: Wire the ESTELA EIP runtime (IntegrationModule.forRoot) into a Nest
 ## Install
 
 ```bash
-npm install @acme/nest-integration
+npm install @estela/nest
 # peers: @nestjs/common/core ^10||^11, @nestjs/swagger ^7||^8, reflect-metadata, rxjs
 ```
 

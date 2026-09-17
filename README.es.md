@@ -50,7 +50,7 @@ flowchart LR
 ## Instalación
 
 ```bash
-npm install @acme/nest-integration
+npm install @estela/nest
 ```
 
 Peers: `@nestjs/common/core` ^10‖^11 · `@nestjs/swagger` ^7‖^8 · `reflect-metadata` · `rxjs`.
@@ -210,7 +210,7 @@ Motor event-driven 100% nativo Node ≥ 18: `node:events` · `AsyncLocalStorage`
 ## Testing
 
 ```ts
-import { bindFlow, createTestMessage, waitFor, MemoryIdempotencyStore } from '@acme/nest-integration/testing';
+import { bindFlow, createTestMessage, waitFor, MemoryIdempotencyStore } from '@estela/nest/testing';
 
 bindFlow(PlaceOrderFlow, registry, { idempotency: new IdempotencyService({ store: new MemoryIdempotencyStore() }) });
 await registry.send('orders.place', { qty: 2, sku: 'A' });

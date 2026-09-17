@@ -1,4 +1,4 @@
-# Spec: `@acme/nest-integration`
+# Spec: `@dyddtechnologies/estela`
 
 Módulo NestJS derivable (EIP / homónimo de Spring Integration).  
 Documento para un coding agent: implementar una librería publicable, no una app.
@@ -30,7 +30,7 @@ Principio: **el flow habla con canales, no con clases**. Las clases se enganchan
 
 ## 3. Package
 
-Nombre sugerido: `@acme/nest-integration` (el implementador puede renombrar).
+Nombre sugerido: `@dyddtechnologies/estela` (el implementador puede renombrar).
 
 Peer dependencies:
 
@@ -46,8 +46,8 @@ Optional peers (solo tipos / adapters):
 Exports:
 
 ```
-@acme/nest-integration
-@acme/nest-integration/testing
+@dyddtechnologies/estela
+@dyddtechnologies/estela/testing
 ```
 
 Estructura:
@@ -607,4 +607,4 @@ Implementar el example así para no chocar con la regla DirectChannel.
 
 ## 18. Prompt corto para arrancar el agent
 
-Implementa `@acme/nest-integration` según `SPEC.md`. Empieza por message + channels + registry + flow DSL (incl. jump/reply/fanout wait) + module + decorators + inbound interceptor + tests 1–8. No agregues brokers reales. No acoples flows a clases. Entrega librería + example orders compilable.
+Implementa `@dyddtechnologies/estela` según `SPEC.md`. Empieza por message + channels + registry + flow DSL (incl. jump/reply/fanout wait) + module + decorators + inbound interceptor + tests 1–8. No agregues brokers reales. No acoples flows a clases. Entrega librería + example orders compilable.

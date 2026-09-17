@@ -39,7 +39,7 @@
 
 ## Testing rules
 
-- Every invariant gets a test. Use `@acme/nest-integration/testing` helpers:
+- Every invariant gets a test. Use `@estela/nest/testing` helpers:
   `bindFlow` · `waitFor` · `collect` · `createTestMessage` · `MemoryIdempotencyStore`.
 - Test files: `*.spec.ts` under `src/` or `test/` (jest roots).
 - Handlers subscribed to awaited channels must return their promise (never `void p`) —

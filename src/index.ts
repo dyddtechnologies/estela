@@ -1,5 +1,5 @@
 /**
- * @acme/nest-integration — barrel público.
+ * @dyddtechnologies/estela — barrel público.
  *
  * Fase 0 (scaffolding): placeholder compilable.
  * Los exports reales llegan por fase (PLAN-arquitectura.md §10):
