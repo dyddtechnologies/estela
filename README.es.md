@@ -11,6 +11,7 @@
   [![license](https://img.shields.io/badge/license-MIT-blue)](#licencia)
   [![website](https://img.shields.io/badge/DYDD_Technologies-dyddtech.com-0A66C2)](https://www.dyddtech.com)
   [![LinkedIn](https://img.shields.io/badge/LinkedIn-eliudiaz-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/eliudiaz)
+  [![maintainer](https://img.shields.io/badge/maintainer-eliudiaz--dydd-181717?logo=github)](https://github.com/eliudiaz-dydd)
 
   [English](./README.md) · **Español** · [Português](./README.pt.md) · [Français](./README.fr.md)
 
@@ -231,7 +232,7 @@ Example runnable: [`src/example/`](./src/example) · Scripts: `npm run verify` (
 
 <div align="center">
 
-<sub>**ESTELA** — construida con ☄️ por [**DYDD Technologies**](https://www.dyddtech.com) · autor: [Eliu Diaz](https://www.linkedin.com/in/eliudiaz)</sub>
+<sub>**ESTELA** — construida con ☄️ por [**DYDD Technologies**](https://www.dyddtech.com) · creada y mantenida por [**Eliu Diaz**](https://www.linkedin.com/in/eliudiaz) · único mantainer [@eliudiaz-dydd](https://github.com/eliudiaz-dydd)</sub>
 
 </div>
 

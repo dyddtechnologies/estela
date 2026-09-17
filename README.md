@@ -11,6 +11,7 @@
   [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
   [![website](https://img.shields.io/badge/DYDD_Technologies-dyddtech.com-0A66C2)](https://www.dyddtech.com)
   [![LinkedIn](https://img.shields.io/badge/LinkedIn-eliudiaz-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/eliudiaz)
+  [![maintainer](https://img.shields.io/badge/maintainer-eliudiaz--dydd-181717?logo=github)](https://github.com/eliudiaz-dydd)
 
   **English** · [Español](./README.es.md) · [Português](./README.pt.md) · [Français](./README.fr.md)
 
@@ -206,6 +207,21 @@ Event-driven engine, 100% native Node ≥ 18: `node:events` · `AsyncLocalStorag
 `OnApplicationShutdown` (queue drain). **Full design, ADRs and decision-by-decision rationale:
 [PLAN-arquitectura.md](./PLAN-arquitectura.md)** (Spanish, canonical) · Functional contract: [SPEC](./SPEC-nest-integration.md).
 
+## Agent skills
+
+ESTELA ships portable **agent skills** (SKILL.md) so Claude Code, Codex, Cursor and any
+SKILL.md-compatible agent adopt it as the messaging standard:
+
+| Skill | Use when… |
+|---|---|
+| [`estela-setup`](./skills/estela-setup/SKILL.md) | wiring `IntegrationModule.forRoot` into a Nest app |
+| [`estela-flows`](./skills/estela-flows/SKILL.md) | authoring channels/flows/activators |
+| [`estela-testing`](./skills/estela-testing/SKILL.md) | writing deterministic tests |
+| [`estela-review`](./skills/estela-review/SKILL.md) | reviewing PRs against the invariants |
+
+Install: copy a folder into `~/.codex/skills/`, `~/.claude/skills/` or `.agents/skills/` —
+details in [`skills/README.md`](./skills/README.md). Repo-root agent rules: [`AGENTS.md`](./AGENTS.md).
+
 ## Testing
 
 ```ts
@@ -231,7 +247,7 @@ Runnable example: [`src/example/`](./src/example) · Scripts: `npm run verify` (
 
 <div align="center">
 
-<sub>**ESTELA** — built with ☄️ by [**DYDD Technologies**](https://www.dyddtech.com) · authored by [Eliu Diaz](https://www.linkedin.com/in/eliudiaz)</sub>
+<sub>**ESTELA** — built with ☄️ by [**DYDD Technologies**](https://www.dyddtech.com) · created & maintained by [**Eliu Diaz**](https://www.linkedin.com/in/eliudiaz) · sole maintainer [@eliudiaz-dydd](https://github.com/eliudiaz-dydd)</sub>
 
 </div>
 
