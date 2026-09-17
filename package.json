@@ -7,6 +7,14 @@
   "maintainers": [
     "eliudiaz-dydd"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dyddtechnologies/estela.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "type": "commonjs",
   "engines": {
     "node": ">=18"
