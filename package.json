@@ -70,7 +70,7 @@
     "lint": "eslint src test",
     "format:check": "prettier --check .",
     "comments:en": "node scripts/check-comments-en.cjs",
-    "format:write": "prettier --write src test eslint.config.js",
+    "format:write": "prettier --write .",
     "complexity": "madge --extensions ts --circular src && jscpd src --min-tokens 60 --ignore '**/*.spec.ts' --reporters consoleSummary --threshold 1",
     "audit:ci": "npm audit --audit-level=high && npx lockfile-lint --path package-lock.json --allowed-hosts npm --validate-https --empty-hostname false",
     "test": "jest",
