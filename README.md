@@ -1,55 +1,57 @@
 <div align="center">
-  <img src="assets/estela-banner.svg" alt="ESTELA — EIP runtime para NestJS" width="100%" />
+  <img src="assets/estela-banner.svg" alt="ESTELA — EIP runtime for NestJS" width="100%" />
 
-  **El runtime de Enterprise Integration Patterns para NestJS.**
-  *El flow habla con canales, no con clases.*
+  **The Enterprise Integration Patterns runtime for NestJS.**
+  *The flow talks to channels, not to classes.*
 
-  [![tests](https://img.shields.io/badge/tests-110%2F110-brightgreen)](#-estado)
-  [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#arquitectura)
-  [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#instalaci%C3%B3n)
-  [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#instalaci%C3%B3n)
-  [![license](https://img.shields.io/badge/license-MIT-blue)](#licencia)
+  [![tests](https://img.shields.io/badge/tests-110%2F110-brightgreen)](#status)
+  [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
+  [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
+  [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
+  [![license](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-  [Instalación](#instalación) · [Quick start](#quick-start) · [Canales](#canales) · [DSL](#dsl-de-flows) · [Trazas](#trazas-e-idempotencia) · [Observabilidad](#observabilidad) · [Arquitectura](#arquitectura)
+  **English** · [Español](./README.es.md) · [Português](./README.pt.md) · [Français](./README.fr.md)
+
+  [Installation](#installation) · [Quick start](#quick-start) · [Channels](#channels) · [Flow DSL](#flow-dsl) · [Tracing](#tracing--idempotency) · [Observability](#observability) · [Architecture](#architecture)
 </div>
 
 ---
 
-## Por qué ESTELA
+## Why ESTELA
 
-**Estela** *(del lat. *stella* — la estela que deja un cometa)*: cada mensaje que
-viaja por el runtime deja rastro — `traceId`, `spanId`, `history` de hops — y cada
-hop es un punto en la estela. Como Spring Integration, pero nativo de Node:
+**Estela** *(Spanish for “trail” — the wake a comet leaves behind)*: every message
+traveling through the runtime leaves a trail — `traceId`, `spanId`, a `history` of
+hops — and every hop is a point in that trail. Spring Integration semantics, native to Node:
 
-- **4 canales in-memory** con semántica EIP real: `direct` · `queue` · `pubsub` · `fanout`.
-- **DSL de flows fluido** con 10 patrones: `filter → transform → wireTap → fanoutTo → jumpTo → publish → route → to → reply`.
-- **Request/reply** con canales efímeros y timeouts race-free (`AbortSignal.timeout`).
-- **Trazas** con `AsyncLocalStorage` + reconstrucción de contexto desde headers en cada hop.
-- **Idempotencia** con scopes `flow:*` / `activator:*` y store intercambiable (memoria o Redis).
-- **Inbound REST / gRPC / Rabbit / GraphQL** declarado en controllers, jamás en `forRoot`.
-- **Grafo vivo** de tu topología: JSON + Mermaid en dos endpoints.
-- **100% nativo**: mensajería sin brokers ni dependencias de runtime. Los brokers son puertos.
+- **4 in-memory channels** with real EIP semantics: `direct` · `queue` · `pubsub` · `fanout`.
+- **Fluid flow DSL** with 10 patterns: `filter → transform → wireTap → fanoutTo → jumpTo → publish → route → to → reply`.
+- **Request/reply** with ephemeral channels and race-free timeouts (`AbortSignal.timeout`).
+- **Tracing** via `AsyncLocalStorage`, with context rebuilt from headers at every hop.
+- **Idempotency** with `flow:*` / `activator:*` scopes and a swappable store (memory or Redis).
+- **Inbound REST / gRPC / Rabbit / GraphQL** declared on controllers, never in `forRoot`.
+- **Live topology graph**: JSON + Mermaid, two endpoints.
+- **100% native**: messaging with zero runtime dependencies. Brokers are ports.
 
 ```mermaid
 flowchart LR
   subgraph ESTELA
     direction LR
-    IN["@InboundRest / gRPC / GraphQL / Rabbit"] --> C["Canales\ndirect · queue · pubsub · fanout"]
+    IN["@InboundRest / gRPC / GraphQL / Rabbit"] --> C["Channels\ndirect · queue · pubsub · fanout"]
     C --> F["FlowEngine\nfilter · transform · fanout · jump · reply"]
-    F --> A["@ServiceActivator\ntu clase, enganchada"]
+    F --> A["@ServiceActivator\nyour class, wired in"]
     A --> OUT["Outbound\nREST · gRPC · Rabbit"]
-    F -.trace + idempotencia.-> C
+    F -.trace + idempotency.-> C
   end
 ```
 
-## Instalación
+## Installation
 
 ```bash
 npm install @acme/nest-integration
 ```
 
 Peers: `@nestjs/common/core` ^10‖^11 · `@nestjs/swagger` ^7‖^8 · `reflect-metadata` · `rxjs`.
-Opcionales (solo tipos/adapters, **jamás** en el barrel): `amqplib` · `@grpc/grpc-js` · `@nestjs/graphql`.
+Optional (typed/adapters only, **never** in the barrel): `amqplib` · `@grpc/grpc-js` · `@nestjs/graphql`.
 
 ## Quick start
 
@@ -81,10 +83,10 @@ export const PlaceOrderFlow: FlowDefinition = {
     IntegrationFlow.from('orders.place')
       .filter((p) => (p as { qty: number }).qty > 0)
       .transform((p) => ({ orderId: 'ord-1', ...(p as object), total: (p as { qty: number }).qty * 10 }))
-      .wireTap('orders.audit')                                      // fire-and-forget, jamás falla
+      .wireTap('orders.audit')                                      // fire-and-forget, never fails
       .jumpTo([{ channel: 'inventory.reserve', timeoutMs: 3_000 }]) // wait → jumpReplies
       .publish('domain.events', 'order.placed')
-      .reply()                                                      // cierra el HTTP si hay replyChannel
+      .reply()                                                      // closes the HTTP reply if present
       .to('orders.persist'),
 };
 ```
@@ -94,7 +96,7 @@ export const PlaceOrderFlow: FlowDefinition = {
 export class InventoryActivator {
   @ServiceActivator('inventory.reserve')
   reserve(payload: unknown): string {
-    return 'reserved'; // el wrapper responde al replyChannel del hop (jump incluido)
+    return 'reserved'; // the wrapper answers the hop's replyChannel (jumps included)
   }
 }
 ```
@@ -108,45 +110,45 @@ export class OrdersController {
 }
 ```
 
-## Canales
+## Channels
 
-| Kind | Semántica |
+| Kind | Semantics |
 |---|---|
-| `direct` | 1 subscriber · `send` espera el handler · sin subscriber → throw |
-| `queue` | buffer FIFO + round-robin · capacity · overflow → error (nunca drop silencioso) |
-| `pubsub` | broadcast · glob `*`/`#` en routingKey · grupos round-robin · fallo aislado por subscriber |
-| `fanout` | Composite: copia a bindings + subscribers · awaited o forget · **cycle guard A↔B** |
+| `direct` | 1 subscriber · `send` awaits the handler · no subscriber → throws |
+| `queue` | FIFO buffer + round-robin · capacity · overflow → error (never a silent drop) |
+| `pubsub` | broadcast · `*`/`#` glob routing keys · round-robin groups · per-subscriber fault isolation |
+| `fanout` | Composite: copies to bindings + subscribers · awaited or forget · **A↔B cycle guard** |
 
-## DSL de flows
+## Flow DSL
 
-| Step | Semántica |
+| Step | Semantics |
 |---|---|
-| `filter` | descarta con éxito (idempotencia `{filtered:true}`) |
-| `transform` / `handle` | cambian el payload; `handle` no dispara reply |
-| `wireTap` | copia sin bloquear; ignora errores (§17.6) |
-| `fanoutTo` | grupo awaited en paralelo; `wait:false` → forget a `error.channel` |
-| `jumpTo` / `jump` | canal efímero propio · await reply + timeout · `jumpReplies[channel]` |
-| `publish` | `nextHop` + routingKey · no corta |
-| `route` | dinámico `string \| string[]` · termina |
-| `to` | envía y **termina** |
-| `reply({payload})` | `'current'` \| `'jumpMerge'` → responde al `replyChannel` |
+| `filter` | exits successfully (idempotency `{filtered:true}`) |
+| `transform` / `handle` | replace the payload; `handle` never triggers a reply |
+| `wireTap` | fire-and-forget copy; swallows errors |
+| `fanoutTo` | awaited group in parallel; `wait:false` → forget → `error.channel` |
+| `jumpTo` / `jump` | own ephemeral channel · awaits reply + timeout · `jumpReplies[channel]` |
+| `publish` | `nextHop` + routingKey · does not cut the pipeline |
+| `route` | dynamic `string \| string[]` · terminates |
+| `to` | sends and **terminates** |
+| `reply({payload})` | `'current'` \| `'jumpMerge'` → answers the `replyChannel` |
 
-**Precedencia `replyChannel`** (invariante del runtime): `wireTap/fanout/publish → none` ·
-`to/route → inherit` · `jump → efímero propio`. El padre siempre conserva el reply del inbound.
+**`replyChannel` precedence** (runtime invariant): `wireTap/fanout/publish → none` ·
+`to/route → inherit` · `jump → its own ephemeral`. The parent always keeps the inbound reply.
 
-## Trazas e idempotencia
+## Tracing & idempotency
 
-| Header | Mensaje |
+| Header | Message field |
 |---|---|
 | `x-trace-id` / `x-span-id` / `x-parent-span-id` | `traceId` · `spanId` · `parentSpanId` |
 | `x-correlation-id` / `x-causation-id` | `correlationId` · `causationId` |
 | `idempotency-key` / `x-idempotency-key` | `idempotencyKey` |
 
 Scopes: `flow:${name}` · `activator:${Class}.${method}` · storage key `${scope}::${key}` ·
-sin key → no-op · `enabled:false` → Null Object.
+no key → no-op · `enabled:false` → Null Object.
 
 <details>
-<summary><strong>Implementar <code>IdempotencyStore</code> con Redis (contrato only)</strong></summary>
+<summary><strong>Implementing <code>IdempotencyStore</code> with Redis (contract only)</strong></summary>
 
 ```ts
 export class RedisIdempotencyStore implements IdempotencyStore {
@@ -157,20 +159,20 @@ export class RedisIdempotencyStore implements IdempotencyStore {
   async complete(scope: string, key: string, result: Record<string, unknown>) {
     await this.redis.set(this.k(scope, key), JSON.stringify({ status: 'completed', result }), 'KEEPTTL');
   }
-  async fail(scope: string, key: string, error: unknown) { /* KEEPTTL + status failed */ }
+  async fail(scope: string, key: string, error: unknown) { /* KEEPTTL + failed status */ }
   async get(scope: string, key: string) { /* JSON → IdempotencyRecord | undefined */ }
-  async purgeExpired() { return 0; } // TTL nativo de Redis
+  async purgeExpired() { return 0; } // native Redis TTL
 }
 
 forRoot({ channels, idempotency: { store: new RedisIdempotencyStore(redis) } });
 ```
 </details>
 
-## Observabilidad
+## Observability
 
 ```bash
 curl localhost:3000/integration/graph          # nodes · edges · flows (JSON)
-curl localhost:3000/integration/graph/mermaid  # topología como Mermaid
+curl localhost:3000/integration/graph/mermaid  # topology as Mermaid
 ```
 
 ```mermaid
@@ -181,26 +183,26 @@ flowchart LR
   inventory_reserve --> act["activator: InventoryActivator.reserve"]
 ```
 
-## Arquitectura
+## Architecture
 
-Hexagonal (puertos y adaptadores) con SOLID y patrones GoF explícitos:
+Hexagonal (ports & adapters) with explicit SOLID + GoF:
 `FlowStep` = **Command** · `FlowExecutor` = **Template Method** · `IntegrationFlow` = **Builder** ·
-`FanoutChannel` = **Composite** · `ChannelRegistry` = **Mediator** · canales/stores = **Strategy** ·
-`nextHop` = **Prototype** · `NoopIdempotencyStore` = **Null Object** · canales efímeros = **Proxy**.
+`FanoutChannel` = **Composite** · `ChannelRegistry` = **Mediator** · channels/stores = **Strategy** ·
+`nextHop` = **Prototype** · `NoopIdempotencyStore` = **Null Object** · ephemeral channels = **Proxy**.
 
 ```text
 interface (decorators · interceptor · controller · module · testing)
         ↓
 application (flow-executor · activator-wrapper · registry · gateway · graph)
         ↓
-domain (message · channel · flow-step)          ← cero dependencias, enforced
-        ↳ infrastructure: canales in-memory · memory store · rest/grpc/rabbit adapters
+domain (message · channel · flow-step)          ← zero dependencies, enforced
+        ↳ infrastructure: in-memory channels · memory store · rest/grpc/rabbit adapters
 ```
 
-Motor event-driven 100% nativo Node ≥ 18: `node:events` · `AsyncLocalStorage` +
+Event-driven engine, 100% native Node ≥ 18: `node:events` · `AsyncLocalStorage` +
 `AsyncResource.bind` · `AbortSignal.timeout` · `Promise.all/allSettled` · `setImmediate` ·
-`OnApplicationShutdown` (drain de queues). **Diseño completo, ADRs y decisión por decisión:
-[PLAN-arquitectura.md](./PLAN-arquitectura.md)** · Contrato funcional: [SPEC](./SPEC-nest-integration.md).
+`OnApplicationShutdown` (queue drain). **Full design, ADRs and decision-by-decision rationale:
+[PLAN-arquitectura.md](./PLAN-arquitectura.md)** (Spanish, canonical) · Functional contract: [SPEC](./SPEC-nest-integration.md).
 
 ## Testing
 
@@ -212,17 +214,17 @@ await registry.send('orders.place', { qty: 2, sku: 'A' });
 const reply = await waitFor(registry, 'reply.http-1', 2_000);
 ```
 
-## Estado
+## Status
 
 | | |
 |---|---|
-| Tests | **110/110** · 18 suites · e2e HTTP real |
-| Spec | 10/10 tests mínimos · DoD §15 completo |
-| Boundaries | dominio puro · barrel sin brokers · testing sin inbound (0 violaciones) |
+| Tests | **110/110** · 18 suites · real HTTP e2e |
+| Spec | 10/10 minimal tests · DoD §15 complete |
+| Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
 
-Example runnable: [`src/example/`](./src/example) · Scripts: `npm run verify` (typecheck → build → test → bounds).
+Runnable example: [`src/example/`](./src/example) · Scripts: `npm run verify` (typecheck → build → test → bounds).
 
-## Licencia
+## License
 
 MIT
