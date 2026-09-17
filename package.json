@@ -1,6 +1,6 @@
 {
   "name": "@estela/nest",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ESTELA — EIP runtime for NestJS (Spring Integration homolog): in-memory channels (direct/queue/pubsub/fanout), flow DSL, activators, inbound REST/gRPC/Rabbit/GraphQL, tracing, idempotency and a live topology graph.",
   "license": "MIT",
   "author": "Eliu Diaz (https://www.linkedin.com/in/eliudiaz)",
