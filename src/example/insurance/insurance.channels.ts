@@ -2,49 +2,87 @@ import { IntegrationFlow, type FlowDefinition } from '../../flow/integration-flo
 import type { ChannelSpec } from '../../channel-factory';
 
 /**
- * Skeleton ESTELA del domain Insurance (replica ms-asg-core):
- * `quote.service.create()` (12 steps) y `policy.service.create()` (6 blocks).
- * Cada step real de ms-asg-core mapea a un channel + activator skeleton.
+ * Insurance example — same EIP shape as the README `PlaceOrderFlow`,
+ * mapped onto quotes/policies. Flows talk to channels by name only.
  */
-
 export const INSURANCE_CHANNELS: readonly ChannelSpec[] = [
-  // ---- Quote creation pipeline (quote.service.create sec.STEPS 1-12) ----
-  { name: 'insurance.quotes.create', type: 'direct' }, // HTTP entry (requestReply)
-  { name: 'insurance.quotes.s1.validate-rules', type: 'direct' }, // STEP_1 validateQuoteRules()
-  { name: 'insurance.quotes.s2.content-validate', type: 'direct' }, // STEP_2 quoteHandlerService.validate()
-  { name: 'insurance.quotes.s3.person-upsert', type: 'direct' }, // STEP_3 creteOrUpdatePerson()
-  { name: 'insurance.quotes.s4.quote-record', type: 'direct' }, // STEP_4 createQuote() + stepAudit
-  { name: 'insurance.quotes.s5.content-handler', type: 'direct' }, // STEP_5 quoteHandlerService.handle()
-  { name: 'insurance.quotes.s6.contractor', type: 'direct' }, // STEP_6 createContractor()
-  { name: 'insurance.quotes.s7.insured', type: 'direct' }, // STEP_7 createInsured() (condicional)
-  { name: 'insurance.quotes.s8.merge-response', type: 'direct' }, // STEP_8 createResponse()
-  { name: 'insurance.quotes.s9.finalizer', type: 'direct' }, // STEP_9 finalizerService.execute()
-  { name: 'insurance.quotes.s10.finalizer-status', type: 'direct' }, // STEP_10 saveFinalizerStatus()
-  { name: 'insurance.quotes.s11.price', type: 'direct' }, // STEP_11 planService.getPrice() (bloquea si 0)
-  { name: 'insurance.quotes.s12.update-price', type: 'direct' }, // STEP_12 updatePrice() -> created
-  { name: 'insurance.quotes.created', type: 'pubsub' }, // evento de domain: quote lista
-  // ---- Policy creation pipeline (policy.service.create sec.STEPS 1-6) ----
-  { name: 'insurance.policies.create', type: 'direct' }, // HTTP entry (requestReply)
-  { name: 'insurance.policies.p1.validate-quote', type: 'direct' }, // STEP_1/1B quote no-failed + voucher
-  { name: 'insurance.policies.p2.business-validations', type: 'direct' }, // STEP_2 businessValidations()
-  { name: 'insurance.policies.p3.catalog-status', type: 'direct' }, // STEP_3 getActiveStatusPolicy()
-  { name: 'insurance.policies.p4.quote-context', type: 'direct' }, // STEP_4/4A/4B/4C quote + rules
-  { name: 'insurance.policies.p5.prepare-data', type: 'direct' }, // STEP_5 quoteSimpleData
-  { name: 'insurance.policies.p6.policy-record', type: 'direct' }, // STEP_6+ record + external + billing
-  { name: 'insurance.policies.created', type: 'pubsub' }, // evento de domain: policy emitida
+  { name: 'insurance.quotes.create', type: 'direct' },
+  { name: 'insurance.quotes.persist', type: 'direct' },
+  { name: 'insurance.quotes.country', type: 'direct' },
+  { name: 'insurance.quotes.audit', type: 'queue', capacity: 10_000 },
+  { name: 'insurance.quotes.validate-rules', type: 'direct' },
+  { name: 'insurance.quotes.price', type: 'direct' },
+  { name: 'insurance.quotes.created', type: 'pubsub' },
+  {
+    name: 'insurance.ops.fanout',
+    type: 'fanout',
+    bindings: ['insurance.quotes.validate-rules', 'insurance.quotes.price'],
+  },
+  { name: 'insurance.quotes.local', type: 'queue' },
+  { name: 'insurance.quotes.us', type: 'queue' },
+  { name: 'insurance.quotes.intl', type: 'queue' },
+  { name: 'insurance.policies.create', type: 'direct' },
+  { name: 'insurance.policies.persist', type: 'direct' },
+  { name: 'insurance.policies.validate-quote', type: 'direct' },
+  { name: 'insurance.policies.created', type: 'pubsub' },
 ];
 
-/** El entry delega al primer channel del pipeline; los activators chain el rest. */
 export const CreateQuoteFlow: FlowDefinition = {
   name: 'create-quote',
   build: () =>
-    IntegrationFlow.from('insurance.quotes.create').to('insurance.quotes.s1.validate-rules'),
+    IntegrationFlow.from('insurance.quotes.create')
+      .filter((payload) => {
+        const cmd = payload as { planId?: string; numberId?: string };
+        return typeof cmd.planId === 'string' && typeof cmd.numberId === 'string';
+      })
+      .transform((payload) => {
+        const cmd = payload as {
+          planId: string;
+          numberId: string;
+          dob?: string;
+          country?: string;
+        };
+        return { quoteId: `qte-${cmd.planId}`, ...cmd, premium: 250 };
+      })
+      .wireTap('insurance.quotes.audit')
+      .jumpTo([
+        { channel: 'insurance.quotes.validate-rules', timeoutMs: 3_000 },
+        { channel: 'insurance.quotes.price', timeoutMs: 3_000 },
+      ])
+      .publish('insurance.quotes.created', 'quote.created')
+      .reply()
+      .to('insurance.quotes.persist'),
 };
 
 export const CreatePolicyFlow: FlowDefinition = {
   name: 'create-policy',
   build: () =>
-    IntegrationFlow.from('insurance.policies.create').to('insurance.policies.p1.validate-quote'),
+    IntegrationFlow.from('insurance.policies.create')
+      .filter((payload) => typeof (payload as { quoteId?: string }).quoteId === 'string')
+      .transform((payload) => {
+        const cmd = payload as { quoteId: string };
+        return { policyId: `pol-${cmd.quoteId}`, ...cmd, status: 'ISSUED' };
+      })
+      .jumpTo([{ channel: 'insurance.policies.validate-quote', timeoutMs: 3_000 }])
+      .publish('insurance.policies.created', 'policy.created')
+      .reply()
+      .to('insurance.policies.persist'),
 };
 
-export const INSURANCE_FLOWS: readonly FlowDefinition[] = [CreateQuoteFlow, CreatePolicyFlow];
+/** sec.17.8: persist activator forwards here — direct cannot be activator + flow source. */
+export const RouteQuoteByCountryFlow: FlowDefinition = {
+  name: 'route-quote-by-country',
+  build: () =>
+    IntegrationFlow.from('insurance.quotes.country').route((payload) => {
+      const country = (payload as { country?: string }).country;
+      if (country === 'GT') return 'insurance.quotes.local';
+      if (country === 'US') return 'insurance.quotes.us';
+      return 'insurance.quotes.intl';
+    }),
+};
+
+export const INSURANCE_FLOWS: readonly FlowDefinition[] = [
+  CreateQuoteFlow,
+  CreatePolicyFlow,
+  RouteQuoteByCountryFlow,
+];

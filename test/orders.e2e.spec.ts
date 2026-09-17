@@ -124,6 +124,7 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
       'create-quote',
       'place-order',
       'route-by-country',
+      'route-quote-by-country',
     ]);
     const fanoutNode = graph.nodes.find((n) => n.channel === 'ops.fanout');
     expect(fanoutNode?.bindings).toEqual(['inventory.reserve', 'billing.charge']);

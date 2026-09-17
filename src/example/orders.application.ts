@@ -9,8 +9,13 @@ import { ChannelRegistry } from '../channel-registry';
 import { INSURANCE_CHANNELS, INSURANCE_FLOWS } from './insurance/insurance.channels';
 import { InsuranceController } from './insurance/insurance.controller';
 import {
-  PolicyCreationActivators,
-  QuoteCreationActivators,
+  PolicyEventsCollector,
+  PolicyPersistence,
+  PolicyValidateActivator,
+  QuoteEventsCollector,
+  QuotePersistence,
+  QuotePriceActivator,
+  QuoteRulesActivator,
 } from './insurance/insurance.activators';
 
 /** DTO de ejemplo — el body lo documenta el usuario (spec sec.7.3). */
@@ -159,8 +164,13 @@ export const RouteByCountryFlow: FlowDefinition = {
     BillingActivator,
     DomainEventsCollector,
     OrderPersistence,
-    QuoteCreationActivators,
-    PolicyCreationActivators,
+    QuoteRulesActivator,
+    QuotePriceActivator,
+    QuoteEventsCollector,
+    QuotePersistence,
+    PolicyValidateActivator,
+    PolicyEventsCollector,
+    PolicyPersistence,
   ],
 })
 export class OrdersApplicationModule {}
