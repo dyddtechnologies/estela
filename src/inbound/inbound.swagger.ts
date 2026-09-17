@@ -34,7 +34,7 @@ export class InboundReplyDto {
   @ApiProperty()
   correlationId!: string;
 
-  @ApiProperty({ type: 'object' })
+  @ApiProperty({ type: 'object', additionalProperties: true })
   headers!: Record<string, string>;
 }
 
@@ -71,7 +71,8 @@ export function setupIntegrationSwagger(
   app: object,
   options: SetupIntegrationSwaggerOptions = {},
 ): void {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  // Lazy require deliberado (el consumidor decide montar Swagger).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/consistent-type-imports
   const swagger = require('@nestjs/swagger') as typeof import('@nestjs/swagger');
   const { DocumentBuilder, SwaggerModule } = swagger;
   const config = new DocumentBuilder()

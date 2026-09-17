@@ -18,8 +18,16 @@ export interface GraphNode {
 }
 
 export type GraphEdgeVia =
-  | 'source' | 'wireTap' | 'fanout' | 'jump' | 'publish' | 'to' | 'route'
-  | 'binding' | 'inbound' | 'activator';
+  | 'source'
+  | 'wireTap'
+  | 'fanout'
+  | 'jump'
+  | 'publish'
+  | 'to'
+  | 'route'
+  | 'binding'
+  | 'inbound'
+  | 'activator';
 
 export interface GraphEdge {
   from: string;
@@ -33,7 +41,7 @@ export interface GraphEdge {
 export interface GraphFlowEntry {
   name: string;
   source: string;
-  steps: Array<Record<string, unknown>>;
+  steps: Record<string, unknown>[];
 }
 
 export interface GraphSnapshot {
@@ -48,12 +56,12 @@ interface DestLike {
   wait?: unknown;
 }
 
-function destChannels(step: Record<string, unknown>): Array<{ channel: string; wait?: boolean }> {
-  const out: Array<{ channel: string; wait?: boolean }> = [];
-  if (typeof step['channel'] === 'string') {
-    out.push({ channel: step['channel'] as string });
+function destChannels(step: Record<string, unknown>): { channel: string; wait?: boolean }[] {
+  const out: { channel: string; wait?: boolean }[] = [];
+  if (typeof step.channel === 'string') {
+    out.push({ channel: step.channel });
   }
-  const dests = step['dests'];
+  const dests = step.dests;
   if (!Array.isArray(dests)) return out;
   for (const dest of dests as DestLike[]) {
     if (typeof dest?.channel === 'string') {
@@ -65,7 +73,7 @@ function destChannels(step: Record<string, unknown>): Array<{ channel: string; w
 }
 
 function sanitizeId(value: string): string {
-  return value.replace(/[^A-Za-z0-9_]/g, '_');
+  return value.replace(/\W/g, '_');
 }
 
 /**
@@ -86,7 +94,10 @@ export class ChannelGraph {
 
   recordInbound(spec: InboundSpec): void {
     const refs = this.inbounds.get(spec.channel) ?? [];
-    const ref: GraphInboundRef = { transport: spec.transport, requestReply: spec.requestReply === true };
+    const ref: GraphInboundRef = {
+      transport: spec.transport,
+      requestReply: spec.requestReply === true,
+    };
     if (spec.operation !== undefined) ref.operation = spec.operation;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
@@ -95,9 +106,9 @@ export class ChannelGraph {
   recordFlow(name: string, built: BuiltFlow): void {
     const steps = built.steps.map((step) => step.describe());
     this.flows.push({ name, source: built.source, steps });
-    this.flows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    this.flows.sort((a, b) => a.name.localeCompare(b.name));
     for (const step of steps) {
-      const via = String(step['kind']);
+      const via = String(step.kind);
       if (via === 'route') {
         this.flowEdges.push({ from: built.source, to: '*', via: 'route', flow: name });
         continue;
@@ -111,7 +122,7 @@ export class ChannelGraph {
           flow: name,
         };
         if (target.wait !== undefined) edge.wait = target.wait;
-        if (typeof step['routingKey'] === 'string') edge.routingKey = step['routingKey'] as string;
+        if (typeof step.routingKey === 'string') edge.routingKey = step.routingKey;
         this.flowEdges.push(edge);
       }
     }
@@ -122,14 +133,19 @@ export class ChannelGraph {
     const edges: GraphEdge[] = [];
     for (const channel of registry.list()) {
       const isFanout = channel.kind === 'fanout';
-      const bindings = isFanout ? ((channel as { bindings?: readonly string[] }).bindings ?? []) : [];
+      let bindings: readonly string[] = [];
+      if (isFanout) {
+        bindings = (channel as { bindings?: readonly string[] }).bindings ?? [];
+      }
       nodes.push({
         channel: channel.name,
         kind: channel.kind,
         bindings,
         inbounds: this.inbounds.get(channel.name) ?? [],
         activators: this.activators.get(channel.name) ?? [],
-        flowsFrom: this.flows.filter((flow) => flow.source === channel.name).map((flow) => flow.name),
+        flowsFrom: this.flows
+          .filter((flow) => flow.source === channel.name)
+          .map((flow) => flow.name),
       });
       if (isFanout) {
         for (const binding of bindings) {
@@ -145,16 +161,25 @@ export class ChannelGraph {
     }
     edges.push(...this.flowEdges);
     const mermaid = this.renderMermaid(nodes, edges);
-    return { nodes, edges, flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })), mermaid };
+    return {
+      nodes,
+      edges,
+      flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })),
+      mermaid,
+    };
   }
 
   private renderMermaid(nodes: readonly GraphNode[], edges: readonly GraphEdge[]): string {
     const lines: string[] = ['flowchart LR'];
-    for (const node of nodes) {
-      lines.push(`  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}"]`);
-    }
+    this.appendNodeLines(lines, nodes);
+    this.appendEdgeLines(lines, edges);
+    return lines.join('\n');
+  }
+
+  private appendNodeLines(lines: string[], nodes: readonly GraphNode[]): void {
     let inboundIndex = 0;
     for (const node of nodes) {
+      lines.push(`  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}"]`);
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(
@@ -162,9 +187,14 @@ export class ChannelGraph {
         );
       }
       for (const label of node.activators) {
-        lines.push(`  ${sanitizeId(node.channel)} --> act_${sanitizeId(label)}["activator: ${label}"]`);
+        lines.push(
+          `  ${sanitizeId(node.channel)} --> act_${sanitizeId(label)}["activator: ${label}"]`,
+        );
       }
     }
+  }
+
+  private appendEdgeLines(lines: string[], edges: readonly GraphEdge[]): void {
     for (const edge of edges) {
       const labelParts: string[] = [edge.via];
       if (edge.flow !== undefined) labelParts.push(edge.flow);
@@ -173,6 +203,5 @@ export class ChannelGraph {
       const label = edge.via === 'binding' ? 'binding' : labelParts.join(' · ');
       lines.push(`  ${sanitizeId(edge.from)} -->|${label}| ${sanitizeId(edge.to)}`);
     }
-    return lines.join('\n');
   }
 }

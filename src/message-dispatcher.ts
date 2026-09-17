@@ -1,5 +1,10 @@
 import { ChannelNotFoundError, type MessageChannel } from './channel';
-import { createMessage, recordHop, type IntegrationMessage, type MessageHeadersInit } from './message';
+import {
+  createMessage,
+  recordHop,
+  type IntegrationMessage,
+  type MessageHeadersInit,
+} from './message';
 import type { TraceContext } from './trace/trace-context';
 
 /**

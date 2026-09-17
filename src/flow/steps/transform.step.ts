@@ -15,9 +15,7 @@ function isMessageLike(value: unknown): value is IntegrationMessage {
 export class TransformStep implements FlowStep {
   readonly kind = 'transform' as const;
 
-  constructor(
-    private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown | Promise<unknown>,
-  ) {}
+  constructor(private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind };
@@ -28,7 +26,10 @@ export class TransformStep implements FlowStep {
     if (isMessageLike(out)) {
       return {
         action: 'continue',
-        msg: { payload: out.payload, headers: { ...out.headers, history: [...out.headers.history] } },
+        msg: {
+          payload: out.payload,
+          headers: { ...out.headers, history: [...out.headers.history] },
+        },
       };
     }
     const msg: IntegrationMessage = recordHop(

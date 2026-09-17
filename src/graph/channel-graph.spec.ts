@@ -55,8 +55,18 @@ describe('ChannelGraph (spec §12)', () => {
       flow: 'place-order',
       routingKey: 'order.placed',
     });
-    expect(edges).toContainEqual({ from: 'orders.place', to: 'orders.audit', via: 'wireTap', flow: 'place-order' });
-    expect(edges).toContainEqual({ from: 'orders.place', to: 'orders.persist', via: 'to', flow: 'place-order' });
+    expect(edges).toContainEqual({
+      from: 'orders.place',
+      to: 'orders.audit',
+      via: 'wireTap',
+      flow: 'place-order',
+    });
+    expect(edges).toContainEqual({
+      from: 'orders.place',
+      to: 'orders.persist',
+      via: 'to',
+      flow: 'place-order',
+    });
     expect(edges).toContainEqual({
       from: 'inbound:rest',
       to: 'orders.place',
@@ -69,7 +79,11 @@ describe('ChannelGraph (spec §12)', () => {
     });
     expect(snapshot.flows).toHaveLength(1);
     expect(snapshot.flows[0]?.steps.map((s) => s.kind)).toEqual([
-      'wireTap', 'jump', 'publish', 'reply', 'to',
+      'wireTap',
+      'jump',
+      'publish',
+      'reply',
+      'to',
     ]);
   });
 
@@ -77,9 +91,16 @@ describe('ChannelGraph (spec §12)', () => {
     const { registry, graph } = makeWorld();
     graph.recordFlow(
       'fan',
-      IntegrationFlow.from('orders.place').fanoutTo([{ channel: 'orders.local', wait: false }]).build(),
+      IntegrationFlow.from('orders.place')
+        .fanoutTo([{ channel: 'orders.local', wait: false }])
+        .build(),
     );
-    graph.recordFlow('route-flow', IntegrationFlow.from('orders.persist').route(() => 'orders.local').build());
+    graph.recordFlow(
+      'route-flow',
+      IntegrationFlow.from('orders.persist')
+        .route(() => 'orders.local')
+        .build(),
+    );
     const snapshot = graph.snapshot(registry);
     expect(snapshot.edges).toContainEqual({
       from: 'orders.place',
@@ -88,13 +109,23 @@ describe('ChannelGraph (spec §12)', () => {
       flow: 'fan',
       wait: false,
     });
-    expect(snapshot.edges).toContainEqual({ from: 'orders.persist', to: '*', via: 'route', flow: 'route-flow' });
+    expect(snapshot.edges).toContainEqual({
+      from: 'orders.persist',
+      to: '*',
+      via: 'route',
+      flow: 'route-flow',
+    });
   });
 
   it('mermaid: determinista, con nodos, inbounds y edges etiquetados', () => {
     const { registry, graph } = makeWorld();
     graph.recordInbound({ channel: 'orders.place', transport: 'rest', requestReply: false });
-    graph.recordFlow('route-flow', IntegrationFlow.from('orders.persist').route(() => 'orders.local').build());
+    graph.recordFlow(
+      'route-flow',
+      IntegrationFlow.from('orders.persist')
+        .route(() => 'orders.local')
+        .build(),
+    );
     const first = graph.snapshot(registry).mermaid;
     const second = graph.snapshot(registry).mermaid;
     expect(first).toBe(second); // determinista
@@ -110,7 +141,7 @@ describe('ChannelGraph (spec §12)', () => {
     const controller = new ChannelGraphController(graph, registry);
     const snapshot = controller.graphSnapshot();
     expect(Array.isArray(snapshot.nodes)).toBe(true);
-    expect(snapshot.nodes.length).toBe(8);
+    expect(snapshot.nodes).toHaveLength(8);
     expect(controller.mermaid()).toContain('flowchart LR');
   });
 });

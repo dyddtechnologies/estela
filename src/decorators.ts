@@ -15,7 +15,11 @@ export interface ActivatorMetadata extends ActivatorOptions {
   kind: ActivatorKind;
 }
 
-function defineActivator(kind: ActivatorKind, channel: string, options: ActivatorOptions): MethodDecorator {
+function defineActivator(
+  kind: ActivatorKind,
+  channel: string,
+  options: ActivatorOptions,
+): MethodDecorator {
   return (target, propertyKey, descriptor) => {
     const metadata: ActivatorMetadata = { channel, kind };
     if (options.group !== undefined) metadata.group = options.group;

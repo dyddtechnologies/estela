@@ -12,9 +12,13 @@ export class ToStep implements FlowStep {
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
-    const hop = nextHop(ctx.msg, { channel: this.channel, component: `to:${ctx.flowName}` }, {
-      reply: 'inherit',
-    });
+    const hop = nextHop(
+      ctx.msg,
+      { channel: this.channel, component: `to:${ctx.flowName}` },
+      {
+        reply: 'inherit',
+      },
+    );
     await ctx.registry.sendMessage(this.channel, hop);
     return { action: 'stop', reason: 'terminated' };
   }

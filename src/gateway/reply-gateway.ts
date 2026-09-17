@@ -1,7 +1,7 @@
 import { awaitFirstMessage } from '../channels/one-shot';
 import { ChannelError } from '../channel';
 import { newId, type MessageHeadersInit } from '../message';
-import { ChannelRegistry } from '../channel-registry';
+import type { ChannelRegistry } from '../channel-registry';
 import type { TraceContext } from '../trace/trace-context';
 
 export class ReplyTimeoutError extends ChannelError {

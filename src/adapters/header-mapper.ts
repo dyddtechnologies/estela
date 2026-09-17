@@ -5,7 +5,7 @@ import type { MessageHeaders, MessageHeadersInit } from '../message';
  * x-trace-id/x-span-id/x-parent-span-id/x-correlation-id/x-causation-id +
  * idempotency-key|x-idempotency-key.
  */
-const TRACE_IN: ReadonlyArray<readonly [protocolKey: string, headerKey: string]> = [
+const TRACE_IN: readonly (readonly [protocolKey: string, headerKey: string])[] = [
   ['x-trace-id', 'traceId'],
   ['x-span-id', 'spanId'],
   ['x-parent-span-id', 'parentSpanId'],

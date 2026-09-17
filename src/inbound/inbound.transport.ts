@@ -37,9 +37,11 @@ export class GrpcInboundStrategy implements InboundTransportStrategy {
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction {
     const rpc = context.switchToRpc();
     const data = rpc.getData<unknown>();
-    const metadata = rpc.getContext<GrpcMetadataLike>();
+    const metadata = rpc.getContext<GrpcMetadataLike>() as unknown as GrpcMetadataLike | undefined;
     const rawHeaders =
-      typeof metadata?.toJSON === 'function' ? metadata.toJSON() : ((metadata ?? {}) as Record<string, unknown>);
+      typeof metadata?.toJSON === 'function'
+        ? metadata.toJSON()
+        : ((metadata ?? {}) as Record<string, unknown>);
     const payload = spec.payload === 'body' ? data : (handlerResult ?? data);
     return { payload, rawHeaders };
   }
@@ -49,7 +51,8 @@ export class GraphQLInboundStrategy implements InboundTransportStrategy {
   readonly transport = 'graphql' as const;
 
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction {
-    const args = context.getArgs() as Array<Record<string, unknown>>;
+    /* eslint-disable @typescript-eslint/no-unsafe-assignment -- getArgs() es any[] en Nest */
+    const args = context.getArgs();
     const resolverArgs = args[1] ?? args;
     const gqlContext = args[2] as
       | { req?: { headers?: Record<string, unknown> }; extensions?: Record<string, unknown> }
@@ -57,5 +60,6 @@ export class GraphQLInboundStrategy implements InboundTransportStrategy {
     const rawHeaders = gqlContext?.req?.headers ?? gqlContext?.extensions ?? {};
     const payload = spec.payload === 'body' ? resolverArgs : (handlerResult ?? resolverArgs);
     return { payload, rawHeaders };
+    /* eslint-enable @typescript-eslint/no-unsafe-assignment */
   }
 }

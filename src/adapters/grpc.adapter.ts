@@ -1,15 +1,12 @@
 import type { MessageHandlerFn, Unsubscribe } from '../channel';
-import { ChannelRegistry } from '../channel-registry';
+import type { ChannelRegistry } from '../channel-registry';
 import { GrpcHeaderMapper } from './header-mapper';
 import type { RequestReplyPort } from '../inbound/inbound.interceptor';
 import type { TraceContext } from '../trace/trace-context';
 
 const mapper = new GrpcHeaderMapper();
 
-export type GrpcStubFn = (
-  payload: unknown,
-  metadata: Record<string, string>,
-) => unknown | Promise<unknown>;
+export type GrpcStubFn = (payload: unknown, metadata: Record<string, string>) => unknown;
 
 /** gRPC outbound (spec §9): stub inyectado — cero imports de @grpc/grpc-js. */
 export function bindGrpcOut(
@@ -54,7 +51,12 @@ export async function handleGrpcInbound(
     if (deps.replyGateway === undefined) {
       throw new Error('grpcIn requestReply requiere ReplyGateway');
     }
-    return deps.replyGateway.sendAndReceive(channel, data, headers, timeoutMs ?? deps.defaultTimeoutMs);
+    return deps.replyGateway.sendAndReceive(
+      channel,
+      data,
+      headers,
+      timeoutMs ?? deps.defaultTimeoutMs,
+    );
   }
   await deps.registry.send(channel, data, headers);
   return undefined;

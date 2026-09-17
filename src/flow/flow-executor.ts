@@ -40,7 +40,7 @@ export class FlowExecutor {
     private readonly deps: FlowDeps,
   ) {}
 
-  inspect(): { source: string; steps: Array<Record<string, unknown>> } {
+  inspect(): { source: string; steps: Record<string, unknown>[] } {
     return { source: this.built.source, steps: this.built.steps.map((s) => s.describe()) };
   }
 
@@ -48,9 +48,9 @@ export class FlowExecutor {
   attachTo(registry: ChannelRegistry): Unsubscribe {
     // El handler RETORNA la promesa: en canales awaited (direct) el send
     // del productor espera la ejecución completa del flow (spec §17.3).
-    return registry.get(this.built.source).subscribe((msg) =>
-      this.execute(msg).then(() => undefined),
-    );
+    return registry
+      .get(this.built.source)
+      .subscribe((msg) => this.execute(msg).then(() => undefined));
   }
 
   async execute(input: IntegrationMessage): Promise<FlowExecutionResult> {
@@ -66,7 +66,11 @@ export class FlowExecutor {
     try {
       const result = await this.deps.trace.runWithMessage(input, () => this.runSteps(input));
       if (idem !== undefined && key !== undefined) {
-        await idem.complete(scope, key, result.status === 'filtered' ? { filtered: true } : { completed: true });
+        await idem.complete(
+          scope,
+          key,
+          result.status === 'filtered' ? { filtered: true } : { completed: true },
+        );
       }
       return result;
     } catch (error) {

@@ -5,7 +5,7 @@
  */
 import { awaitFirstMessage } from '../channels/one-shot';
 import type { Unsubscribe } from '../channel';
-import { ChannelRegistry } from '../channel-registry';
+import type { ChannelRegistry } from '../channel-registry';
 import { createMessage, type IntegrationMessage, type MessageHeadersInit } from '../message';
 import type { FlowDefinition } from '../flow/integration-flow';
 import { FlowExecutor, type FlowDeps, type FlowIdempotencyPort } from '../flow/flow-executor';
@@ -14,7 +14,10 @@ import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store'
 export { MemoryIdempotencyStore };
 
 /** Alias semántico del spec §14 — mismas invariantes que `createMessage`. */
-export function createTestMessage<T>(payload: T, headers?: MessageHeadersInit): IntegrationMessage<T> {
+export function createTestMessage<T>(
+  payload: T,
+  headers?: MessageHeadersInit,
+): IntegrationMessage<T> {
   return createMessage(payload, headers);
 }
 
@@ -47,7 +50,9 @@ export function bindFlow(
     trace: options.trace ?? registry.trace,
     errorChannel,
     ...(options.idempotency !== undefined ? { idempotency: options.idempotency } : {}),
-    ...(options.idempotencyTtlMs !== undefined ? { idempotencyTtlMs: options.idempotencyTtlMs } : {}),
+    ...(options.idempotencyTtlMs !== undefined
+      ? { idempotencyTtlMs: options.idempotencyTtlMs }
+      : {}),
   });
   executor.attachTo(registry);
   return executor;
@@ -73,7 +78,7 @@ export function collect<T = unknown>(
   pick: (msg: IntegrationMessage) => T = (msg) => msg.payload as T,
 ): { received: T[]; unsubscribe: Unsubscribe } {
   const received: T[] = [];
-  const unsubscribe = registry.get(channel).subscribe(async (msg) => {
+  const unsubscribe = registry.get(channel).subscribe((msg) => {
     received.push(pick(msg));
   });
   return { received, unsubscribe };

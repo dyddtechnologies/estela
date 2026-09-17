@@ -6,8 +6,19 @@ on:
   pull_request:
 
 jobs:
-  verify:
-    name: verify (node ${{ matrix.node }})
+  lint:
+    name: lint + format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+
+  test:
+    name: test + build (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -19,7 +30,28 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install
-        run: npm ci
-      - name: Verify (typecheck → build → test → bounds)
-        run: npm run verify
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run test
+      - run: npm run bounds
+
+  complexity:
+    name: complexity + clones + circular
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run complexity
+
+  audit:
+    name: vulnerabilities + lockfile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run audit:ci

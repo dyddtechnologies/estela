@@ -1,5 +1,5 @@
 import type { MessageHandlerFn, Unsubscribe } from '../channel';
-import { ChannelRegistry } from '../channel-registry';
+import type { ChannelRegistry } from '../channel-registry';
 import type { AmqpLikeChannel } from './amqp-like.channel';
 import { AmqpHeaderMapper } from './header-mapper';
 
@@ -20,7 +20,7 @@ export function bindRabbitOutbound(
   fromChannel: string,
   target: RabbitOutTarget,
 ): Unsubscribe {
-  const handler: MessageHandlerFn = async (msg) => {
+  const handler: MessageHandlerFn = (msg) => {
     const content = Buffer.from(JSON.stringify(msg.payload), 'utf8');
     const props = {
       contentType: 'application/json',

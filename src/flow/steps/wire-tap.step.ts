@@ -11,9 +11,9 @@ export class WireTapStep implements FlowStep {
     return { kind: this.kind, channel: this.channel };
   }
 
-  async execute(ctx: FlowStepContext): Promise<StepOutcome> {
+  execute(ctx: FlowStepContext): Promise<StepOutcome> {
     const tap = copyMessage(ctx.msg);
     void ctx.registry.sendMessage(this.channel, tap).catch(() => undefined);
-    return { action: 'continue', msg: ctx.msg };
+    return Promise.resolve({ action: 'continue', msg: ctx.msg });
   }
 }

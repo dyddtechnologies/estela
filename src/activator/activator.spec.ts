@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 
+import type { PubSubChannel } from '../channels/pubsub.channel';
 import { ChannelRegistry } from '../channel-registry';
 import { ServiceActivator, PubSub } from '../decorators';
 import { TraceContext } from '../trace/trace-context';
@@ -47,14 +48,17 @@ describe('decoradores + activator wrapper (spec §7.1)', () => {
     registry.create({ name: 'inventory.reserve', type: 'direct' });
     registry.create({ name: 'broken.channel', type: 'direct' });
     registry.create({ name: 'domain.events', type: 'pubsub' });
-    const errors: Array<Record<string, unknown>> = [];
-    (registry.get('error.channel') as import('../channels/pubsub.channel').PubSubChannel).subscribe(
-      async (msg) => {
-        errors.push(msg.payload as Record<string, unknown>);
-      },
-    );
+    const errors: Record<string, unknown>[] = [];
+    (registry.get('error.channel') as PubSubChannel).subscribe(async (msg) => {
+      errors.push(msg.payload as Record<string, unknown>);
+    });
     const idempotency = new IdempotencyService({ store: new MemoryIdempotencyStore() });
-    const activatorDeps: ActivatorDeps = { registry, trace: registry.trace, errorChannel: 'error.channel', idempotency };
+    const activatorDeps: ActivatorDeps = {
+      registry,
+      trace: registry.trace,
+      errorChannel: 'error.channel',
+      idempotency,
+    };
     const collectReply = (name: string): unknown[] => {
       const bucket: unknown[] = [];
       registry.create({ name, type: 'direct' }).subscribe(async (msg) => {
@@ -81,13 +85,17 @@ describe('decoradores + activator wrapper (spec §7.1)', () => {
     const original = instance.reserve.bind(instance);
     instance.reserve = (payload: unknown, msg: unknown): string => {
       traceIdInside = world.activatorDeps.trace.current()?.traceId;
-      return original(payload as never, msg as never);
+      return original(payload, msg);
     };
     subscribeActivators(discoverActivators([instance]), world.activatorDeps);
-    await world.registry.send('inventory.reserve', { sku: 'A1' }, {
-      replyChannel: 'reply.http-1',
-      traceId: 't-act',
-    });
+    await world.registry.send(
+      'inventory.reserve',
+      { sku: 'A1' },
+      {
+        replyChannel: 'reply.http-1',
+        traceId: 't-act',
+      },
+    );
     await delay(10);
     expect(replies).toEqual(['reserved:{"sku":"A1"}']);
     expect(traceIdInside).toBe('t-act');
@@ -106,14 +114,22 @@ describe('decoradores + activator wrapper (spec §7.1)', () => {
     const instance = new InventoryActivator();
     subscribeActivators(discoverActivators([instance]), world.activatorDeps);
     const replies = world.collectReply('reply.dup');
-    await world.registry.send('inventory.reserve', { sku: 'A' }, {
-      idempotencyKey: 'inv-1',
-      replyChannel: 'reply.dup',
-    });
-    await world.registry.send('inventory.reserve', { sku: 'A' }, {
-      idempotencyKey: 'inv-1',
-      replyChannel: 'reply.dup',
-    });
+    await world.registry.send(
+      'inventory.reserve',
+      { sku: 'A' },
+      {
+        idempotencyKey: 'inv-1',
+        replyChannel: 'reply.dup',
+      },
+    );
+    await world.registry.send(
+      'inventory.reserve',
+      { sku: 'A' },
+      {
+        idempotencyKey: 'inv-1',
+        replyChannel: 'reply.dup',
+      },
+    );
     await delay(10);
     expect(instance.calls).toBe(1);
     expect(replies).toEqual(['reserved:{"sku":"A"}', 'reserved:{"sku":"A"}']);

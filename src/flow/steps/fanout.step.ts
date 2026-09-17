@@ -17,7 +17,7 @@ export class FanoutStep implements FlowStep {
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
-    const awaited: Array<Promise<void>> = [];
+    const awaited: Promise<void>[] = [];
     for (const target of normalizeDests(this.dests)) {
       const hop = nextHop(
         ctx.msg,

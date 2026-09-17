@@ -19,7 +19,10 @@ describe('testing subpath (spec §14)', () => {
     registry.create({ name: 'out', type: 'direct' });
     const def: FlowDefinition = {
       name: 'mini',
-      build: () => IntegrationFlow.from('mini.in').transform((p) => `x:${String(p)}`).to('out'),
+      build: () =>
+        IntegrationFlow.from('mini.in')
+          .transform((p) => `x:${String(p)}`)
+          .to('out'),
     };
     bindFlow(def, registry);
     expect(registry.tryGet('error.channel')?.kind).toBe('pubsub');
@@ -46,11 +49,19 @@ describe('testing subpath (spec §14)', () => {
     const calls: unknown[] = [];
     const def: FlowDefinition = {
       name: 'idem',
-      build: () => IntegrationFlow.from('idem.in').transform((p) => { calls.push(p); return p; }).to('void-out'),
+      build: () =>
+        IntegrationFlow.from('idem.in')
+          .transform((p) => {
+            calls.push(p);
+            return p;
+          })
+          .to('void-out'),
     };
     registry.create({ name: 'void-out', type: 'direct' });
     registry.get('void-out').subscribe(async () => undefined);
-    bindFlow(def, registry, { idempotency: new IdempotencyService({ store: new MemoryIdempotencyStore() }) });
+    bindFlow(def, registry, {
+      idempotency: new IdempotencyService({ store: new MemoryIdempotencyStore() }),
+    });
     await registry.send('idem.in', 'm1', { idempotencyKey: 'k' });
     await registry.send('idem.in', 'm2', { idempotencyKey: 'k' });
     expect(calls).toEqual(['m1']);

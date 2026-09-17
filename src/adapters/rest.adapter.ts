@@ -1,6 +1,6 @@
 import type { MessageHandlerFn, Unsubscribe } from '../channel';
 import { HttpHeaderMapper } from './header-mapper';
-import { ChannelRegistry } from '../channel-registry';
+import type { ChannelRegistry } from '../channel-registry';
 
 /** fetch estructural — evita depender del lib DOM para el tipo global. */
 export interface RestFetchResponse {
@@ -33,9 +33,7 @@ export function bindRestOut(
   channel: string,
   options: RestOutOptions,
 ): Unsubscribe {
-  const fetchFn: RestFetch =
-    options.fetchFn ??
-    ((url, init) => globalThis.fetch(url, init) as unknown as Promise<RestFetchResponse>);
+  const fetchFn: RestFetch = options.fetchFn ?? ((url, init) => globalThis.fetch(url, init));
   const method = options.method ?? 'POST';
   const handler: MessageHandlerFn = async (msg) => {
     const response = await fetchFn(options.url, {

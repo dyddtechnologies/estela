@@ -1,21 +1,30 @@
 import 'reflect-metadata';
 
+import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { OrdersApplicationModule, InventoryActivator, BillingActivator, OrderPersistence, DomainEventsCollector } from '../src/example/orders.application';
+import {
+  OrdersApplicationModule,
+  InventoryActivator,
+  BillingActivator,
+  OrderPersistence,
+  DomainEventsCollector,
+} from '../src/example/orders.application';
 import { setupIntegrationSwagger } from '../src/inbound/inbound.swagger';
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('example orders — e2e HTTP (spec §13/§15)', () => {
-  let app: import('@nestjs/common').INestApplication | undefined;
-let url: string;
-let inventory: InventoryActivator;
+  let app: INestApplication | undefined;
+  let url: string;
+  let inventory: InventoryActivator;
   let billing: BillingActivator;
   let persistence: OrderPersistence;
   let domain: DomainEventsCollector;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [OrdersApplicationModule] }).compile();
+    const moduleRef = await Test.createTestingModule({
+      imports: [OrdersApplicationModule],
+    }).compile();
     app = moduleRef.createNestApplication();
     setupIntegrationSwagger(app, { title: 'orders-e2e' });
     await app.listen(0, '127.0.0.1');
@@ -64,13 +73,31 @@ let inventory: InventoryActivator;
   }, 20_000);
 
   it('replay con idempotency-key → duplicate con cachedResult', async () => {
-    const first = await post('/orders', { qty: 1, sku: 'DUP', country: 'US' }, { 'idempotency-key': 'e2e-1' });
+    const first = await post(
+      '/orders',
+      { qty: 1, sku: 'DUP', country: 'US' },
+      { 'idempotency-key': 'e2e-1' },
+    );
     expect(((await first.json()) as { status: string }).status).toBe('ok');
-    const second = await post('/orders', { qty: 1, sku: 'DUP', country: 'US' }, { 'idempotency-key': 'e2e-1' });
-    const body = (await second.json()) as { status: string; replayed: boolean; result: Record<string, unknown> };
+    const second = await post(
+      '/orders',
+      { qty: 1, sku: 'DUP', country: 'US' },
+      { 'idempotency-key': 'e2e-1' },
+    );
+    const body = (await second.json()) as {
+      status: string;
+      replayed: boolean;
+      result: Record<string, unknown>;
+    };
     expect(body.status).toBe('duplicate');
     expect(body.replayed).toBe(true);
-    expect(body.result).toEqual({ orderId: 'ord-DUP', qty: 1, sku: 'DUP', country: 'US', total: 10 });
+    expect(body.result).toEqual({
+      orderId: 'ord-DUP',
+      qty: 1,
+      sku: 'DUP',
+      country: 'US',
+      total: 10,
+    });
   }, 20_000);
 
   it('fanout: POST /orders/fanout → accepted; bindings entregan a inventory Y billing', async () => {
@@ -89,8 +116,8 @@ let inventory: InventoryActivator;
     const graphResponse = await fetch(`${url}/integration/graph`);
     expect(graphResponse.status).toBe(200);
     const graph = (await graphResponse.json()) as {
-      nodes: Array<{ channel: string; bindings: readonly string[] }>;
-      flows: Array<{ name: string }>;
+      nodes: { channel: string; bindings: readonly string[] }[];
+      flows: { name: string }[];
     };
     expect(graph.flows.map((f) => f.name)).toEqual(['place-order', 'route-by-country']);
     const fanoutNode = graph.nodes.find((n) => n.channel === 'ops.fanout');

@@ -26,7 +26,13 @@ import {
   type InboundSpec,
 } from './inbound.types';
 import { InboundInterceptor } from './inbound.interceptor';
-import { InboundRest, InboundRabbit, InboundGrpc, InboundGraphQL, Inbound } from './inbound.decorators';
+import {
+  InboundRest,
+  InboundRabbit,
+  InboundGrpc,
+  InboundGraphQL,
+  Inbound,
+} from './inbound.decorators';
 import { readInboundSpec } from './inbound.types';
 
 function fakeHttpCtx(request: Record<string, unknown>): ExecutionContext {
@@ -93,7 +99,10 @@ describe('HeaderMappers — tabla spec §4', () => {
 
   it('GraphQL: req.headers tiene precedencia sobre extensions', () => {
     const gql = new GraphQLHeaderMapper();
-    const fromReq = gql.mapIn({ req: { headers: { 'x-trace-id': 'from-req' } }, extensions: { 'x-trace-id': 'from-ext' } });
+    const fromReq = gql.mapIn({
+      req: { headers: { 'x-trace-id': 'from-req' } },
+      extensions: { 'x-trace-id': 'from-ext' },
+    });
     expect(fromReq.traceId).toBe('from-req');
     const fromExt = gql.mapIn({ extensions: { 'x-trace-id': 'from-ext' } });
     expect(fromExt.traceId).toBe('from-ext');
@@ -107,7 +116,9 @@ describe('Strategies de transporte (plan §5.1)', () => {
     const ctx = fakeHttpCtx({ body: { from: 'body' }, headers: {} });
     expect(strategy.extract(ctx, { from: 'return' }, spec).payload).toEqual({ from: 'return' });
     expect(strategy.extract(ctx, undefined, spec).payload).toEqual({ from: 'body' });
-    expect(strategy.extract(ctx, 'x', { ...spec, payload: 'body' }).payload).toEqual({ from: 'body' });
+    expect(strategy.extract(ctx, 'x', { ...spec, payload: 'body' }).payload).toEqual({
+      from: 'body',
+    });
   });
 
   it('grpc: data + metadata.toJSON()', () => {
@@ -146,12 +157,24 @@ describe('builders de respuesta (spec §7.2)', () => {
   it('acceptedResponse: canónicos ganan sobre el merge', () => {
     const msg = createMessage('p', { traceId: 't', correlationId: 'c' });
     const response = acceptedResponse(msg, { status: 'fake', extra: 1 });
-    expect(response).toEqual({ status: 'accepted', extra: 1, id: msg.headers.id, traceId: 't', correlationId: 'c' });
+    expect(response).toEqual({
+      status: 'accepted',
+      extra: 1,
+      id: msg.headers.id,
+      traceId: 't',
+      correlationId: 'c',
+    });
   });
 
   it('duplicateResponse: replayed true por defecto', () => {
     const response = duplicateResponse('k', { result: 'cached', traceId: 't' });
-    expect(response).toEqual({ status: 'duplicate', idempotencyKey: 'k', replayed: true, result: 'cached', traceId: 't' });
+    expect(response).toEqual({
+      status: 'duplicate',
+      idempotencyKey: 'k',
+      replayed: true,
+      result: 'cached',
+      traceId: 't',
+    });
   });
 });
 

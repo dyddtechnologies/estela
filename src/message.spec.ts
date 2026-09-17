@@ -32,19 +32,22 @@ describe('createMessage', () => {
     expect(msg.headers.replyChannel).toBe('reply.http-1');
     expect(msg.headers.idempotencyKey).toBe('idem-1');
     expect(msg.headers.jumpReplies).toEqual({ a: 1 });
-    expect(msg.headers['tenant']).toBe('acme');
+    expect(msg.headers.tenant).toBe('acme');
   });
 });
 
 describe('nextHop', () => {
   const base = (): IntegrationMessage<{ qty: number }> =>
-    createMessage({ qty: 2 }, {
-      traceId: 'trace-1',
-      correlationId: 'corr-1',
-      replyChannel: 'reply.inbound',
-      idempotencyKey: 'key-1',
-      jumpReplies: {},
-    });
+    createMessage(
+      { qty: 2 },
+      {
+        traceId: 'trace-1',
+        correlationId: 'corr-1',
+        replyChannel: 'reply.inbound',
+        idempotencyKey: 'key-1',
+        jumpReplies: {},
+      },
+    );
 
   it("default 'inherit' conserva contexto y crea nuevo hop (spec §4)", () => {
     const prev = base();
@@ -90,10 +93,10 @@ describe('nextHop', () => {
 
   it('conserva jumpReplies y headers custom', () => {
     const prev = base();
-    (prev.headers as Record<string, unknown>)['tenant'] = 'acme';
+    (prev.headers as Record<string, unknown>).tenant = 'acme';
     const next = nextHop(prev, { channel: 'x' });
     expect(next.headers.jumpReplies).toEqual({});
-    expect(next.headers['tenant']).toBe('acme');
+    expect(next.headers.tenant).toBe('acme');
   });
 });
 

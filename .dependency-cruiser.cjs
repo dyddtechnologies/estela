@@ -23,16 +23,14 @@ module.exports = {
     },
     {
       name: 'barrel-no-broker-clients',
-      comment:
-        'Spec §15 / plan §4.2: el barrel público jamás arrastra amqplib o @grpc/grpc-js.',
+      comment: 'Spec §15 / plan §4.2: el barrel público jamás arrastra amqplib o @grpc/grpc-js.',
       severity: 'error',
       from: { path: '^src/index\\.ts$' },
       to: { path: 'node_modules[\\/](amqplib|@grpc[\\/]grpc-js)' },
     },
     {
       name: 'testing-no-inbound-adapters',
-      comment:
-        'Plan §3.3: el subpath /testing no arrastra inbound/adapters (Nest/swagger).',
+      comment: 'Plan §3.3: el subpath /testing no arrastra inbound/adapters (Nest/swagger).',
       severity: 'error',
       from: { path: '^src/testing/' },
       to: { path: '^src/(inbound|adapters)[\\/]' },

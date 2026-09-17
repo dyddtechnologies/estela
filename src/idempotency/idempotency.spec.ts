@@ -108,12 +108,18 @@ describe('test 8 del spec: idempotencia evita re-ejecutar el transform', () => {
     registry.create({ name: 'error.channel', type: 'pubsub' });
     registry.create({ name: 'in', type: 'direct' });
     const store = new MemoryIdempotencyStore();
-    const executor = new FlowExecutor('filtered-flow', IntegrationFlow.from('in').filter(() => false).build(), {
-      registry,
-      trace: registry.trace,
-      errorChannel: 'error.channel',
-      idempotency: new IdempotencyService({ store }),
-    });
+    const executor = new FlowExecutor(
+      'filtered-flow',
+      IntegrationFlow.from('in')
+        .filter(() => false)
+        .build(),
+      {
+        registry,
+        trace: registry.trace,
+        errorChannel: 'error.channel',
+        idempotency: new IdempotencyService({ store }),
+      },
+    );
     const result = await executor.execute(createMessage('p', { idempotencyKey: 'kf' }));
     expect(result.status).toBe('filtered');
     const record = await store.get('flow:filtered-flow', 'kf');

@@ -23,30 +23,41 @@ describe('ReplyGateway — test 7 del spec (request/reply, spec §8)', () => {
   it('.reply cierra sendAndReceive; sin fugas de canales efímeros', async () => {
     const { registry, gateway } = makeWorld();
     registry.create({ name: 'orders.persist', type: 'direct' }).subscribe(async (msg) => {
-      await registry.send(msg.headers.replyChannel as string, { persisted: true });
+      await registry.send(msg.headers.replyChannel!, { persisted: true });
     });
     const sizeBefore = registry.list().length;
-    const result = await gateway.sendAndReceive('orders.persist', { orderId: 'o-1' }, { traceId: 't-7' });
+    const result = await gateway.sendAndReceive(
+      'orders.persist',
+      { orderId: 'o-1' },
+      { traceId: 't-7' },
+    );
     expect(result).toEqual({ persisted: true });
-    expect(registry.list().length).toBe(sizeBefore); // leak-free (plan §8.3)
+    expect(registry.list()).toHaveLength(sizeBefore); // leak-free (plan §8.3)
   });
 
   it('timeout → ReplyTimeoutError + deregistro en finally', async () => {
     const { registry, gateway } = makeWorld();
     registry.create({ name: 'silent', type: 'direct' }).subscribe(async () => undefined);
     const sizeBefore = registry.list().length;
-    await expect(gateway.sendAndReceive('silent', 'p', {}, 40)).rejects.toBeInstanceOf(ReplyTimeoutError);
+    await expect(gateway.sendAndReceive('silent', 'p', {}, 40)).rejects.toBeInstanceOf(
+      ReplyTimeoutError,
+    );
     await delay(10);
-    expect(registry.list().length).toBe(sizeBefore);
+    expect(registry.list()).toHaveLength(sizeBefore);
   });
 
   it('integración inbound requestReply:true end-to-end vía interceptor', async () => {
     const { registry, trace, gateway } = makeWorld();
     registry.create({ name: 'echo', type: 'direct' }).subscribe(async (msg) => {
-      await registry.send(msg.headers.replyChannel as string, { echoed: msg.payload });
+      await registry.send(msg.headers.replyChannel!, { echoed: msg.payload });
     });
     const interceptor = new InboundInterceptor({ registry, trace, replyGateway: gateway });
-    const spec: InboundSpec = { channel: 'echo', transport: 'rest', requestReply: true, timeoutMs: 200 };
+    const spec: InboundSpec = {
+      channel: 'echo',
+      transport: 'rest',
+      requestReply: true,
+      timeoutMs: 200,
+    };
     const handler = function handle(): void {};
     Reflect.defineMetadata(INBOUND_SPEC_METADATA, spec, handler);
     const ctx = {
@@ -66,20 +77,28 @@ describe('ReplyGateway — test 7 del spec (request/reply, spec §8)', () => {
 describe('REST outbound (spec §9)', () => {
   it('fetch con headers de traza + idempotencia; body JSON; !ok → throw', async () => {
     const { registry } = makeWorld();
-    const calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body: string } }> = [];
+    const calls: {
+      url: string;
+      init: { method: string; headers: Record<string, string>; body: string };
+    }[] = [];
     const fetchFn: RestFetch = async (url, init) => {
       calls.push({ url, init });
       return { ok: true, status: 200, text: async () => JSON.stringify({ done: true }) };
     };
     registry.create({ name: 'http.out.erp', type: 'direct' });
     bindRestOut(registry, 'http.out.erp', { url: 'https://erp.example/orders', fetchFn });
-    await registry.send('http.out.erp', { orderId: 'o-2' }, { traceId: 't-rest', idempotencyKey: 'k-rest' });
+    await registry.send(
+      'http.out.erp',
+      { orderId: 'o-2' },
+      { traceId: 't-rest', idempotencyKey: 'k-rest' },
+    );
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe('https://erp.example/orders');
     expect(calls[0]?.init.method).toBe('POST');
     expect(calls[0]?.init.headers['x-trace-id']).toBe('t-rest');
     expect(calls[0]?.init.headers['idempotency-key']).toBe('k-rest');
-    expect(JSON.parse(calls[0]?.init.body as string)).toEqual({ orderId: 'o-2' });
+    const body = calls[0]?.init.body;
+    expect(typeof body === 'string' ? JSON.parse(body) : null).toEqual({ orderId: 'o-2' });
 
     const failFetch: RestFetch = async () => ({ ok: false, status: 500, text: async () => '' });
     registry.create({ name: 'http.fail', type: 'direct' });
@@ -91,16 +110,21 @@ describe('REST outbound (spec §9)', () => {
 describe('gRPC outbound/inbound (spec §9 — cero @grpc/grpc-js)', () => {
   it('stub inyectado recibe metadata de traza; replyChannel reenvía resultado', async () => {
     const { registry } = makeWorld();
-    const stubCalls: Array<{ payload: unknown; metadata: Record<string, string> }> = [];
+    const stubCalls: { payload: unknown; metadata: Record<string, string> }[] = [];
     const replies: unknown[] = [];
     registry.create({ name: 'reply.grpc', type: 'direct' }).subscribe(async (msg) => {
       replies.push(msg.payload);
     });
     registry.create({ name: 'grpc.out', type: 'direct' });
-    bindGrpcOut(registry, 'grpc.out', (payload, metadata) => {
-      stubCalls.push({ payload, metadata });
-      return 'stub-result';
-    }, { replyChannel: 'reply.grpc' });
+    bindGrpcOut(
+      registry,
+      'grpc.out',
+      (payload, metadata) => {
+        stubCalls.push({ payload, metadata });
+        return 'stub-result';
+      },
+      { replyChannel: 'reply.grpc' },
+    );
     await registry.send('grpc.out', { q: 1 }, { traceId: 't-grpc' });
     expect(stubCalls).toHaveLength(1);
     expect(stubCalls[0]?.payload).toEqual({ q: 1 });
@@ -110,7 +134,7 @@ describe('gRPC outbound/inbound (spec §9 — cero @grpc/grpc-js)', () => {
 
   it('handleGrpcInbound: fire-and-forget entrega al canal con trazas mapeadas', async () => {
     const { registry, trace } = makeWorld();
-    const received: Array<{ payload: unknown; traceId?: string }> = [];
+    const received: { payload: unknown; traceId?: string }[] = [];
     registry.create({ name: 'orders.place', type: 'direct' }).subscribe(async (msg) => {
       received.push({ payload: msg.payload, traceId: msg.headers.traceId });
     });
@@ -154,7 +178,11 @@ describe('Rabbit outbound (spec §9)', () => {
     const msg = { orderId: 'o-9' };
     await registry.send('amqp.out', msg, { traceId: 't-rabbit', idempotencyKey: 'k-rabbit' });
     expect(sent).toHaveLength(1);
-    const entry = sent[0] as { queue: string; content: Buffer; options: { deliveryMode: number; headers: Record<string, string>; messageId: string } };
+    const entry = sent[0] as {
+      queue: string;
+      content: Buffer;
+      options: { deliveryMode: number; headers: Record<string, string>; messageId: string };
+    };
     expect(entry.queue).toBe('orders.persist.q');
     expect(JSON.parse(entry.content.toString('utf8'))).toEqual(msg);
     expect(entry.options.deliveryMode).toBe(2);
@@ -167,7 +195,10 @@ describe('Rabbit outbound (spec §9)', () => {
     const { registry } = makeWorld();
     const { amqp, published, sent } = fakeAmqp();
     registry.create({ name: 'domain.events.out', type: 'direct' });
-    bindRabbitOutbound(amqp, registry, 'domain.events.out', { exchange: 'domain', routingKey: 'order.placed' });
+    bindRabbitOutbound(amqp, registry, 'domain.events.out', {
+      exchange: 'domain',
+      routingKey: 'order.placed',
+    });
     await registry.send('domain.events.out', 'evt');
     expect(published).toHaveLength(1);
     const entry = published[0] as { exchange: string; routingKey: string };

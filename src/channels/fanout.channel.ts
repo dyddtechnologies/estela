@@ -62,7 +62,7 @@ export class FanoutChannel implements MessageChannel {
   }
 
   async send(msg: IntegrationMessage): Promise<void> {
-    const bindingSends: Array<Promise<void>> = this.bindingsList.map((binding) =>
+    const bindingSends: Promise<void>[] = this.bindingsList.map((binding) =>
       this.sendToBinding(msg, binding),
     );
     await Promise.all([...bindingSends, this.dispatchLocals(msg)]);
@@ -72,13 +72,19 @@ export class FanoutChannel implements MessageChannel {
     assertNoFanoutCycle(msg, binding);
     const target = this.resolver.get(binding);
     if (target === undefined) throw new ChannelNotFoundError(binding);
-    const hop = nextHop(msg, { channel: binding, component: `fanout:${this.name}` }, { reply: 'none' });
+    const hop = nextHop(
+      msg,
+      { channel: binding, component: `fanout:${this.name}` },
+      { reply: 'none' },
+    );
     await target.send(hop);
   }
 
   private async dispatchLocals(msg: IntegrationMessage): Promise<void> {
     const results = await Promise.allSettled(
-      this.locals.map((local) => this.deps.trace.runWithMessage(msg, () => local.handler(msg))),
+      this.locals.map((local) =>
+        this.deps.trace.runWithMessage(msg, async () => local.handler(msg)),
+      ),
     );
     for (const result of results) {
       if (result.status === 'rejected') this.deps.onError?.(result.reason, msg);

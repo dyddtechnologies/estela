@@ -1,5 +1,11 @@
 import { JumpTimeoutError } from '../flow-step';
-import { normalizeDests, type FanoutDest, type FlowStep, type FlowStepContext, type StepOutcome } from '../flow-step';
+import {
+  normalizeDests,
+  type FanoutDest,
+  type FlowStep,
+  type FlowStepContext,
+  type StepOutcome,
+} from '../flow-step';
 import { awaitFirstMessage } from '../../channels/one-shot';
 import { JUMP_REPLY_HEADER, nextHop, newId } from '../../message';
 import { reportFireAndForget } from './forget';
@@ -25,15 +31,13 @@ export class JumpStep implements FlowStep {
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
     const jumpReplies: Record<string, unknown> = { ...(ctx.msg.headers.jumpReplies ?? {}) };
-    const awaited: Array<Promise<void>> = [];
+    const awaited: Promise<void>[] = [];
     for (const target of normalizeDests(this.dests)) {
       const timeoutMs = target.timeoutMs ?? this.defaultTimeoutMs;
       const run = this.runJump(ctx, target.channel, timeoutMs, jumpReplies);
       if (target.wait === false) reportFireAndForget(ctx, target.channel, run, ctx.msg);
       else {
-        awaited.push(
-          run.then(() => undefined),
-        );
+        awaited.push(run.then(() => undefined));
       }
     }
     await Promise.all(awaited);

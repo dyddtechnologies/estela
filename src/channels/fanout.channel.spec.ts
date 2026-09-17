@@ -21,11 +21,15 @@ describe('FanoutChannel (spec §5, plan §8.6)', () => {
       receivedInventory.push(msg.payload);
     });
     const resolver: ChannelResolver = {
-      get: (name) => (name === 'inventory.reserve' ? inventory : (undefined as never)),
+      get: (name) => (name === 'inventory.reserve' ? inventory : undefined),
     };
-    const fanout = new FanoutChannel('ops.fanout', { trace, resolver }, {
-      bindings: ['inventory.reserve'],
-    });
+    const fanout = new FanoutChannel(
+      'ops.fanout',
+      { trace, resolver },
+      {
+        bindings: ['inventory.reserve'],
+      },
+    );
     const local: unknown[] = [];
     fanout.subscribe(async (msg) => {
       local.push(msg.payload);
@@ -46,7 +50,7 @@ describe('FanoutChannel (spec §5, plan §8.6)', () => {
       done = true;
     });
     const resolver: ChannelResolver = {
-      get: (name) => (name === 'slow' ? slow : (undefined as never)),
+      get: (name) => (name === 'slow' ? slow : undefined),
     };
     const fanout = new FanoutChannel('f', { trace, resolver }, { bindings: ['slow'] });
     await fanout.send(createMessage('p'));
@@ -73,7 +77,7 @@ describe('FanoutChannel (spec §5, plan §8.6)', () => {
   it('binding inexistente → ChannelNotFoundError', async () => {
     const trace = new TraceContext();
     const resolver: ChannelResolver = {
-      get: () => undefined as never,
+      get: () => undefined,
     };
     const fanout = new FanoutChannel('f', { trace, resolver }, { bindings: ['nope'] });
     await expect(fanout.send(createMessage('p'))).rejects.toBeInstanceOf(ChannelNotFoundError);

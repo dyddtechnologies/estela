@@ -1,8 +1,4 @@
-import {
-  ChannelError,
-  type ChannelKind,
-  type MessageChannel,
-} from './channel';
+import { ChannelError, type ChannelKind, type MessageChannel } from './channel';
 import { DirectChannel } from './channels/direct.channel';
 import { FanoutChannel } from './channels/fanout.channel';
 import { PubSubChannel } from './channels/pubsub.channel';

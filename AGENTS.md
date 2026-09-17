@@ -2,7 +2,8 @@
 
 ## Commands
 
-- `npm run verify` — typecheck → build (ESM+CJS+d.ts) → jest → dependency-cruiser.
+- `npm run verify` — typecheck → eslint (type-checked + sonarjs + security) → prettier → build
+  (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
 - The e2e HTTP test (`test/orders.e2e.spec.ts`) binds a loopback socket: run it with network permissions.
 

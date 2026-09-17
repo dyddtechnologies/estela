@@ -1,5 +1,9 @@
 import { AmqpHeaderMapper } from '../adapters/header-mapper';
-import { AMQP_CHANNEL, type AmqpLikeChannel, type AmqpMessage } from '../adapters/amqp-like.channel';
+import {
+  AMQP_CHANNEL,
+  type AmqpLikeChannel,
+  type AmqpMessage,
+} from '../adapters/amqp-like.channel';
 import type { ChannelRegistry } from '../channel-registry';
 import { recordHop } from '../message';
 import { createMessage } from '../message';
@@ -30,7 +34,9 @@ export class InboundExplorer {
 
   async onModuleInit(): Promise<void> {
     if (this.options.amqp === undefined) {
-      this.options.log?.('AMQP_CHANNEL ausente — inbound rabbit declarado pero no bindeado (warn, no throw)');
+      this.options.log?.(
+        'AMQP_CHANNEL ausente — inbound rabbit declarado pero no bindeado (warn, no throw)',
+      );
       return;
     }
     for (const mapping of this.options.mappings ?? []) {

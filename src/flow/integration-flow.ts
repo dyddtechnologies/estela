@@ -23,7 +23,7 @@ export interface FlowDefinition {
 }
 
 export type PredicateFn = (payload: unknown, msg: IntegrationMessage) => boolean | Promise<boolean>;
-export type MapFn = (payload: unknown, msg: IntegrationMessage) => unknown | Promise<unknown>;
+export type MapFn = (payload: unknown, msg: IntegrationMessage) => unknown;
 export type RouteFn = (
   payload: unknown,
   msg: IntegrationMessage,
@@ -101,7 +101,7 @@ export class IntegrationFlow {
   }
 
   /** Sin funciones (plan §9.4) — alimenta `inspect()` y el grafo (Fase 9). */
-  inspect(): { source: string; steps: Array<Record<string, unknown>> } {
+  inspect(): { source: string; steps: Record<string, unknown>[] } {
     return { source: this.source, steps: this.steps.map((step) => step.describe()) };
   }
 

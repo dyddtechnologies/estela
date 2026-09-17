@@ -51,7 +51,10 @@ export class PubSubChannel implements MessageChannel {
       if (subscriber.group !== undefined) {
         const members = this.groups.get(subscriber.group);
         if (members !== undefined) {
-          this.groups.set(subscriber.group, members.filter((member) => member !== id));
+          this.groups.set(
+            subscriber.group,
+            members.filter((member) => member !== id),
+          );
         }
       }
     };
@@ -76,7 +79,7 @@ export class PubSubChannel implements MessageChannel {
       }
     }
     const results = await Promise.allSettled(
-      targets.map((target) => this.deps.trace.runWithMessage(msg, () => target.handler(msg))),
+      targets.map((target) => this.deps.trace.runWithMessage(msg, async () => target.handler(msg))),
     );
     for (const result of results) {
       if (result.status === 'rejected') this.deps.onError?.(result.reason, msg);

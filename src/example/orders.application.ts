@@ -1,5 +1,6 @@
 import { Body, Controller, Injectable, Module, Post } from '@nestjs/common';
 import { ApiBody, ApiProperty, ApiTags } from '@nestjs/swagger';
+import type { IntegrationMessage } from '../message';
 import { IntegrationModule } from '../integration.module';
 import { InboundRest } from '../inbound/inbound.decorators';
 import { PubSub, ServiceActivator } from '../decorators';
@@ -47,17 +48,17 @@ export class BillingActivator {
 
 @Injectable()
 export class DomainEventsCollector {
-  seen: Array<{ routingKey?: unknown; payload: unknown }> = [];
+  seen: { routingKey?: unknown; payload: unknown }[] = [];
 
   @PubSub('domain.events')
-  onEvent(payload: unknown, msg: import('../message').IntegrationMessage): void {
+  onEvent(payload: unknown, msg: IntegrationMessage): void {
     this.seen.push({ routingKey: msg.headers.routingKey, payload });
   }
 }
 
 @Injectable()
 export class OrderPersistence {
-  persisted: Array<Record<string, unknown>> = [];
+  persisted: Record<string, unknown>[] = [];
 
   constructor(private readonly registry: ChannelRegistry) {}
 

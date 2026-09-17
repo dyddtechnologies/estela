@@ -33,7 +33,7 @@ class BillingActivator {
 
 @Injectable()
 class OrderPersistence {
-  persisted: Array<Record<string, unknown>> = [];
+  persisted: Record<string, unknown>[] = [];
 
   constructor(private readonly registry: ChannelRegistry) {}
 
@@ -58,13 +58,20 @@ const PlaceOrderFlow: FlowDefinition = {
   name: 'place-order',
   build: () =>
     IntegrationFlow.from('orders.place')
-      .filter((payload) => (payload as { qty: number }).qty > 0 && typeof (payload as { sku?: string }).sku === 'string')
+      .filter(
+        (payload) =>
+          (payload as { qty: number }).qty > 0 &&
+          typeof (payload as { sku?: string }).sku === 'string',
+      )
       .transform((payload) => {
         const cmd = payload as { qty: number; sku: string };
         return { orderId: `ord-${cmd.sku}`, ...cmd, total: cmd.qty * 10 };
       })
       .wireTap('orders.audit')
-      .jumpTo([{ channel: 'inventory.reserve', timeoutMs: 1000 }, { channel: 'billing.charge', timeoutMs: 1000 }])
+      .jumpTo([
+        { channel: 'inventory.reserve', timeoutMs: 1000 },
+        { channel: 'billing.charge', timeoutMs: 1000 },
+      ])
       .publish('domain.events', 'order.placed')
       .reply()
       .to('orders.persist'),
@@ -130,7 +137,7 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
     expect(registry.get('error.channel').kind).toBe('pubsub');
     expect(module.get(ChannelGraph)).toBeInstanceOf(ChannelGraph);
     expect(module.get(ChannelGraphController)).toBeInstanceOf(ChannelGraphController);
-    const options = module.get<ResolvedIntegrationOptions>(INTEGRATION_OPTIONS as never);
+    const options = module.get<ResolvedIntegrationOptions>(INTEGRATION_OPTIONS);
     expect(options.errorChannel).toBe('error.channel');
     expect(options.flows).toHaveLength(2);
   });
@@ -161,7 +168,10 @@ describe('IntegrationModule.forRoot — bootstrap orders (topología §17.8)', (
     const graph = module.get(ChannelGraph);
     const registry = module.get(ChannelRegistry);
     const snapshot = graph.snapshot(registry);
-    expect(snapshot.flows.map((f: { name: string }) => f.name)).toEqual(['place-order', 'route-by-country']);
+    expect(snapshot.flows.map((f: { name: string }) => f.name)).toEqual([
+      'place-order',
+      'route-by-country',
+    ]);
     expect(snapshot.edges).toContainEqual({
       from: 'orders.place',
       to: 'orders.persist',

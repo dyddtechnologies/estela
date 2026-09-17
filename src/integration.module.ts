@@ -16,9 +16,7 @@ import type { ChannelDeps as ChannelDepsType } from './channels/channel-deps';
 import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
 import { INBOUND_DEPS } from './inbound/inbound.interceptor';
 import { InboundExplorer } from './inbound/inbound.explorer';
-import {
-  serializeError,
-} from './flow/flow-step';
+import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
 import type { FlowDefinition } from './flow/integration-flow';
 import { IdempotencyService } from './idempotency/idempotency.service';
@@ -65,6 +63,7 @@ export class IntegrationModule {
       errorChannel: options.errorChannel ?? 'error.channel',
     };
     const logger = new Logger('IntegrationModule');
+    const holder: { registry?: ChannelRegistry } = {};
 
     const providers: Provider[] = [
       TraceContext,
@@ -72,18 +71,18 @@ export class IntegrationModule {
       { provide: INTEGRATION_OPTIONS, useValue: resolved },
       {
         provide: IdempotencyService,
-        useFactory: (opts: ResolvedIntegrationOptions) => new IdempotencyService(opts.idempotency ?? {}),
+        useFactory: (opts: ResolvedIntegrationOptions) =>
+          new IdempotencyService(opts.idempotency ?? {}),
         inject: [INTEGRATION_OPTIONS],
       },
       {
         provide: ChannelRegistry,
         useFactory: (trace: TraceContext, opts: ResolvedIntegrationOptions): ChannelRegistry => {
-          let ref: ChannelRegistry | undefined;
           const channelDeps: ChannelDepsType = {
             trace,
             onWarn: (message) => logger.warn(message),
             onError: (error, msg) => {
-              const target = ref;
+              const target = holder.registry;
               if (target === undefined) return;
               const envelope = createMessage(
                 { error: serializeError(error), causedBy: msg.headers.id },
@@ -96,8 +95,8 @@ export class IntegrationModule {
               void target.sendMessage(opts.errorChannel, envelope).catch(() => undefined);
             },
           };
-          ref = new ChannelRegistry(channelDeps, new ChannelFactoryRegistry());
-          return ref;
+          holder.registry = new ChannelRegistry(channelDeps, new ChannelFactoryRegistry());
+          return holder.registry;
         },
         inject: [TraceContext, INTEGRATION_OPTIONS],
       },
@@ -119,7 +118,11 @@ export class IntegrationModule {
       },
       {
         provide: InboundExplorer,
-        useFactory: (registry: ChannelRegistry, trace: TraceContext, opts: ResolvedIntegrationOptions) =>
+        useFactory: (
+          registry: ChannelRegistry,
+          trace: TraceContext,
+          opts: ResolvedIntegrationOptions,
+        ) =>
           new InboundExplorer({
             registry,
             trace,
@@ -175,7 +178,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       this.registry.create({ name: this.options.errorChannel, type: 'pubsub' });
     }
     const errorChannel = this.registry.get(this.options.errorChannel);
-    errorChannel.subscribe?.call(errorChannel, async (msg) => {
+    errorChannel.subscribe?.call(errorChannel, (msg) => {
       this.logger.error(`error.channel: ${JSON.stringify(msg.payload)}`);
     });
     for (const spec of this.options.channels) {
@@ -213,25 +216,32 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
   }
 
+  // Reflexión sobre metadata propia (escrita por nuestro decorador).
+  /* eslint-disable @typescript-eslint/no-unsafe-assignment */
   private subscribeDiscoveredActivators(): void {
     for (const wrapper of this.discovery.getProviders()) {
-      const instance = wrapper.instance as object | null;
+      const instance: unknown = wrapper.instance;
       if (instance === null || typeof instance !== 'object') continue;
       let proto: object | null = Object.getPrototypeOf(instance);
       while (proto !== null && proto !== Object.prototype) {
         for (const methodName of this.metadataScanner.getAllMethodNames(proto)) {
           const metadata = Reflect.getMetadata(ACTIVATOR_METADATA, proto, methodName) as
-            | ActivatorMetadata
-            | undefined;
+            ActivatorMetadata | undefined;
           if (metadata === undefined) continue;
           subscribeActivator({ instance, methodName, metadata }, this.activatorDeps());
-          this.graph.recordActivator(metadata.channel, `${instance.constructor.name}.${methodName}`);
-          this.logger.log(`activator: ${instance.constructor.name}.${methodName} → ${metadata.channel}`);
+          this.graph.recordActivator(
+            metadata.channel,
+            `${instance.constructor.name}.${methodName}`,
+          );
+          this.logger.log(
+            `activator: ${instance.constructor.name}.${methodName} → ${metadata.channel}`,
+          );
         }
         proto = Object.getPrototypeOf(proto);
       }
     }
   }
+  /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
   private activatorDeps(): ActivatorDeps {
     const deps: ActivatorDeps = {

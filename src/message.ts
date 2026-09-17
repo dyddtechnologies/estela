@@ -47,7 +47,7 @@ export interface IntegrationMessage<T = unknown> {
 }
 
 /** Init parcial para `createMessage`; claves desconocidas pasan como headers custom. */
-export type MessageHeadersInit = {
+export interface MessageHeadersInit {
   id?: string;
   timestamp?: number;
   correlationId?: string;
@@ -64,7 +64,7 @@ export type MessageHeadersInit = {
   history?: HistoryHop[];
   jumpReplies?: Record<string, unknown>;
   [key: string]: unknown;
-};
+}
 
 /**
  * Precedencia del `replyChannel` del hop (plan §8.1 — obligatoria):
@@ -86,8 +86,13 @@ export function newId(): string {
   try {
     return randomUUID();
   } catch {
+    // eslint-disable-next-line sonarjs/pseudo-random -- fallback solo si no hay crypto
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   }
+}
+
+function setIfDefined(headers: MessageHeaders, key: string, value: unknown): void {
+  if (value !== undefined) (headers as Record<string, unknown>)[key] = value;
 }
 
 function makeHop(hop: HistoryHopInput): HistoryHop {
@@ -113,15 +118,15 @@ export function createMessage<T>(payload: T, init?: MessageHeadersInit): Integra
     spanId: h.spanId ?? newId(),
     history: h.history ?? [],
   };
-  if (h.causationId !== undefined) headers.causationId = h.causationId;
-  if (h.parentSpanId !== undefined) headers.parentSpanId = h.parentSpanId;
-  if (h.replyChannel !== undefined) headers.replyChannel = h.replyChannel;
-  if (h.errorChannel !== undefined) headers.errorChannel = h.errorChannel;
-  if (h.routingKey !== undefined) headers.routingKey = h.routingKey;
-  if (h.contentType !== undefined) headers.contentType = h.contentType;
-  if (h.source !== undefined) headers.source = h.source;
-  if (h.idempotencyKey !== undefined) headers.idempotencyKey = h.idempotencyKey;
-  if (h.jumpReplies !== undefined) headers.jumpReplies = h.jumpReplies;
+  setIfDefined(headers, 'causationId', h.causationId);
+  setIfDefined(headers, 'parentSpanId', h.parentSpanId);
+  setIfDefined(headers, 'replyChannel', h.replyChannel);
+  setIfDefined(headers, 'errorChannel', h.errorChannel);
+  setIfDefined(headers, 'routingKey', h.routingKey);
+  setIfDefined(headers, 'contentType', h.contentType);
+  setIfDefined(headers, 'source', h.source);
+  setIfDefined(headers, 'idempotencyKey', h.idempotencyKey);
+  setIfDefined(headers, 'jumpReplies', h.jumpReplies);
   for (const [key, value] of Object.entries(h)) {
     if (!(key in headers) && value !== undefined) {
       (headers as Record<string, unknown>)[key] = value;
@@ -136,7 +141,10 @@ export function copyMessage<T>(msg: IntegrationMessage<T>): IntegrationMessage<T
 }
 
 /** Anexa un hop conservando la id (uso del dispatcher al pasar por un canal). */
-export function recordHop<T>(msg: IntegrationMessage<T>, hop: HistoryHopInput): IntegrationMessage<T> {
+export function recordHop<T>(
+  msg: IntegrationMessage<T>,
+  hop: HistoryHopInput,
+): IntegrationMessage<T> {
   return {
     payload: msg.payload,
     headers: { ...msg.headers, history: [...msg.headers.history, makeHop(hop)] },

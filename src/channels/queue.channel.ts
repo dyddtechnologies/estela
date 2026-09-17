@@ -52,13 +52,14 @@ export class QueueChannel implements MessageChannel {
     };
   }
 
-  async send(msg: IntegrationMessage): Promise<void> {
-    if (this.closed) throw new ChannelError(`queue '${this.name}' cerrada`);
+  send(msg: IntegrationMessage): Promise<void> {
+    if (this.closed) return Promise.reject(new ChannelError(`queue '${this.name}' cerrada`));
     if (this.buffer.length >= this.capacity) {
-      throw new CapacityExceededError(this.name, this.capacity);
+      return Promise.reject(new CapacityExceededError(this.name, this.capacity));
     }
     this.buffer.push(msg);
     this.schedulePump();
+    return Promise.resolve();
   }
 
   async close(): Promise<void> {

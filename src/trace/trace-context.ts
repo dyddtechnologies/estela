@@ -15,6 +15,13 @@ function isNonEmpty(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
+function firstNonEmpty(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (isNonEmpty(value)) return value;
+  }
+  return undefined;
+}
+
 /**
  * Cross-cutting de trazas sobre `AsyncLocalStorage` (spec §10).
  *
@@ -41,7 +48,7 @@ export class TraceContext {
     return this.storage.getStore();
   }
 
- /** Deriva el contexto de ejecución desde headers (completa faltantes con fallbacks del spec). */
+  /** Deriva el contexto de ejecución desde headers (completa faltantes con fallbacks del spec). */
   fromHeaders(headers: MessageHeaders): TraceContextValue {
     const value: TraceContextValue = {
       traceId: isNonEmpty(headers.traceId) ? headers.traceId : headers.id,
@@ -61,17 +68,9 @@ export class TraceContext {
     const ambient = this.current();
     const src = msg.headers;
     const headers: MessageHeaders = { ...src, history: [...src.history] };
-    headers.traceId = isNonEmpty(src.traceId)
-      ? src.traceId
-      : ambient && isNonEmpty(ambient.traceId)
-        ? ambient.traceId
-        : src.id;
+    headers.traceId = firstNonEmpty(src.traceId, ambient?.traceId) ?? src.id;
     headers.spanId = isNonEmpty(src.spanId) ? src.spanId : newId();
-    headers.correlationId = isNonEmpty(src.correlationId)
-      ? src.correlationId
-      : isNonEmpty(src.id)
-        ? src.id
-        : headers.traceId;
+    headers.correlationId = firstNonEmpty(src.correlationId, src.id) ?? headers.traceId;
     if (isNonEmpty(src.parentSpanId)) {
       headers.parentSpanId = src.parentSpanId;
     } else if (ambient && isNonEmpty(ambient.spanId)) {

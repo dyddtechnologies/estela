@@ -52,7 +52,8 @@ export interface InboundDuplicateResponse {
   traceId: string;
 }
 
-export type InboundResponse = InboundAcceptedResponse | InboundReplyResponse | InboundDuplicateResponse;
+export type InboundResponse =
+  InboundAcceptedResponse | InboundReplyResponse | InboundDuplicateResponse;
 
 export class InboundError extends ChannelError {}
 

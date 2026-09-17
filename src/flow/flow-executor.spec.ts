@@ -10,7 +10,7 @@ const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 interface World {
   registry: ChannelRegistry;
-  errors: Array<Record<string, unknown>>;
+  errors: Record<string, unknown>[];
   bind: (name: string, flow: IntegrationFlow) => FlowExecutor;
   collect: (channel: string) => { received: unknown[] };
 }
@@ -19,7 +19,7 @@ const makeWorld = (): World => {
   const deps: ChannelDeps = { trace: new TraceContext() };
   const registry = new ChannelRegistry(deps);
   registry.create({ name: 'error.channel', type: 'pubsub' });
-  const errors: Array<Record<string, unknown>> = [];
+  const errors: Record<string, unknown>[] = [];
   const errorChannel = registry.get('error.channel') as PubSubChannel;
   errorChannel.subscribe(async (msg) => {
     errors.push(msg.payload as Record<string, unknown>);
@@ -121,7 +121,9 @@ describe('FlowExecutor + DSL (spec §6, tests mínimos 1–6)', () => {
     });
     world.bind(
       'fan',
-      IntegrationFlow.from('in').fanoutTo([{ channel: 'a' }, { channel: 'b', wait: false }]).to('out'),
+      IntegrationFlow.from('in')
+        .fanoutTo([{ channel: 'a' }, { channel: 'b', wait: false }])
+        .to('out'),
     );
     const done = world.registry.send('in', 'p');
     await delay(25);
@@ -145,7 +147,7 @@ describe('FlowExecutor + DSL (spec §6, tests mínimos 1–6)', () => {
       replies.push(msg.payload);
     });
     world.registry.create({ name: 'inventory.reserve', type: 'direct' }).subscribe(async (msg) => {
-      await world.registry.send(msg.headers.replyChannel as string, 'reserved');
+      await world.registry.send(msg.headers.replyChannel!, 'reserved');
     });
     world.bind(
       'place-order',
@@ -161,7 +163,9 @@ describe('FlowExecutor + DSL (spec §6, tests mínimos 1–6)', () => {
     world.registry.create({ name: 'silent', type: 'direct' }).subscribe(async () => undefined);
     world.bind(
       'timeout-flow',
-      IntegrationFlow.from('in2').jumpTo([{ channel: 'silent', timeoutMs: 40 }]).to('out'),
+      IntegrationFlow.from('in2')
+        .jumpTo([{ channel: 'silent', timeoutMs: 40 }])
+        .to('out'),
     );
     await expect(world.registry.send('in2', 'x')).rejects.toBeInstanceOf(JumpTimeoutError);
     await delay(10);
@@ -180,7 +184,7 @@ describe('FlowExecutor + DSL (spec §6, tests mínimos 1–6)', () => {
     world.registry.create({ name: 'billing.charge', type: 'direct' }).subscribe(async (msg) => {
       const rc = msg.headers.replyChannel;
       ephemeralSeen = typeof rc === 'string' && rc.startsWith('reply.') && rc !== 'reply.http-2';
-      await world.registry.send(rc as string, 'charged');
+      await world.registry.send(rc!, 'charged');
     });
     world.bind(
       'place-order',
@@ -237,7 +241,7 @@ describe('FlowExecutor + DSL (spec §6, tests mínimos 1–6)', () => {
     expect(JSON.stringify(view)).not.toContain('=>');
 
     const world = makeWorld();
-    const events: Array<{ payload: unknown; rk: unknown }> = [];
+    const events: { payload: unknown; rk: unknown }[] = [];
     const domainEvents = world.registry.create({ name: 'domain.events', type: 'pubsub' });
     domainEvents.subscribe(async (msg) => {
       events.push({ payload: msg.payload, rk: msg.headers.routingKey });

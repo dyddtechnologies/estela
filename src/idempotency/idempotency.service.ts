@@ -18,7 +18,10 @@ export class IdempotencyService implements FlowIdempotencyPort {
   private readonly store: IdempotencyStore;
 
   constructor(private readonly options: IdempotencyOptions = {}) {
-    this.store = options.enabled === false ? new NoopIdempotencyStore() : options.store ?? new MemoryIdempotencyStore();
+    this.store =
+      options.enabled === false
+        ? new NoopIdempotencyStore()
+        : (options.store ?? new MemoryIdempotencyStore());
   }
 
   get ttlMs(): number {

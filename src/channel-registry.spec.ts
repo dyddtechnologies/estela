@@ -21,14 +21,14 @@ describe('ChannelFactoryRegistry (ADR-010 — OCP)', () => {
     const factories = new ChannelFactoryRegistry();
     const deps = makeDeps();
     expect(factories.create({ name: 'd', type: 'direct' }, deps)).toBeInstanceOf(DirectChannel);
-    expect(
-      factories.create({ name: 'q', type: 'queue', capacity: 5 }, deps),
-    ).toBeInstanceOf(QueueChannel);
+    expect(factories.create({ name: 'q', type: 'queue', capacity: 5 }, deps)).toBeInstanceOf(
+      QueueChannel,
+    );
     expect(factories.create({ name: 'p', type: 'pubsub' }, deps)).toBeInstanceOf(PubSubChannel);
     expect(
       factories.create(
         { name: 'f', type: 'fanout', bindings: ['d'] },
-        { ...deps, resolver: { get: () => undefined as never } },
+        { ...deps, resolver: { get: () => undefined } },
       ),
     ).toBeInstanceOf(FanoutChannel);
   });
@@ -36,7 +36,9 @@ describe('ChannelFactoryRegistry (ADR-010 — OCP)', () => {
   it('kind desconocido → ChannelError; nuevo kind se registra sin tocar el core', () => {
     const factories = new ChannelFactoryRegistry();
     const kafkaKind = 'kafka' as unknown as ChannelKind;
-    expect(() => factories.create({ name: 'x', type: kafkaKind }, makeDeps())).toThrow(ChannelError);
+    expect(() => factories.create({ name: 'x', type: kafkaKind }, makeDeps())).toThrow(
+      ChannelError,
+    );
     const custom: ChannelFactory = {
       kind: kafkaKind,
       create: (spec: ChannelSpec, deps: ChannelDeps) => new DirectChannel(spec.name, deps),
@@ -65,7 +67,7 @@ describe('ChannelRegistry (spec §5)', () => {
   it('send(): crea mensaje, registra hop del canal y conserva traceId', async () => {
     const registry = new ChannelRegistry(makeDeps());
     const channel = registry.create({ name: 'orders.persist', type: 'direct' });
-    const seen: Array<{ hop: string | undefined; traceId: string }> = [];
+    const seen: { hop: string | undefined; traceId: string }[] = [];
     channel.subscribe(async (msg) => {
       const last = msg.headers.history[msg.headers.history.length - 1];
       seen.push({ hop: last?.channel, traceId: msg.headers.traceId });
@@ -104,7 +106,10 @@ describe('ChannelRegistry (spec §5)', () => {
     subscribe('billing.charge');
     registry.fanout('ops.fanout', ['inventory.reserve', 'billing.charge']);
     await registry.send('ops.fanout', 'cmd');
-    expect(local.sort()).toEqual(['billing.charge:cmd', 'inventory.reserve:cmd']);
+    expect(local.slice().sort((a, b) => a.localeCompare(b))).toEqual([
+      'billing.charge:cmd',
+      'inventory.reserve:cmd',
+    ]);
   });
 
   it('aislamiento de errores del canal llega por deps.onError', async () => {

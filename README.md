@@ -241,7 +241,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
 
-Runnable example: [`src/example/`](./src/example) · Scripts: `npm run verify` (typecheck → build → test → bounds).
+Runnable example: [`src/example/`](./src/example) · `npm run verify` = typecheck → **eslint (type-checked + sonarjs + security)** → prettier → build → jest → bounds → **madge + jscpd** → **npm audit + lockfile-lint**.
 
 ---
 

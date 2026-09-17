@@ -29,7 +29,7 @@ export interface MessageChannel {
 
 /** Puerto de resolución de canales (lo implementa ChannelRegistry en Fase 3). */
 export interface ChannelResolver {
-  get(name: string): MessageChannel;
+  get(name: string): MessageChannel | undefined;
 }
 
 // ---------- Errores de dominio (plan §8.2) ----------

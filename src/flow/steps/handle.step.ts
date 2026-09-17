@@ -5,9 +5,7 @@ import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
 export class HandleStep implements FlowStep {
   readonly kind = 'handle' as const;
 
-  constructor(
-    private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown | Promise<unknown>,
-  ) {}
+  constructor(private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind };
