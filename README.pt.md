@@ -38,11 +38,12 @@ Semântica do Spring Integration, nativa do Node:
 ## Instalação
 
 ```bash
-npm install @estela/nest
+npm install https://github.com/dyddtechnologies/estela/releases/download/v0.1.0/estela-nest-0.1.0.tgz
 ```
 
-Peers: `@nestjs/common/core` ^10‖^11 · `@nestjs/swagger` ^7‖^8 · `reflect-metadata` · `rxjs`.
-Opcionais (apenas tipos/adapters, **nunca** no barrel): `amqplib` · `@grpc/grpc-js` · `@nestjs/graphql`.
+> Distribuído como **artifact do GitHub Releases** (tarball) — sem registro npm.
+> Peers: `@nestjs/common/core` ^10‖^11 · `@nestjs/swagger` ^7‖^8 · `reflect-metadata` · `rxjs`.
+> Opcionais (apenas tipos/adapters, **nunca** no barrel): `amqplib` · `@grpc/grpc-js` · `@nestjs/graphql`.
 
 ## Quick start
 
