@@ -120,6 +120,8 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
       flows: { name: string }[];
     };
     expect(graph.flows.map((f) => f.name).sort()).toEqual([
+      'cancel-policy',
+      'cancel-policy-errors',
       'create-policy',
       'create-quote',
       'place-order',

@@ -1,12 +1,18 @@
+import 'reflect-metadata';
+
 import { ChannelRegistry } from '../../channel-registry';
 import { TraceContext } from '../../trace/trace-context';
 import { bindFlow, collect, waitFor } from '../../testing';
+import { discoverActivators, subscribeActivators } from '../../activator/activator-wrapper';
 import {
+  CancelPolicyErrorFlow,
+  CancelPolicyFlow,
   CreatePolicyFlow,
   CreateQuoteFlow,
   INSURANCE_CHANNELS,
   RouteQuoteByCountryFlow,
 } from './insurance.channels';
+import { CancelPolicyActivators } from './insurance.activators';
 
 const quoteCmd = {
   planId: 'plan-apap-1',
@@ -114,5 +120,69 @@ describe('insurance example — README EIP shape', () => {
 
     await registry.send('insurance.quotes.create', quoteCmd);
     expect((await routed).payload).toEqual(quoted);
+  });
+});
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function bindCancel(registry: ChannelRegistry): CancelPolicyActivators {
+  if (registry.tryGet('error.channel') === undefined) {
+    registry.create({ name: 'error.channel', type: 'pubsub' });
+  }
+  const cancel = new CancelPolicyActivators(registry);
+  subscribeActivators(discoverActivators([cancel]), {
+    registry,
+    trace: registry.trace,
+    errorChannel: 'error.channel',
+  });
+  bindFlow(CancelPolicyFlow, registry);
+  bindFlow(CancelPolicyErrorFlow, registry);
+  return cancel;
+}
+
+describe('insurance example — cancel-policy (DSL entry + activator chain)', () => {
+  it('cancel-policy DSL is from().to(first activator) — chain lives in activators', () => {
+    const inspected = CancelPolicyFlow.build().inspect();
+    expect(inspected.source).toBe('insurance.policies.cancel');
+    expect(inspected.steps).toEqual([
+      { kind: 'to', channel: 'insurance.policies.cancel.s1.save-db' },
+    ]);
+  });
+
+  it('cancel-policy-errors DSL routes by failed step', () => {
+    const inspected = CancelPolicyErrorFlow.build().inspect();
+    expect(inspected.source).toBe('insurance.policies.cancel.errors');
+    expect(inspected.steps.map((step) => step.kind)).toEqual(['route']);
+  });
+
+  it('happy path: db → email → billing queue → audit → policy-log; terminal auto-replies', async () => {
+    const registry = setupRegistry();
+    registry.create({ name: 'reply.cancel', type: 'direct' });
+    const cancel = bindCancel(registry);
+    const replied = waitFor(registry, 'reply.cancel', 2_000);
+
+    await registry.send(
+      'insurance.policies.cancel',
+      { policyId: 'pol-1' },
+      { replyChannel: 'reply.cancel' },
+    );
+    expect((await replied).payload).toEqual({ policyId: 'pol-1', status: 'CANCELLED' });
+    expect(cancel.saved).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+    expect(cancel.emails).toHaveLength(1);
+    expect(cancel.audits).toHaveLength(1);
+    expect(cancel.logs).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+    await delay(50);
+    expect(cancel.billingQueued).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+  });
+
+  it('failAt email: flow rejects and error flow routes to errors.email', async () => {
+    const registry = setupRegistry();
+    bindCancel(registry);
+    const routed = waitFor(registry, 'insurance.policies.cancel.errors.email', 2_000);
+
+    await expect(
+      registry.send('insurance.policies.cancel', { policyId: 'pol-1', failAt: 'email' }),
+    ).rejects.toThrow('cancel email failed');
+    expect((await routed).payload).toMatchObject({ step: 'email', policyId: 'pol-1' });
   });
 });

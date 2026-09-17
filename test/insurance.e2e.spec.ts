@@ -4,6 +4,8 @@ import type { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { OrdersApplicationModule } from '../src/example/orders.application';
 import {
+  CancelPolicyActivators,
+  CancelPolicyErrorActivators,
   PolicyEventsCollector,
   PolicyPersistence,
   QuoteEventsCollector,
@@ -23,6 +25,8 @@ describe('example insurance — e2e HTTP (README EIP shape)', () => {
   let events: QuoteEventsCollector;
   let policies: PolicyPersistence;
   let policyEvents: PolicyEventsCollector;
+  let cancel: CancelPolicyActivators;
+  let cancelErrors: CancelPolicyErrorActivators;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -37,6 +41,8 @@ describe('example insurance — e2e HTTP (README EIP shape)', () => {
     events = moduleRef.get(QuoteEventsCollector);
     policies = moduleRef.get(PolicyPersistence);
     policyEvents = moduleRef.get(PolicyEventsCollector);
+    cancel = moduleRef.get(CancelPolicyActivators);
+    cancelErrors = moduleRef.get(CancelPolicyErrorActivators);
   }, 20_000);
 
   afterAll(async () => {
@@ -144,5 +150,34 @@ describe('example insurance — e2e HTTP (README EIP shape)', () => {
         payload: { policyId: 'pol-qte-plan-apap-1', quoteId: 'qte-plan-apap-1', status: 'ISSUED' },
       },
     ]);
+  }, 20_000);
+
+  it('POST /insurance/policies/cancel → CANCELLED; db, email, billing queue, audit, log', async () => {
+    const response = await post('/insurance/policies/cancel', { policyId: 'pol-1' });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      status: string;
+      result: { policyId: string; status: string };
+    };
+    expect(body.status).toBe('ok');
+    expect(body.result).toEqual({ policyId: 'pol-1', status: 'CANCELLED' });
+    await delay(50);
+    expect(cancel.saved).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+    expect(cancel.emails).toHaveLength(1);
+    expect(cancel.audits).toHaveLength(1);
+    expect(cancel.logs).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+    expect(cancel.billingQueued).toEqual([{ policyId: 'pol-1', status: 'CANCELLED' }]);
+  }, 20_000);
+
+  it('POST /insurance/policies/cancel failAt email → HTTP error + error flow routes to email sink', async () => {
+    const response = await post('/insurance/policies/cancel', {
+      policyId: 'pol-fail',
+      failAt: 'email',
+    });
+    expect(response.ok).toBe(false);
+    await delay(80);
+    expect(cancelErrors.routed.some((entry) => entry.step === 'email')).toBe(true);
+    const emailError = cancelErrors.routed.find((entry) => entry.step === 'email');
+    expect(emailError?.payload).toMatchObject({ step: 'email', policyId: 'pol-fail' });
   }, 20_000);
 });

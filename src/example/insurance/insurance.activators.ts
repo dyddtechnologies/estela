@@ -79,3 +79,139 @@ export class PolicyPersistence {
     this.persisted.push(payload as Record<string, unknown>);
   }
 }
+
+type CancelStep = 'save-db' | 'email' | 'billing' | 'audit' | 'policy-log';
+
+/**
+ * Cancel-policy chain (activator-chain example mode): each activator forwards
+ * the same message (`sendMessage` keeps replyChannel/trace). Last-step return
+ * auto-replies. `failAt` on the payload is a demo hook to exercise the error flow.
+ */
+@Injectable()
+export class CancelPolicyActivators {
+  executed: string[] = [];
+  saved: Record<string, unknown>[] = [];
+  emails: Record<string, unknown>[] = [];
+  billingQueued: Record<string, unknown>[] = [];
+  audits: Record<string, unknown>[] = [];
+  logs: Record<string, unknown>[] = [];
+
+  constructor(private readonly registry: ChannelRegistry) {}
+
+  private asRecord(payload: unknown): Record<string, unknown> {
+    return typeof payload === 'object' && payload !== null
+      ? (payload as Record<string, unknown>)
+      : { value: payload };
+  }
+
+  private async forward(channel: string, msg: IntegrationMessage): Promise<void> {
+    this.executed.push(channel);
+    await this.registry.sendMessage(channel, msg);
+  }
+
+  private async reportError(
+    step: CancelStep,
+    msg: IntegrationMessage,
+    error: unknown,
+  ): Promise<void> {
+    const payload = this.asRecord(msg.payload);
+    await this.registry.send('insurance.policies.cancel.errors', {
+      step,
+      policyId: payload.policyId,
+      error: error instanceof Error ? { name: error.name, message: error.message } : error,
+    });
+  }
+
+  private async maybeFail(
+    step: CancelStep,
+    payload: unknown,
+    msg: IntegrationMessage,
+  ): Promise<void> {
+    if (this.asRecord(payload).failAt !== step) return;
+    const error = new Error(`cancel ${step} failed`);
+    await this.reportError(step, msg, error);
+    throw error;
+  }
+
+  @ServiceActivator('insurance.policies.cancel.s1.save-db')
+  async saveDb(payload: unknown, msg: IntegrationMessage): Promise<void> {
+    await this.maybeFail('save-db', payload, msg);
+    const saved = { ...this.asRecord(payload), status: 'CANCELLED' };
+    this.saved.push(saved);
+    await this.forward('insurance.policies.cancel.s2.email', { ...msg, payload: saved });
+  }
+
+  @ServiceActivator('insurance.policies.cancel.s2.email')
+  async sendEmail(payload: unknown, msg: IntegrationMessage): Promise<void> {
+    await this.maybeFail('email', payload, msg);
+    this.emails.push(this.asRecord(payload));
+    await this.forward('insurance.policies.cancel.s3.enqueue-billing', msg);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.s3.enqueue-billing')
+  async enqueueBilling(payload: unknown, msg: IntegrationMessage): Promise<void> {
+    await this.maybeFail('billing', payload, msg);
+    await this.registry.send('insurance.policies.cancel.billing', payload);
+    await this.forward('insurance.policies.cancel.s4.audit', msg);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.billing')
+  onBillingQueue(payload: unknown): void {
+    this.billingQueued.push(this.asRecord(payload));
+  }
+
+  @ServiceActivator('insurance.policies.cancel.s4.audit')
+  async saveAudit(payload: unknown, msg: IntegrationMessage): Promise<void> {
+    await this.maybeFail('audit', payload, msg);
+    this.audits.push(this.asRecord(payload));
+    await this.forward('insurance.policies.cancel.s5.policy-log', msg);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.s5.policy-log')
+  async savePolicyLog(payload: unknown, msg: IntegrationMessage): Promise<unknown> {
+    await this.maybeFail('policy-log', payload, msg);
+    const response = { ...this.asRecord(payload), status: 'CANCELLED' };
+    this.logs.push(response);
+    this.executed.push('insurance.policies.cancel.done');
+    return response;
+  }
+}
+
+@Injectable()
+export class CancelPolicyErrorActivators {
+  routed: { step: string; payload: unknown }[] = [];
+
+  private record(step: string, payload: unknown): void {
+    this.routed.push({ step, payload });
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.save-db')
+  onSaveDb(payload: unknown): void {
+    this.record('save-db', payload);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.email')
+  onEmail(payload: unknown): void {
+    this.record('email', payload);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.billing')
+  onBilling(payload: unknown): void {
+    this.record('billing', payload);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.audit')
+  onAudit(payload: unknown): void {
+    this.record('audit', payload);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.policy-log')
+  onPolicyLog(payload: unknown): void {
+    this.record('policy-log', payload);
+  }
+
+  @ServiceActivator('insurance.policies.cancel.errors.generic')
+  onGeneric(payload: unknown): void {
+    this.record('generic', payload);
+  }
+}

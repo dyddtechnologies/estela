@@ -9,6 +9,8 @@ import { ChannelRegistry } from '../channel-registry';
 import { INSURANCE_CHANNELS, INSURANCE_FLOWS } from './insurance/insurance.channels';
 import { InsuranceController } from './insurance/insurance.controller';
 import {
+  CancelPolicyActivators,
+  CancelPolicyErrorActivators,
   PolicyEventsCollector,
   PolicyPersistence,
   PolicyValidateActivator,
@@ -171,6 +173,8 @@ export const RouteByCountryFlow: FlowDefinition = {
     PolicyValidateActivator,
     PolicyEventsCollector,
     PolicyPersistence,
+    CancelPolicyActivators,
+    CancelPolicyErrorActivators,
   ],
 })
 export class OrdersApplicationModule {}

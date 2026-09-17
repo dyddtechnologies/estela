@@ -25,6 +25,20 @@ export const INSURANCE_CHANNELS: readonly ChannelSpec[] = [
   { name: 'insurance.policies.persist', type: 'direct' },
   { name: 'insurance.policies.validate-quote', type: 'direct' },
   { name: 'insurance.policies.created', type: 'pubsub' },
+  { name: 'insurance.policies.cancel', type: 'direct' },
+  { name: 'insurance.policies.cancel.s1.save-db', type: 'direct' },
+  { name: 'insurance.policies.cancel.s2.email', type: 'direct' },
+  { name: 'insurance.policies.cancel.s3.enqueue-billing', type: 'direct' },
+  { name: 'insurance.policies.cancel.billing', type: 'queue', capacity: 10_000 },
+  { name: 'insurance.policies.cancel.s4.audit', type: 'direct' },
+  { name: 'insurance.policies.cancel.s5.policy-log', type: 'direct' },
+  { name: 'insurance.policies.cancel.errors', type: 'direct' },
+  { name: 'insurance.policies.cancel.errors.save-db', type: 'queue' },
+  { name: 'insurance.policies.cancel.errors.email', type: 'queue' },
+  { name: 'insurance.policies.cancel.errors.billing', type: 'queue' },
+  { name: 'insurance.policies.cancel.errors.audit', type: 'queue' },
+  { name: 'insurance.policies.cancel.errors.policy-log', type: 'queue' },
+  { name: 'insurance.policies.cancel.errors.generic', type: 'queue' },
 ];
 
 export const CreateQuoteFlow: FlowDefinition = {
@@ -81,8 +95,41 @@ export const RouteQuoteByCountryFlow: FlowDefinition = {
     }),
 };
 
+/**
+ * Cancel policy: DSL only starts the chain (activator-chain example mode).
+ * Steps live in `@ServiceActivator`s; last-step return closes HTTP.
+ */
+export const CancelPolicyFlow: FlowDefinition = {
+  name: 'cancel-policy',
+  build: () =>
+    IntegrationFlow.from('insurance.policies.cancel').to('insurance.policies.cancel.s1.save-db'),
+};
+
+const CANCEL_ERROR_SINKS: Record<string, string> = {
+  'save-db': 'insurance.policies.cancel.errors.save-db',
+  email: 'insurance.policies.cancel.errors.email',
+  billing: 'insurance.policies.cancel.errors.billing',
+  audit: 'insurance.policies.cancel.errors.audit',
+  'policy-log': 'insurance.policies.cancel.errors.policy-log',
+};
+
+/** Maps a failed cancel step to its sink. Activators send here, then rethrow. */
+export const CancelPolicyErrorFlow: FlowDefinition = {
+  name: 'cancel-policy-errors',
+  build: () =>
+    IntegrationFlow.from('insurance.policies.cancel.errors').route((payload) => {
+      const step = (payload as { step?: string }).step;
+      return (
+        (step !== undefined ? CANCEL_ERROR_SINKS[step] : undefined) ??
+        'insurance.policies.cancel.errors.generic'
+      );
+    }),
+};
+
 export const INSURANCE_FLOWS: readonly FlowDefinition[] = [
   CreateQuoteFlow,
   CreatePolicyFlow,
   RouteQuoteByCountryFlow,
+  CancelPolicyFlow,
+  CancelPolicyErrorFlow,
 ];

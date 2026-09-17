@@ -26,6 +26,14 @@ export class QuoteFanoutDto {
   planId!: string;
 }
 
+export class CancelPolicyDto {
+  @ApiProperty({ example: 'pol-qte-plan-apap-1' })
+  policyId!: string;
+
+  @ApiProperty({ required: false, example: 'email', description: 'Demo hook: fail this step' })
+  failAt?: string;
+}
+
 @Controller('insurance')
 @ApiTags('insurance')
 export class InsuranceController {
@@ -48,5 +56,12 @@ export class InsuranceController {
   @ApiBody({ type: CreatePolicyDto })
   createPolicy(@Body() _dto: CreatePolicyDto): void {
     // payload = body; CreatePolicyFlow.reply() closes HTTP
+  }
+
+  @Post('policies/cancel')
+  @InboundRest({ channel: 'insurance.policies.cancel', requestReply: true, timeoutMs: 5_000 })
+  @ApiBody({ type: CancelPolicyDto })
+  cancelPolicy(@Body() _dto: CancelPolicyDto): void {
+    // chain of activators; s5.policy-log return closes HTTP
   }
 }
