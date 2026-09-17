@@ -9,6 +9,8 @@
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#instalaci%C3%B3n)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#instalaci%C3%B3n)
   [![license](https://img.shields.io/badge/license-MIT-blue)](#licencia)
+  [![website](https://img.shields.io/badge/DYDD_Technologies-dyddtech.com-0A66C2)](https://www.dyddtech.com)
+  [![LinkedIn](https://img.shields.io/badge/LinkedIn-eliudiaz-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/eliudiaz)
 
   [English](./README.md) · **Español** · [Português](./README.pt.md) · [Français](./README.fr.md)
 
@@ -224,6 +226,14 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
 
 Example runnable: [`src/example/`](./src/example) · Scripts: `npm run verify` (typecheck → build → test → bounds).
+
+---
+
+<div align="center">
+
+<sub>**ESTELA** — construida con ☄️ por [**DYDD Technologies**](https://www.dyddtech.com) · autor: [Eliu Diaz](https://www.linkedin.com/in/eliudiaz)</sub>
+
+</div>
 
 ## Licencia
 
