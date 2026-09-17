@@ -2,7 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { setupIntegrationSwagger } from '../inbound/inbound.swagger';
 import { OrdersApplicationModule } from './orders.application';
 
-export async function bootstrap(port = 3_000): Promise<void> {
+export async function bootstrap(port = Number(process.env.PORT ?? 3_000)): Promise<void> {
   const app = await NestFactory.create(OrdersApplicationModule);
   setupIntegrationSwagger(app, {
     title: 'Orders — @dyddtechnologies/estela example',

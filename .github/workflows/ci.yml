@@ -46,6 +46,51 @@ jobs:
       - run: npm ci
       - run: npm run complexity
 
+  example-app:
+    name: example app boots + serves (double verification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Compile example app (tsc, native decorator metadata)
+        run: npx tsc -p tsconfig.example.json
+      - name: Boot example (background)
+        run: |
+          PORT=3111 node .example/example/main.js &
+          echo $! > .example-pid
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:3111/integration/graph >/dev/null && { echo "ready"; exit 0; }
+            sleep 1
+          done
+          echo "::error::example app did not become ready"
+          exit 1
+      - name: Probe — requestReply end-to-end (flow reply closes HTTP)
+        run: |
+          R=$(curl -s -X POST http://127.0.0.1:3111/orders \
+            -H 'content-type: application/json' \
+            -d '{"qty":2,"sku":"CI","country":"GT"}')
+          echo "$R"
+          echo "$R" | grep -q '"status":"ok"' || { echo "::error::requestReply failed"; exit 1; }
+          echo "$R" | grep -q '"total":20' || { echo "::error::transform missing"; exit 1; }
+          echo "$R" | grep -q 'ord-CI' || { echo "::error::orderId missing"; exit 1; }
+      - name: Probe — fanout accepted + graph + mermaid
+        run: |
+          F=$(curl -s -X POST http://127.0.0.1:3111/orders/fanout \
+            -H 'content-type: application/json' -d '{"sku":"CI-FAN"}')
+          echo "$F" | grep -q '"status":"accepted"' || { echo "::error::fanout failed"; exit 1; }
+          curl -sf http://127.0.0.1:3111/integration/graph | grep -q '"place-order"' \
+            || { echo "::error::graph missing flow"; exit 1; }
+          curl -sf http://127.0.0.1:3111/integration/graph/mermaid | grep -q 'flowchart' \
+            || { echo "::error::mermaid failed"; exit 1; }
+      - name: Stop example
+        if: always()
+        run: |
+          kill "$(cat .example-pid)" 2>/dev/null || true
+
   audit:
     name: vulnerabilities + lockfile
     runs-on: ubuntu-latest
