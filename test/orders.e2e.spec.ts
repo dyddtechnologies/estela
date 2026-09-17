@@ -119,7 +119,12 @@ describe('example orders — e2e HTTP (spec §13/§15)', () => {
       nodes: { channel: string; bindings: readonly string[] }[];
       flows: { name: string }[];
     };
-    expect(graph.flows.map((f) => f.name)).toEqual(['place-order', 'route-by-country']);
+    expect(graph.flows.map((f) => f.name).sort()).toEqual([
+      'create-policy',
+      'create-quote',
+      'place-order',
+      'route-by-country',
+    ]);
     const fanoutNode = graph.nodes.find((n) => n.channel === 'ops.fanout');
     expect(fanoutNode?.bindings).toEqual(['inventory.reserve', 'billing.charge']);
 

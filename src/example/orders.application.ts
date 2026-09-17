@@ -6,6 +6,12 @@ import { InboundRest } from '../inbound/inbound.decorators';
 import { PubSub, ServiceActivator } from '../decorators';
 import { IntegrationFlow, type FlowDefinition } from '../flow/integration-flow';
 import { ChannelRegistry } from '../channel-registry';
+import { INSURANCE_CHANNELS, INSURANCE_FLOWS } from './insurance/insurance.channels';
+import { InsuranceController } from './insurance/insurance.controller';
+import {
+  PolicyCreationActivators,
+  QuoteCreationActivators,
+} from './insurance/insurance.activators';
 
 /** DTO de ejemplo — el body lo documenta el usuario (spec §7.3). */
 export class PlaceOrderDto {
@@ -140,13 +146,23 @@ export const RouteByCountryFlow: FlowDefinition = {
           { name: 'orders.us', type: 'queue' },
           { name: 'orders.intl', type: 'queue' },
           { name: 'http.out.erp', type: 'direct' },
+          ...INSURANCE_CHANNELS,
         ],
         idempotency: { enabled: true },
       },
-      [PlaceOrderFlow, RouteByCountryFlow],
+      [PlaceOrderFlow, RouteByCountryFlow, ...INSURANCE_FLOWS],
     ),
   ],
-  controllers: [OrdersController],
-  providers: [InventoryActivator, BillingActivator, DomainEventsCollector, OrderPersistence],
+  controllers: [OrdersController, InsuranceController],
+  providers: [
+    InventoryActivator,
+    BillingActivator,
+    DomainEventsCollector,
+    OrderPersistence,
+    QuoteCreationActivators,
+    PolicyCreationActivators,
+  ],
 })
 export class OrdersApplicationModule {}
+
+export { InsuranceController };
