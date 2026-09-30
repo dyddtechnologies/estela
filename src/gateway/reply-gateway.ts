@@ -44,7 +44,7 @@ export class ReplyGateway {
       const reply = await wait.promise;
       return reply.payload;
     } finally {
-      // A failed send abandons the wait: release its timer so it cannot reject later, unhandled.
+      // A failed send abandons the wait: release its timer and subscription.
       wait.cancel();
       this.deps.registry.unregister(replyName);
     }

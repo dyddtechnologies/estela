@@ -31,9 +31,8 @@ export interface FirstMessageWait {
   readonly promise: Promise<IntegrationMessage>;
   /**
    * Releases the timer and the subscription. If the wait is still pending it is
-   * rejected with `OneShotCancelledError`, already marked as handled, so an
-   * abandoned wait (e.g. the request send failed) never surfaces as an
-   * unhandled rejection nor keeps a live timer.
+   * rejected with `OneShotCancelledError`, so an abandoned wait (e.g. the request
+   * send failed) never keeps a live timer.
    */
   cancel(): void;
 }
@@ -42,6 +41,10 @@ export interface FirstMessageWait {
  * Opens a race-free one-shot wait (plan sec.8.5 rule 6). The first settlement
  * wins (message, timeout or cancel) and always clears the timer and
  * unsubscribes from the channel.
+ *
+ * The returned promise is pre-marked as handled: the timeout can fire while the
+ * caller is still awaiting its request send, before it awaits `promise`. Callers
+ * that do await it still observe the rejection.
  */
 export function openFirstMessageWait(
   channel: OneShotChannel,
@@ -67,12 +70,10 @@ export function openFirstMessageWait(
       else reject(outcome.error);
     };
   });
+  promise.catch(() => undefined);
   return {
     promise,
-    cancel: (): void => {
-      promise.catch(() => undefined);
-      settle?.({ error: new OneShotCancelledError(options.name) });
-    },
+    cancel: (): void => settle?.({ error: new OneShotCancelledError(options.name) }),
   };
 }
 

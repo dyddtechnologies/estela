@@ -73,6 +73,31 @@ describe('one-shot waits abandoned by a failed send (regression)', () => {
     expect(seen).toEqual([]);
   });
 
+  it('ReplyGateway: a send outlasting the timeout leaves no unhandled rejection', async () => {
+    const registry = makeRegistry();
+    registry.create({ name: 'slow', type: 'direct' }).subscribe(async () => {
+      await delay(60);
+      throw new Error('boom');
+    });
+    const gateway = new ReplyGateway({ registry, trace: registry.trace });
+    const seen = await captureUnhandled(async () => {
+      await expect(gateway.sendAndReceive('slow', 'p', {}, 20)).rejects.toThrow('boom');
+    }, 40);
+    expect(seen).toEqual([]);
+  });
+
+  it('jumpTo: a hop send outlasting the timeout still fails with JumpTimeoutError, handled', async () => {
+    const registry = makeRegistry();
+    registry.create({ name: 'slow.hop', type: 'direct' }).subscribe(async () => {
+      await delay(60);
+    });
+    bindJumpFlow(registry, 'flow.in', 'slow.hop', 20);
+    const seen = await captureUnhandled(async () => {
+      await expect(registry.send('flow.in', 'x')).rejects.toBeInstanceOf(JumpTimeoutError);
+    }, 40);
+    expect(seen).toEqual([]);
+  });
+
   it('ReplyGateway: a failed send leaves no pending timer', async () => {
     jest.useFakeTimers();
     const registry = makeRegistry();

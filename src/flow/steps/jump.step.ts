@@ -71,7 +71,7 @@ export class JumpStep implements FlowStep {
       const reply = await wait.promise;
       jumpReplies[channel] = reply.payload;
     } finally {
-      // A failed hop send abandons the wait: release its timer so it cannot reject later, unhandled.
+      // A failed hop send abandons the wait: release its timer and subscription.
       wait.cancel();
       ctx.registry.unregister(replyName);
     }
