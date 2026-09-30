@@ -30,17 +30,21 @@ export interface OneShotOptions {
 export interface FirstMessageWait {
   readonly promise: Promise<IntegrationMessage>;
   /**
-   * Releases the timer and the subscription. If the wait is still pending it is
-   * rejected with `OneShotCancelledError`, so an abandoned wait (e.g. the request
-   * send failed) never keeps a live timer.
+   * Releases the timer and the subscription (also after a successful message).
+   * If the wait is still pending it is rejected with `OneShotCancelledError`, so
+   * an abandoned wait (e.g. the request send failed) never keeps a live timer.
    */
   cancel(): void;
 }
 
 /**
  * Opens a race-free one-shot wait (plan sec.8.5 rule 6). The first settlement
- * wins (message, timeout or cancel) and always clears the timer and
- * unsubscribes from the channel.
+ * wins (message, timeout or cancel) and always clears the timer.
+ *
+ * The first message keeps the subscription attached so a responder that sends
+ * to the channel again before its handler returns is ignored instead of failing
+ * with `NoSubscriberError`; `cancel()` releases it. Timeout and cancel
+ * unsubscribe immediately.
  *
  * The returned promise is pre-marked as handled: the timeout can fire while the
  * caller is still awaiting its request send, before it awaits `promise`. Callers
@@ -51,6 +55,12 @@ export function openFirstMessageWait(
   options: OneShotOptions,
 ): FirstMessageWait {
   let settle: ((outcome: { msg: IntegrationMessage } | { error: Error }) => void) | undefined;
+  let unsubscribe: Unsubscribe | undefined;
+  const release = (): void => {
+    const unsub = unsubscribe;
+    unsubscribe = undefined;
+    unsub?.();
+  };
   const promise = new Promise<IntegrationMessage>((resolve, reject) => {
     let done = false;
     const timer = setTimeout(() => {
@@ -60,20 +70,26 @@ export function openFirstMessageWait(
     }, options.timeoutMs);
     // Like the previous AbortSignal.timeout, a pending wait must not keep the process alive.
     timer.unref?.();
-    const unsub = channel.subscribe((msg) => settle?.({ msg }));
+    unsubscribe = channel.subscribe((msg) => settle?.({ msg }));
     settle = (outcome): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      unsub();
-      if ('msg' in outcome) resolve(outcome.msg);
-      else reject(outcome.error);
+      if ('msg' in outcome) {
+        resolve(outcome.msg);
+        return;
+      }
+      release();
+      reject(outcome.error);
     };
   });
   promise.catch(() => undefined);
   return {
     promise,
-    cancel: (): void => settle?.({ error: new OneShotCancelledError(options.name) }),
+    cancel: (): void => {
+      settle?.({ error: new OneShotCancelledError(options.name) });
+      release();
+    },
   };
 }
 
