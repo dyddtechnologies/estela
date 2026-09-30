@@ -4,7 +4,8 @@
  * an explicit allowlist of advisories that only reach us bundled inside the npm CLI that
  * semantic-release uses to cut releases (node_modules/npm/node_modules/**). Those are
  * build tooling run in CI, never shipped in the @estela/nest tarball, and npm itself has
- * no fixed release yet (npm 11.x and 12.1.0 still bundle undici 6.28.0).
+ * no fixed release yet (npm 11.20.0 and 12.1.0 still bundle undici 6.28.0 and
+ * brace-expansion 5.0.9).
  * Remove each entry once npm ships a patched bundle.
  */
 const { execSync } = require('node:child_process');
@@ -14,6 +15,9 @@ const ALLOWLIST = {
   'GHSA-3wwx-pv8p-q78v': 'undici DoS via permessage-deflate, bundled in npm CLI (release tooling)',
   'GHSA-r53p-7pc4-xj5r': 'undici response splitting via retry interceptor, bundled in npm CLI',
   'GHSA-rfgv-xxqx-mfg5': 'undici DoS via unrequested WebSocket subprotocol, bundled in npm CLI',
+  'GHSA-q2hr-2g5m-vwhr': 'brace-expansion quadratic `{a},b}` rewrite DoS, bundled in npm CLI',
+  'GHSA-qhr7-859c-m2p7': 'brace-expansion recursion DoS on nested groups, bundled in npm CLI',
+  'GHSA-6j4f-fj2g-mc7p': 'brace-expansion recursion DoS in parseCommaParts, bundled in npm CLI',
 };
 const BLOCKING = new Set(['high', 'critical']);
 

@@ -6,16 +6,16 @@ import {
   type FlowStepContext,
   type StepOutcome,
 } from '../flow-step';
-import { awaitFirstMessage } from '../../channels/one-shot';
+import { openFirstMessageWait } from '../../channels/one-shot';
 import { JUMP_REPLY_HEADER, nextHop, newId } from '../../message';
 import { reportFireAndForget } from './forget';
 
 const DEFAULT_JUMP_TIMEOUT_MS = 10_000;
 
 /**
- * Jump: reply efimero propio `reply.<uuid>`; el padre keeps su `replyChannel`
- * (plan sec.8.1). Awaited -> timeout/errores fail el flow; forget -> error.channel.
- * Resultado en `headers.jumpReplies[channel]`; payload del padre no se pisa.
+ * Jump: its own ephemeral reply `reply.<uuid>`; the parent keeps its `replyChannel`
+ * (plan sec.8.1). Awaited -> timeout/errors fail the flow; forget -> error.channel.
+ * Result lands in `headers.jumpReplies[channel]`; the parent payload is not overwritten.
  */
 export class JumpStep implements FlowStep {
   readonly kind = 'jump' as const;
@@ -55,22 +55,24 @@ export class JumpStep implements FlowStep {
   ): Promise<void> {
     const replyName = `reply.${newId()}`;
     const replyChannel = ctx.registry.create({ name: replyName, type: 'direct' });
+    const wait = openFirstMessageWait(replyChannel, {
+      timeoutMs,
+      name: channel,
+      timeoutError: () => new JumpTimeoutError(channel, timeoutMs),
+    });
     try {
-      const first = awaitFirstMessage(replyChannel, {
-        timeoutMs,
-        name: channel,
-        timeoutError: () => new JumpTimeoutError(channel, timeoutMs),
-      });
       const hop = nextHop(
         ctx.msg,
         { channel, component: `jump:${ctx.flowName}` },
         { reply: replyName },
       );
-      hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: metadato del efimero
+      hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: ephemeral-reply marker
       await ctx.registry.sendMessage(channel, hop);
-      const reply = await first;
+      const reply = await wait.promise;
       jumpReplies[channel] = reply.payload;
     } finally {
+      // A failed hop send abandons the wait: release its timer so it cannot reject later, unhandled.
+      wait.cancel();
       ctx.registry.unregister(replyName);
     }
   }

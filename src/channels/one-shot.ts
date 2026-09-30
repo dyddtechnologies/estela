@@ -9,34 +9,77 @@ export class OneShotTimeoutError extends ChannelError {
   }
 }
 
+export class OneShotCancelledError extends ChannelError {
+  constructor(name: string) {
+    super(`one-shot wait on '${name}' was cancelled`);
+    this.name = 'OneShotCancelledError';
+  }
+}
+
 export interface OneShotChannel {
   subscribe(handler: (msg: IntegrationMessage) => void): Unsubscribe;
 }
 
+export interface OneShotOptions {
+  timeoutMs: number;
+  name: string;
+  timeoutError?: () => Error;
+}
+
+/** Pending one-shot wait whose timer and subscription can be released early. */
+export interface FirstMessageWait {
+  readonly promise: Promise<IntegrationMessage>;
+  /**
+   * Releases the timer and the subscription. If the wait is still pending it is
+   * rejected with `OneShotCancelledError`, already marked as handled, so an
+   * abandoned wait (e.g. the request send failed) never surfaces as an
+   * unhandled rejection nor keeps a live timer.
+   */
+  cancel(): void;
+}
+
 /**
- * Awaits one-shot race-free (plan sec.8.5 rule 6): `AbortSignal.timeout` — sin
- * timers manuales ni races. El channel se unsubscribes always.
+ * Opens a race-free one-shot wait (plan sec.8.5 rule 6). The first settlement
+ * wins (message, timeout or cancel) and always clears the timer and
+ * unsubscribes from the channel.
  */
+export function openFirstMessageWait(
+  channel: OneShotChannel,
+  options: OneShotOptions,
+): FirstMessageWait {
+  let settle: ((outcome: { msg: IntegrationMessage } | { error: Error }) => void) | undefined;
+  const promise = new Promise<IntegrationMessage>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      settle?.({
+        error: options.timeoutError?.() ?? new OneShotTimeoutError(options.name, options.timeoutMs),
+      });
+    }, options.timeoutMs);
+    // Like the previous AbortSignal.timeout, a pending wait must not keep the process alive.
+    timer.unref?.();
+    const unsub = channel.subscribe((msg) => settle?.({ msg }));
+    settle = (outcome): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      unsub();
+      if ('msg' in outcome) resolve(outcome.msg);
+      else reject(outcome.error);
+    };
+  });
+  return {
+    promise,
+    cancel: (): void => {
+      promise.catch(() => undefined);
+      settle?.({ error: new OneShotCancelledError(options.name) });
+    },
+  };
+}
+
+/** Awaits the first message of the channel or rejects on timeout. */
 export function awaitFirstMessage(
   channel: OneShotChannel,
-  options: { timeoutMs: number; name: string; timeoutError?: () => Error },
+  options: OneShotOptions,
 ): Promise<IntegrationMessage> {
-  const signal = AbortSignal.timeout(options.timeoutMs);
-  return new Promise<IntegrationMessage>((resolve, reject) => {
-    const onAbort = (): void => {
-      reject(options.timeoutError?.() ?? new OneShotTimeoutError(options.name, options.timeoutMs));
-    };
-    const unsub = channel.subscribe((msg) => {
-      signal.removeEventListener('abort', onAbort);
-      resolve(msg);
-    });
-    signal.addEventListener(
-      'abort',
-      () => {
-        onAbort();
-        unsub();
-      },
-      { once: true },
-    );
-  });
+  return openFirstMessageWait(channel, options).promise;
 }
