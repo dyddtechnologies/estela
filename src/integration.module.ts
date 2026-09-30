@@ -27,6 +27,7 @@ import { ChannelGraph } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
 import { subscribeActivator, type ActivatorDeps } from './activator/activator-wrapper';
+import { HopLogger, type IntegrationLoggingOptions } from './trace/hop-logger';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
 
@@ -41,6 +42,8 @@ export interface IntegrationModuleOptions {
   /** default 'error.channel' (auto-created pubsub, spec sec.5/sec.11). */
   errorChannel?: string;
   idempotency?: IntegrationIdempotencyOptions;
+  /** Opt-in per-flow / per-hop logging (flow · channel · correlation). Default off. */
+  logging?: IntegrationLoggingOptions;
   /** Port AMQP opcional — si falta, explorer hace warn y no lanza (spec sec.7.2). */
   rabbitChannel?: AmqpLikeChannel;
   rabbitMappings?: readonly RabbitInboundMapping[];
@@ -201,6 +204,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       if (this.options.idempotency?.ttlMs !== undefined) {
         executorDeps.idempotencyTtlMs = this.options.idempotency.ttlMs;
       }
+      const flowLog = this.hopLogger();
+      if (flowLog !== undefined) executorDeps.logger = flowLog;
       const executor = new FlowExecutor(definition.name, built, executorDeps);
       executor.attachTo(this.registry);
     }
@@ -243,6 +248,16 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
+  private hopLoggerInstance: HopLogger | undefined;
+
+  private hopLogger(): HopLogger | undefined {
+    if (this.options.logging?.hops !== true) return undefined;
+    if (this.hopLoggerInstance === undefined) {
+      this.hopLoggerInstance = new HopLogger(this.options.logging.level ?? 'log');
+    }
+    return this.hopLoggerInstance;
+  }
+
   private activatorDeps(): ActivatorDeps {
     const deps: ActivatorDeps = {
       registry: this.registry,
@@ -253,6 +268,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     if (this.options.idempotency?.ttlMs !== undefined) {
       deps.idempotencyTtlMs = this.options.idempotency.ttlMs;
     }
+    const log = this.hopLogger();
+    if (log !== undefined) deps.logger = log;
     return deps;
   }
 }

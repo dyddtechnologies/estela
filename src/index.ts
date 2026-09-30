@@ -18,6 +18,7 @@ export const INTEGRATION_LIBRARY_VERSION: string = version;
 // ---------- Fase 1: kernel de message + trace ----------
 export * from './message';
 export * from './trace/trace-context';
+export * from './trace/hop-logger';
 
 // ---------- Fase 2: channels ----------
 export * from './channel';

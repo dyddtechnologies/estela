@@ -5,6 +5,7 @@ import { createMessage, JUMP_REPLY_HEADER, type IntegrationMessage } from '../me
 import { serializeError } from '../flow/flow-step';
 import type { IdempotencyService } from '../idempotency/idempotency.service';
 import type { TraceContext } from '../trace/trace-context';
+import type { HopLogger } from '../trace/hop-logger';
 
 export interface ActivatorDeps {
   registry: ChannelRegistry;
@@ -12,6 +13,7 @@ export interface ActivatorDeps {
   errorChannel: string;
   idempotency?: IdempotencyService;
   idempotencyTtlMs?: number;
+  logger?: HopLogger;
 }
 
 export interface ActivatorBinding {
@@ -93,10 +95,15 @@ export async function invokeActivator(
   if (method === undefined) {
     throw new Error(`activator: método '${binding.methodName}' no encontrado`);
   }
+  const log = deps.logger;
+  const channel = binding.metadata.channel;
+  const startedAt = Date.now();
+  log?.hopStart(channel, scope, msg.headers);
   try {
     const result = await trace.runWithMessage(msg, () =>
       method.call(binding.instance, msg.payload, msg),
     );
+    log?.hopEnd(channel, scope, msg.headers, true, Date.now() - startedAt);
     if (idem !== undefined && key !== undefined) {
       await idem.complete(
         scope,
@@ -106,6 +113,7 @@ export async function invokeActivator(
     }
     await replyToCaller(result, msg, registry);
   } catch (error) {
+    log?.hopEnd(channel, scope, msg.headers, false, Date.now() - startedAt);
     if (idem !== undefined && key !== undefined) {
       await idem.fail(scope, key, error).catch(() => undefined);
     }
