@@ -19,6 +19,7 @@ export const INTEGRATION_LIBRARY_VERSION: string = version;
 export * from './message';
 export * from './trace/trace-context';
 export * from './trace/hop-logger';
+export { ESTELA_BANNER, ESTELA_BANNER_ENV, printEstelaBanner } from './trace/banner';
 
 // ---------- Fase 2: channels ----------
 export * from './channel';

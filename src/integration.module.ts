@@ -28,6 +28,7 @@ import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
 import { subscribeActivator, type ActivatorDeps } from './activator/activator-wrapper';
 import { HopLogger, type IntegrationLoggingOptions } from './trace/hop-logger';
+import { printEstelaBanner } from './trace/banner';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
 
@@ -176,6 +177,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
 
   /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
   async onModuleInit(): Promise<void> {
+    printEstelaBanner({ enabled: this.options.logging?.banner });
+
     // 1. error channel (auto) + channels declared
     if (this.registry.tryGet(this.options.errorChannel) === undefined) {
       this.registry.create({ name: this.options.errorChannel, type: 'pubsub' });
