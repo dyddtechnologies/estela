@@ -78,7 +78,7 @@ export async function invokeActivator(
   msg: IntegrationMessage,
   deps: ActivatorDeps,
 ): Promise<void> {
-  const { registry, trace } = deps;
+  const { registry } = deps;
   const idem = deps.idempotency;
   const key =
     typeof msg.headers.idempotencyKey === 'string' ? msg.headers.idempotencyKey : undefined;
@@ -95,15 +95,8 @@ export async function invokeActivator(
   if (method === undefined) {
     throw new Error(`activator: método '${binding.methodName}' no encontrado`);
   }
-  const log = deps.logger;
-  const channel = binding.metadata.channel;
-  const startedAt = Date.now();
-  log?.hopStart(channel, scope, msg.headers);
   try {
-    const result = await trace.runWithMessage(msg, () =>
-      method.call(binding.instance, msg.payload, msg),
-    );
-    log?.hopEnd(channel, scope, msg.headers, true, Date.now() - startedAt);
+    const result = await runActivatorMethod(binding, scope, msg, deps, method);
     if (idem !== undefined && key !== undefined) {
       await idem.complete(
         scope,
@@ -113,11 +106,34 @@ export async function invokeActivator(
     }
     await replyToCaller(result, msg, registry);
   } catch (error) {
-    log?.hopEnd(channel, scope, msg.headers, false, Date.now() - startedAt);
     if (idem !== undefined && key !== undefined) {
       await idem.fail(scope, key, error).catch(() => undefined);
     }
     await reportActivatorError(scope, msg, error, deps).catch(() => undefined);
+    throw error;
+  }
+}
+
+/** Invokes the activator method under the message trace, bracketed by the optional hop logger. */
+async function runActivatorMethod(
+  binding: ActivatorBinding,
+  scope: string,
+  msg: IntegrationMessage,
+  deps: ActivatorDeps,
+  method: (...args: unknown[]) => unknown,
+): Promise<unknown> {
+  const call = (): unknown => method.call(binding.instance, msg.payload, msg);
+  const log = deps.logger;
+  if (log === undefined) return deps.trace.runWithMessage(msg, call);
+  const channel = binding.metadata.channel;
+  const startedAt = Date.now();
+  log.hopStart(channel, scope, msg.headers);
+  try {
+    const result = await deps.trace.runWithMessage(msg, call);
+    log.hopEnd(channel, scope, msg.headers, true, Date.now() - startedAt);
+    return result;
+  } catch (error) {
+    log.hopEnd(channel, scope, msg.headers, false, Date.now() - startedAt);
     throw error;
   }
 }
