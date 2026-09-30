@@ -15,6 +15,8 @@ export interface IntegrationLoggingOptions {
   hops?: boolean;
   /** Level for the hop lines. Default 'log'. */
   level?: HopLogLevel;
+  /** Print the startup banner once per process. Default true; ESTELA_BANNER=false also disables it. */
+  banner?: boolean;
 }
 
 export class HopLogger {

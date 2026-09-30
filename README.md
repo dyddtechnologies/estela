@@ -187,6 +187,23 @@ flowchart LR
   inventory_reserve --> act["activator: InventoryActivator.reserve"]
 ```
 
+On startup the first `IntegrationModule` prints this banner once per process:
+
+```
+ ______  _____ _______ ______ _
+|  ____|/ ____|__   __|  ____| |        /\
+| |__  | (___    | |  | |__  | |       /  \
+|  __|  \___ \   | |  |  __| | |      / /\ \
+| |____ ____) |  | |  | |____| |____ / ____ \
+|______|_____/   |_|  |______|______/_/    \_\
+
+  ESTELA - created by: www.dyddtech.com
+  Enterprise Integration Patterns for NestJS
+```
+
+Turn it off with `forRoot({ logging: { banner: false } })` or `ESTELA_BANNER=false`. Per-hop
+logging is separate and opt-in: `forRoot({ logging: { hops: true } })`.
+
 ## Architecture
 
 Hexagonal (ports & adapters) with explicit SOLID + GoF:
