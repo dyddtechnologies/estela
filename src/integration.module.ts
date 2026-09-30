@@ -42,7 +42,7 @@ export interface IntegrationModuleOptions {
   /** default 'error.channel' (auto-created pubsub, spec sec.5/sec.11). */
   errorChannel?: string;
   idempotency?: IntegrationIdempotencyOptions;
-  /** Opt-in per-flow / per-hop logging (flow · channel · correlation). Default off. */
+  /** Opt-in per-flow / per-hop logging (flow, channel, correlation). Default off. */
   logging?: IntegrationLoggingOptions;
   /** Port AMQP opcional — si falta, explorer hace warn y no lanza (spec sec.7.2). */
   rabbitChannel?: AmqpLikeChannel;
@@ -252,9 +252,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
 
   private hopLogger(): HopLogger | undefined {
     if (this.options.logging?.hops !== true) return undefined;
-    if (this.hopLoggerInstance === undefined) {
-      this.hopLoggerInstance = new HopLogger(this.options.logging.level ?? 'log');
-    }
+    this.hopLoggerInstance ??= new HopLogger(this.options.logging.level ?? 'log');
     return this.hopLoggerInstance;
   }
 

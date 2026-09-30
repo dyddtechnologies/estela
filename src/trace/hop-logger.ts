@@ -4,25 +4,28 @@ import type { MessageHeaders } from '../message';
 /**
  * Opt-in runtime logging that brackets every flow and every activator hop, so
  * each line distinguishes the flow, the channel and the correlation
- * (traceId + correlationId). Off by default — no behavior change unless
+ * (traceId + correlationId). Off by default: no behavior change unless
  * `IntegrationModule.forRoot({ logging: { hops: true } })`.
  */
+/** Nest log level used for the hop lines. */
+export type HopLogLevel = 'log' | 'debug' | 'verbose';
+
 export interface IntegrationLoggingOptions {
   /** Emit an enter/exit line per flow and per activator hop. Default false. */
   hops?: boolean;
   /** Level for the hop lines. Default 'log'. */
-  level?: 'log' | 'debug' | 'verbose';
+  level?: HopLogLevel;
 }
 
 export class HopLogger {
   private readonly logger = new Logger('IntegrationRuntime');
-  private readonly level: 'log' | 'debug' | 'verbose';
+  private readonly level: HopLogLevel;
 
-  constructor(level: 'log' | 'debug' | 'verbose' = 'log') {
+  constructor(level: HopLogLevel = 'log') {
     this.level = level;
   }
 
-  /** flow · channel · correlation, the three axes the caller asked to distinguish. */
+  /** Flow, channel and correlation: the three axes each line distinguishes. */
   private tag(h: MessageHeaders): string {
     return `trace=${h.traceId} corr=${h.correlationId}`;
   }

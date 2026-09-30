@@ -45,7 +45,7 @@ describe('HopLogger', () => {
     await mod.init();
     await mod.get(ChannelRegistry).send('demo.in', { hello: 'world' });
     spy.mockRestore();
-    expect(lines.some((l) => /^(▶|→) (flow|hop) /.test(l))).toBe(false);
+    expect(lines.some((l) => /^[▶→] (flow|hop) /.test(l))).toBe(false);
     await mod.close();
   });
 
@@ -73,9 +73,13 @@ describe('HopLogger', () => {
     await mod.get(ChannelRegistry).send('demo.in', { hello: 'world' });
     spy.mockRestore();
 
-    const hop = lines.filter((l) => /^(▶|■|→|←) (flow|hop) /.test(l));
-    expect(hop.some((l) => l.startsWith('▶ flow demo-flow on demo.in') && l.includes('trace='))).toBe(true);
-    expect(hop.some((l) => l.startsWith('→ hop demo.work activator:Echo.work') && l.includes('corr='))).toBe(true);
+    const hop = lines.filter((l) => /^[▶■→←] (flow|hop) /.test(l));
+    expect(
+      hop.some((l) => l.startsWith('▶ flow demo-flow on demo.in') && l.includes('trace=')),
+    ).toBe(true);
+    expect(
+      hop.some((l) => l.startsWith('→ hop demo.work activator:Echo.work') && l.includes('corr=')),
+    ).toBe(true);
     expect(hop.some((l) => l.startsWith('← hop demo.work activator:Echo.work ok'))).toBe(true);
     expect(hop.some((l) => l.startsWith('■ flow demo-flow on demo.in completed'))).toBe(true);
     await mod.close();
@@ -83,7 +87,9 @@ describe('HopLogger', () => {
 
   it('formats a hop line with trace and correlation', () => {
     const emitted: string[] = [];
-    jest.spyOn(Logger.prototype, 'log').mockImplementation((m: unknown) => emitted.push(String(m)) as unknown as void);
+    jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation((m: unknown) => emitted.push(String(m)) as unknown as void);
     const h = new HopLogger('log');
     const headers = { traceId: 't-1', correlationId: 'c-1' } as never;
     h.hopStart('ch.x', 'activator:A.b', headers);

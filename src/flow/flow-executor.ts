@@ -65,12 +65,8 @@ export class FlowExecutor {
       const acquired = await idem.begin(scope, key, ttl);
       if (!acquired) return { status: 'duplicate' };
     }
-    const log = this.deps.logger;
-    const startedAt = Date.now();
-    log?.flowStart(this.flowName, this.built.source, input.headers);
     try {
-      const result = await this.deps.trace.runWithMessage(input, () => this.runSteps(input));
-      log?.flowEnd(this.flowName, this.built.source, input.headers, result.status, Date.now() - startedAt);
+      const result = await this.runTracked(input);
       if (idem !== undefined && key !== undefined) {
         await idem.complete(
           scope,
@@ -83,8 +79,26 @@ export class FlowExecutor {
       if (idem !== undefined && key !== undefined) {
         await idem.fail(scope, key, error).catch(() => undefined);
       }
-      log?.flowEnd(this.flowName, this.built.source, input.headers, 'error', Date.now() - startedAt);
       await this.reportError(input, error).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /** Runs the steps under the message trace, bracketed by the optional hop logger. */
+  private async runTracked(input: IntegrationMessage): Promise<FlowExecutionResult> {
+    const log = this.deps.logger;
+    if (log === undefined) {
+      return this.deps.trace.runWithMessage(input, () => this.runSteps(input));
+    }
+    const { source } = this.built;
+    const startedAt = Date.now();
+    log.flowStart(this.flowName, source, input.headers);
+    try {
+      const result = await this.deps.trace.runWithMessage(input, () => this.runSteps(input));
+      log.flowEnd(this.flowName, source, input.headers, result.status, Date.now() - startedAt);
+      return result;
+    } catch (error) {
+      log.flowEnd(this.flowName, source, input.headers, 'error', Date.now() - startedAt);
       throw error;
     }
   }
