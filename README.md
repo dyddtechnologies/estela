@@ -172,6 +172,33 @@ forRoot({ channels, idempotency: { store: new RedisIdempotencyStore(redis) } });
 ```
 </details>
 
+## Sagas: units of work and idempotency
+
+A saga lists the steps of one business operation in order. Consecutive `transaction` steps share
+one database transaction, so a failure rolls all of them back and a crashed pod leaves nothing half
+written. An `outbound` step talks to the outside world and never runs inside a transaction: the unit
+of work before it commits first, and its `compensate` undoes that work if the call fails. Steps share
+state through a typed `ctx`.
+
+```ts
+const complete = saga<CompleteCtx, EntityManager, CompleteReply>('complete')
+  .idempotent((ctx) => ctx.idempotencyKey)          // optional
+  .transaction('claim', claimStep)                  // ─┐ one transaction
+  .transaction('merge-session', mergeSession)       // ─┘
+  .outbound('call-api', callApi, { compensate: releaseClaim })
+  .transaction('mark-completed', markCompleted)     // second transaction
+  .reply((ctx) => ctx.response);
+
+const runner = new SagaRunner({ transactions: typeOrmPort, ledger: pgLedger, logger: new HopLogger() });
+await runner.run(complete, ctx, { correlationId });
+```
+
+`transactions` adapts the app's client to `TransactionPort.run(work)`. With an `IdempotencyLedger`
+the key is claimed inside the first unit of work and the reply is stored inside the last one, so the
+ledger row commits together with the saga's writes, on every replica. A repeated key returns the
+stored reply; one whose first run is still going raises `IdempotencyInProgressError`. A failed run
+frees the key. `MemoryIdempotencyLedger` is for tests only: it is not atomic with any database.
+
 ## Observability
 
 ```bash

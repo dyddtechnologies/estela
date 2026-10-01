@@ -71,3 +71,9 @@ export * from './graph/channel-graph.controller';
 
 // ---------- Fase 10: modulo root ----------
 export * from './integration.module';
+
+// ---------- Saga: units of work, outbound boundaries, transactional idempotency ----------
+export * from './saga/transaction-port';
+export * from './saga/idempotency-ledger';
+export * from './saga/saga';
+export * from './saga/saga-runner';
