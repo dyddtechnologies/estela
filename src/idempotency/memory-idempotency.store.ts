@@ -52,6 +52,10 @@ export class MemoryIdempotencyStore implements IdempotencyStore {
     return record;
   }
 
+  async release(scope: string, key: string): Promise<void> {
+    this.entries.delete(idempotencyStorageKey(scope, key));
+  }
+
   async purgeExpired(): Promise<number> {
     let purged = 0;
     for (const [fullKey, entry] of this.entries) {

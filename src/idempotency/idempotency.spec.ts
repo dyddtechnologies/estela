@@ -7,6 +7,7 @@ import { createMessage } from '../message';
 import { IdempotencyService } from './idempotency.service';
 import { MemoryIdempotencyStore } from './memory-idempotency.store';
 import { NoopIdempotencyStore } from './noop-idempotency.store';
+import type { IdempotencyStore } from './idempotency-store';
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -54,6 +55,73 @@ describe('MemoryIdempotencyStore (spec §10)', () => {
     const service = new IdempotencyService({ enabled: false });
     expect(await service.begin('flow:x', 'k', 60_000)).toBe(true);
     expect(await service.begin('flow:x', 'k', 60_000)).toBe(true);
+  });
+});
+
+describe('idempotency edge cases', () => {
+  it('complete() and fail() on a key that was never begun create no record', async () => {
+    const store = new MemoryIdempotencyStore();
+    await store.complete('flow:x', 'ghost', { completed: true });
+    await store.fail('flow:x', 'ghost', new Error('x'));
+    expect(await store.get('flow:x', 'ghost')).toBeUndefined();
+    expect(await store.begin('flow:x', 'ghost', 60_000)).toBe(true);
+    expect((await store.get('flow:x', 'ghost'))?.status).toBe('in-flight');
+  });
+
+  it('IdempotencyService.purgeExpired delegates to the store and reports its count', async () => {
+    const store = new MemoryIdempotencyStore();
+    const service = new IdempotencyService({ store });
+    await service.begin('flow:x', 'short', 5);
+    await service.begin('flow:x', 'long', 60_000);
+    await delay(20);
+    expect(await service.purgeExpired()).toBe(1);
+    expect(await store.begin('flow:x', 'short', 60_000)).toBe(true);
+    expect(await store.begin('flow:x', 'long', 60_000)).toBe(false);
+  });
+});
+
+describe('release (optional store operation, 0.6.0)', () => {
+  it('MemoryIdempotencyStore.release frees the key in its scope only', async () => {
+    const store = new MemoryIdempotencyStore();
+    await store.begin('s', 'k', 60_000);
+    await store.begin('other', 'k', 60_000);
+    await store.complete('s', 'k', { completed: true });
+    await store.release('s', 'k');
+    expect(await store.get('s', 'k')).toBeUndefined();
+    expect(await store.begin('s', 'k', 60_000)).toBe(true);
+    expect(await store.begin('other', 'k', 60_000)).toBe(false);
+    await store.release('s', 'never-claimed'); // no-op
+  });
+
+  it('NoopIdempotencyStore.release is a no-op', async () => {
+    const store = new NoopIdempotencyStore();
+    await expect(store.release('s', 'k')).resolves.toBeUndefined();
+  });
+
+  it('IdempotencyService.release delegates and reports support', async () => {
+    const service = new IdempotencyService({ store: new MemoryIdempotencyStore() });
+    expect(service.supportsRelease).toBe(true);
+    await service.begin('s', 'k');
+    expect(await service.release('s', 'k')).toBe(true);
+    expect(await service.begin('s', 'k')).toBe(true);
+    expect(new IdempotencyService().supportsRelease).toBe(true);
+    expect(new IdempotencyService({ enabled: false }).supportsRelease).toBe(true);
+  });
+
+  it('a store written before 0.6.0 (no release) still satisfies the contract', async () => {
+    const memory = new MemoryIdempotencyStore();
+    const legacy: IdempotencyStore = {
+      begin: (scope, key, ttlMs) => memory.begin(scope, key, ttlMs),
+      complete: (scope, key, result) => memory.complete(scope, key, result),
+      fail: (scope, key, error) => memory.fail(scope, key, error),
+      get: (scope, key) => memory.get(scope, key),
+      purgeExpired: () => memory.purgeExpired(),
+    };
+    const service = new IdempotencyService({ store: legacy });
+    expect(service.supportsRelease).toBe(false);
+    await service.begin('s', 'k');
+    expect(await service.release('s', 'k')).toBe(false);
+    expect(await service.begin('s', 'k')).toBe(false); // still blocked
   });
 });
 

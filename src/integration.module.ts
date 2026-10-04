@@ -7,14 +7,14 @@ import {
   type OnApplicationShutdown,
   type Provider,
 } from '@nestjs/common';
-import { DiscoveryModule, DiscoveryService, MetadataScanner } from '@nestjs/core';
+import { DiscoveryModule, DiscoveryService, MetadataScanner, ModuleRef } from '@nestjs/core';
 import { ACTIVATOR_METADATA, type ActivatorMetadata } from './decorators';
 import { ChannelRegistry } from './channel-registry';
 import { ChannelFactoryRegistry, type ChannelSpec } from './channel-factory';
 import type { RabbitInboundMapping } from './inbound/inbound.explorer';
-import type { ChannelDeps as ChannelDepsType } from './channels/channel-deps';
 import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
-import { INBOUND_DEPS } from './inbound/inbound.interceptor';
+import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.interceptor';
+import type { InboundDefaults } from './inbound/inbound.types';
 import { InboundExplorer } from './inbound/inbound.explorer';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
@@ -48,11 +48,44 @@ export interface IntegrationModuleOptions {
   /** Port AMQP opcional — si falta, explorer hace warn y no lanza (spec sec.7.2). */
   rabbitChannel?: AmqpLikeChannel;
   rabbitMappings?: readonly RabbitInboundMapping[];
+  /** Module-wide reply mapping and idempotency defaults of the inbound adapters. */
+  inbound?: InboundDefaults;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
   errorChannel: string;
   flows: readonly FlowDefinition[];
+}
+
+/** Deps bundle of the inbound interceptor, including the module-wide inbound defaults. */
+function inboundDepsProvider(): Provider {
+  return {
+    provide: INBOUND_DEPS,
+    useFactory: (
+      registry: ChannelRegistry,
+      trace: TraceContext,
+      idempotency: IdempotencyService,
+      gateway: ReplyGateway,
+      opts: ResolvedIntegrationOptions,
+      moduleRef: ModuleRef,
+    ): InboundInterceptorDeps => ({
+      registry,
+      trace,
+      idempotency,
+      replyGateway: gateway,
+      ...(opts.inbound !== undefined ? { defaults: opts.inbound } : {}),
+      // Lazy and app-wide: consumer providers do not exist yet when this factory runs.
+      resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
+    }),
+    inject: [
+      ChannelRegistry,
+      TraceContext,
+      IdempotencyService,
+      ReplyGateway,
+      INTEGRATION_OPTIONS,
+      ModuleRef,
+    ],
+  };
 }
 
 @Module({})
@@ -67,7 +100,6 @@ export class IntegrationModule {
       errorChannel: options.errorChannel ?? 'error.channel',
     };
     const logger = new Logger('IntegrationModule');
-    const holder: { registry?: ChannelRegistry } = {};
 
     const providers: Provider[] = [
       TraceContext,
@@ -82,25 +114,26 @@ export class IntegrationModule {
       {
         provide: ChannelRegistry,
         useFactory: (trace: TraceContext, opts: ResolvedIntegrationOptions): ChannelRegistry => {
-          const channelDeps: ChannelDepsType = {
-            trace,
-            onWarn: (message) => logger.warn(message),
-            onError: (error, msg) => {
-              const target = holder.registry;
-              if (target === undefined) return;
-              const envelope = createMessage(
-                { error: serializeError(error), causedBy: msg.headers.id },
-                {
-                  traceId: msg.headers.traceId,
-                  correlationId: msg.headers.correlationId,
-                  causationId: msg.headers.id,
-                },
-              );
-              void target.sendMessage(opts.errorChannel, envelope).catch(() => undefined);
+          // The error hook only runs on a channel send, long after `registry` is assigned.
+          const registry: ChannelRegistry = new ChannelRegistry(
+            {
+              trace,
+              onWarn: (message) => logger.warn(message),
+              onError: (error, msg) => {
+                const envelope = createMessage(
+                  { error: serializeError(error), causedBy: msg.headers.id },
+                  {
+                    traceId: msg.headers.traceId,
+                    correlationId: msg.headers.correlationId,
+                    causationId: msg.headers.id,
+                  },
+                );
+                void registry.sendMessage(opts.errorChannel, envelope).catch(() => undefined);
+              },
             },
-          };
-          holder.registry = new ChannelRegistry(channelDeps, new ChannelFactoryRegistry());
-          return holder.registry;
+            new ChannelFactoryRegistry(),
+          );
+          return registry;
         },
         inject: [TraceContext, INTEGRATION_OPTIONS],
       },
@@ -110,16 +143,7 @@ export class IntegrationModule {
           new ReplyGateway({ registry, trace }),
         inject: [ChannelRegistry, TraceContext],
       },
-      {
-        provide: INBOUND_DEPS,
-        useFactory: (
-          registry: ChannelRegistry,
-          trace: TraceContext,
-          idempotency: IdempotencyService,
-          gateway: ReplyGateway,
-        ) => ({ registry, trace, idempotency, replyGateway: gateway }),
-        inject: [ChannelRegistry, TraceContext, IdempotencyService, ReplyGateway],
-      },
+      inboundDepsProvider(),
       {
         provide: InboundExplorer,
         useFactory: (

@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 
 import { Test } from '@nestjs/testing';
-import { Injectable, Module } from '@nestjs/common';
+import { Injectable, Logger, Module } from '@nestjs/common';
 import { INTEGRATION_OPTIONS, IntegrationModule } from './integration.module';
 import { ServiceActivator } from './decorators';
 import { IntegrationFlow, type FlowDefinition } from './flow/integration-flow';
@@ -9,6 +9,10 @@ import { ChannelRegistry } from './channel-registry';
 import { ChannelGraph } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import type { ResolvedIntegrationOptions } from './integration.module';
+import type { IntegrationModuleOptions } from './integration.module';
+import type { AmqpLikeChannel, AmqpMessage } from './adapters/amqp-like.channel';
+import { MemoryIdempotencyStore } from './idempotency/memory-idempotency.store';
+import type { IntegrationMessage } from './message';
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -191,5 +195,162 @@ describe('IntegrationModule.forRoot — bootstrap orders (topologia sec.17.8)', 
     const { module } = moduleRef!;
     const probe = module.get(FeatureProbe);
     expect(probe.registry.get('error.channel').kind).toBe('pubsub');
+  });
+});
+
+describe('IntegrationModule.forRoot: channel hooks, rabbit wiring and idempotency ttl', () => {
+  const closers: (() => Promise<void>)[] = [];
+
+  const boot = async (
+    options: IntegrationModuleOptions,
+    flows: readonly FlowDefinition[] = [],
+    providers: (new (...args: never[]) => unknown)[] = [],
+  ) => {
+    const module = await Test.createTestingModule({
+      imports: [IntegrationModule.forRoot(options, flows)],
+      providers,
+    }).compile();
+    const app = module.createNestApplication();
+    await app.init();
+    closers.push(() => app.close());
+    return { module, registry: module.get(ChannelRegistry) };
+  };
+
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+  });
+
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close();
+    jest.restoreAllMocks();
+  });
+
+  it('a replaced direct subscriber is reported through the module logger', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { registry } = await boot({ channels: [{ name: 'solo', type: 'direct' }] });
+    const solo = registry.get('solo');
+    solo.subscribe(async () => undefined);
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("direct 'solo'"));
+    solo.subscribe(async () => undefined);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("direct 'solo'"));
+  });
+
+  it('a failing pubsub subscriber is reported to the error channel with its causation', async () => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const { registry } = await boot({
+      channels: [{ name: 'events', type: 'pubsub' }],
+      errorChannel: 'errors.custom',
+    });
+    const failed: IntegrationMessage[] = [];
+    const reported: IntegrationMessage[] = [];
+    registry.get('events').subscribe(async (msg: IntegrationMessage) => {
+      failed.push(msg);
+      throw new Error('subscriber blew up');
+    });
+    registry.get('errors.custom').subscribe(async (msg: IntegrationMessage) => {
+      reported.push(msg);
+    });
+
+    await registry.send('events', { n: 1 }, { traceId: 't-err', correlationId: 'c-err' });
+    await delay(20);
+
+    expect(failed).toHaveLength(1);
+    expect(reported).toHaveLength(1);
+    const cause = failed[0]!.headers;
+    const envelope = reported[0]!;
+    expect(envelope.payload).toMatchObject({
+      error: { message: 'subscriber blew up' },
+      causedBy: cause.id,
+    });
+    expect(envelope.headers.traceId).toBe('t-err');
+    expect(envelope.headers.correlationId).toBe('c-err');
+    expect(envelope.headers.causationId).toBe(cause.id);
+  });
+
+  it('an error report that cannot be delivered is swallowed, never an unhandled rejection', async () => {
+    const { registry } = await boot({ channels: [{ name: 'events', type: 'pubsub' }] });
+    registry.get('events').subscribe(async () => {
+      throw new Error('subscriber blew up');
+    });
+    registry.unregister('error.channel');
+    const sendMessage = jest.spyOn(registry, 'sendMessage');
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      await expect(registry.send('events', 'p')).resolves.toBeUndefined();
+      await delay(20);
+      expect(sendMessage).toHaveBeenCalledWith('error.channel', expect.anything());
+      await expect(sendMessage.mock.results[0]?.value).rejects.toThrow('error.channel');
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('rabbit mappings are bound at init; a poison message is nacked and logged', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const consumers = new Map<string, (msg: AmqpMessage | null) => void>();
+    const amqp: AmqpLikeChannel = {
+      assertQueue: jest.fn(async () => undefined),
+      consume: jest.fn(async (queue: string, handler: (msg: AmqpMessage | null) => void) => {
+        consumers.set(queue, handler);
+        return {};
+      }),
+      ack: jest.fn(),
+      nack: jest.fn(),
+      sendToQueue: jest.fn(() => true),
+    };
+    const { registry } = await boot({
+      channels: [{ name: 'orders.in', type: 'queue' }],
+      rabbitChannel: amqp,
+      rabbitMappings: [{ queue: 'orders.q', channel: 'orders.in' }],
+    });
+    expect(amqp.assertQueue).toHaveBeenCalledWith('orders.q', { durable: true });
+    const received: unknown[] = [];
+    registry.get('orders.in').subscribe(async (msg: IntegrationMessage) => {
+      received.push(msg.payload);
+    });
+
+    const good: AmqpMessage = { content: Buffer.from(JSON.stringify({ orderId: 'o-1' })) };
+    consumers.get('orders.q')?.(good);
+    await delay(20);
+    expect(received).toEqual([{ orderId: 'o-1' }]);
+    expect(amqp.ack).toHaveBeenCalledWith(good);
+    expect(amqp.nack).not.toHaveBeenCalled();
+
+    const poison: AmqpMessage = { content: Buffer.from('{not json') };
+    consumers.get('orders.q')?.(poison);
+    await delay(20);
+    expect(amqp.nack).toHaveBeenCalledWith(poison, false, false);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('SyntaxError'));
+    expect(received).toHaveLength(1);
+  });
+
+  it('the module idempotency ttl reaches flow scopes and activator scopes', async () => {
+    const store = new MemoryIdempotencyStore();
+    const begin = jest.spyOn(store, 'begin');
+    const TtlFlow: FlowDefinition = {
+      name: 'ttl-flow',
+      build: () => IntegrationFlow.from('ttl.in').to('billing.charge'),
+    };
+    const { registry } = await boot(
+      {
+        channels: [
+          { name: 'ttl.in', type: 'direct' },
+          { name: 'billing.charge', type: 'direct' },
+        ],
+        idempotency: { ttlMs: 1234, store },
+      },
+      [TtlFlow],
+      [BillingActivator],
+    );
+    await registry.send('ttl.in', 'p', { idempotencyKey: 'ttl-1' });
+    const scopes = begin.mock.calls.map(([scope]) => scope);
+    expect(scopes).toHaveLength(2);
+    expect(scopes).toContain('flow:ttl-flow');
+    expect(begin.mock.calls.map(([, key, ttlMs]) => [key, ttlMs])).toEqual([
+      ['ttl-1', 1234],
+      ['ttl-1', 1234],
+    ]);
   });
 });

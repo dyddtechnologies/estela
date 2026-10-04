@@ -44,6 +44,18 @@ export class IdempotencyService implements FlowIdempotencyPort {
     return this.store.get(scope, key);
   }
 
+  /** True when the configured store can free a key (`IdempotencyStore.release`). */
+  get supportsRelease(): boolean {
+    return typeof this.store.release === 'function';
+  }
+
+  /** Frees the key so a retry runs for real. Resolves false when the store has no `release`. */
+  async release(scope: string, key: string): Promise<boolean> {
+    if (typeof this.store.release !== 'function') return false;
+    await this.store.release(scope, key);
+    return true;
+  }
+
   async purgeExpired(): Promise<number> {
     return this.store.purgeExpired();
   }

@@ -4,7 +4,7 @@
   **Le runtime Enterprise Integration Patterns pour NestJS.**
   *Le flow parle aux canaux, pas aux classes.*
 
-  [![tests](https://img.shields.io/badge/tests-110%2F110-brightgreen)](#statut)
+  [![tests](https://img.shields.io/badge/tests-274%2F274-brightgreen)](#statut)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -158,6 +158,15 @@ forRoot({ channels, idempotency: { store: new RedisIdempotencyStore(redis) } });
 ```
 </details>
 
+### Adaptateurs inbound : réponse et idempotence sur mesure (0.6.0)
+
+`@InboundRest`, `@InboundGrpc` et `@InboundGraphQL` acceptent désormais `reply` (`'envelope'` par
+défaut, `'raw'`, fonction ou provider DI) et `idempotency` (résolution de clé liée au tenant, replay
+de la première réponse, rejet 409 en cours d'exécution, libération ou stockage de l'échec, store
+dédié), par endpoint ou pour tout le module via `forRoot({ inbound })`. Sans configuration, rien ne
+change par rapport à la 0.5.0. Détails, tableaux et exemple multi-tenant :
+[README (EN)](./README.md#inbound-adapters-reply-mapping--idempotency).
+
 ## Observabilité
 
 ```bash
@@ -189,7 +198,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **110/110** · 18 suites · e2e HTTP réel |
+| Tests | **274/274** · 26 suites · e2e HTTP réel |
 | Spec | 10/10 tests minimaux · DoD §15 complet |
 | Boundaries | domaine pur · barrel sans brokers · testing sans inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
