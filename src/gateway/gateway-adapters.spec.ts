@@ -66,6 +66,41 @@ describe('ReplyGateway — test 7 del spec (request/reply, spec §8)', () => {
     expect(registry.list()).toHaveLength(sizeBefore);
   });
 
+  it('headers are optional: the request still carries its ephemeral reply channel', async () => {
+    const { registry, gateway } = makeWorld();
+    const replyChannels: unknown[] = [];
+    registry.create({ name: 'bare', type: 'direct' }).subscribe(async (msg) => {
+      replyChannels.push(msg.headers.replyChannel);
+      await registry.send(msg.headers.replyChannel!, 'pong');
+    });
+    expect(await gateway.sendAndReceive('bare', 'ping')).toBe('pong');
+    expect(replyChannels).toEqual([expect.stringMatching(/^reply\./)]);
+  });
+
+  it('without any configured timeout the wait gives up after ten seconds', async () => {
+    jest.useFakeTimers();
+    try {
+      const trace = new TraceContext();
+      const registry = new ChannelRegistry({ trace });
+      const gateway = new ReplyGateway({ registry, trace });
+      registry.create({ name: 'silent', type: 'direct' }).subscribe(async () => undefined);
+      const sizeBefore = registry.list().length;
+      let outcome: unknown = 'pending';
+      gateway.sendAndReceive('silent', 'p').then(
+        () => (outcome = 'replied'),
+        (error: unknown) => (outcome = error),
+      );
+      await jest.advanceTimersByTimeAsync(9_999);
+      expect(outcome).toBe('pending');
+      await jest.advanceTimersByTimeAsync(1);
+      expect(outcome).toBeInstanceOf(ReplyTimeoutError);
+      expect((outcome as Error).message).toContain('(10000ms)');
+      expect(registry.list()).toHaveLength(sizeBefore);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('integración inbound requestReply:true end-to-end vía interceptor', async () => {
     const { registry, trace, gateway } = makeWorld();
     registry.create({ name: 'echo', type: 'direct' }).subscribe(async (msg) => {

@@ -25,10 +25,17 @@ import {
   markInboundFailure,
   readInboundFailureMark,
 } from './inbound.failure';
-import { encodeInboundKey } from './inbound.idempotency';
+import {
+  InboundIdempotencyGate,
+  encodeInboundKey,
+  toStorePort,
+  type InboundIdempotencyPlan,
+} from './inbound.idempotency';
+import type { InboundTransportStrategy } from './inbound.transport';
 import {
   INBOUND_SPEC_METADATA,
   InboundError,
+  duplicateResponse,
   type InboundFailureClassifier,
   type InboundFailureCodec,
   type InboundIdempotencyOptions,
@@ -1377,5 +1384,196 @@ describe('inbound idempotency: forward', () => {
     await expect(bad({ idempotency: { onInFlight: 'wait' as 'reject' } })).rejects.toThrow(
       'not a known policy',
     );
+  });
+});
+
+describe('inbound interceptor: routing guards', () => {
+  it('a handler without @Inbound metadata passes through untouched', async () => {
+    const { interceptor, seen, store } = makeWorld();
+    const begin = jest.spyOn(store, 'begin');
+    const plain = function plain(): void {};
+    const context = fakeContext('rest', plain, keyed('p-1'));
+    const next: CallHandler = { handle: () => of({ untouched: true }) };
+    const result = await lastValueFrom(await interceptor.intercept(context, next));
+    expect(result).toEqual({ untouched: true });
+    expect(seen).toHaveLength(0);
+    expect(begin).not.toHaveBeenCalled();
+  });
+
+  it('a transport without a strategy is rejected before the handler runs', async () => {
+    const { interceptor, seen } = makeWorld();
+    const spec = accepted({ transport: 'rabbit' });
+    const handler = function handle(): void {};
+    Reflect.defineMetadata(INBOUND_SPEC_METADATA, spec, handler);
+    const handle = jest.fn(() => of('never'));
+    const outcome = interceptor.intercept(fakeContext('rest', handler, {}), { handle });
+    await expect(outcome).rejects.toBeInstanceOf(InboundError);
+    await expect(outcome).rejects.toThrow("sin strategy para transporte 'rabbit'");
+    expect(handle).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(0);
+  });
+
+  it('custom strategies replace the built-in ones', async () => {
+    const onlyGrpc: InboundTransportStrategy = {
+      transport: 'grpc',
+      extract: () => ({ payload: { from: 'custom' }, rawHeaders: {} }),
+    };
+    const { run, seen } = makeWorld({ strategies: [onlyGrpc] });
+    await expect(run(accepted())).rejects.toThrow("sin strategy para transporte 'rest'");
+    await run(accepted({ transport: 'grpc' }));
+    expect(seen.map((msg) => msg.payload)).toEqual([{ from: 'custom' }]);
+  });
+
+  it('a strategy for a transport without a header mapper dispatches nothing', async () => {
+    const soap = {
+      transport: 'soap',
+      extract: () => ({ payload: 'p', rawHeaders: {} }),
+    } as unknown as InboundTransportStrategy;
+    const { run, seen } = makeWorld({ strategies: [soap] });
+    const spec = accepted({ transport: 'soap' as InboundSpec['transport'] });
+    await expect(run(spec)).rejects.toThrow("sin header-mapper para 'soap'");
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe('inbound idempotency: store and resolver edge cases', () => {
+  const brokenStore = (overrides: Partial<IdempotencyStore>): IdempotencyStore => {
+    const inner = new MemoryIdempotencyStore();
+    return {
+      begin: (scope, key, ttlMs) => inner.begin(scope, key, ttlMs),
+      complete: (scope, key, result) => inner.complete(scope, key, result),
+      fail: (scope, key, error) => inner.fail(scope, key, error),
+      get: (scope, key) => inner.get(scope, key),
+      purgeExpired: () => inner.purgeExpired(),
+      ...overrides,
+    };
+  };
+
+  it('a non-InboundError raised while reading the resolved key propagates unwrapped', async () => {
+    const { run, store, seen } = makeWorld();
+    const begin = jest.spyOn(store, 'begin');
+    const hostile = new TypeError('key getter exploded');
+    const resolved = {
+      get key(): string {
+        throw hostile;
+      },
+    };
+    const spec = reply({ idempotency: { key: () => resolved } });
+    await expect(run(spec, keyed('h-1'))).rejects.toBe(hostile);
+    expect(begin).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(0);
+  });
+
+  it('a completed record without a result is a duplicate with a null result', async () => {
+    const bare = brokenStore({
+      begin: () => Promise.resolve(false),
+      get: () => Promise.resolve({ status: 'completed' }),
+    });
+    const { run, seen } = makeWorld();
+    expect(await run(reply({ idempotency: { store: bare } }), keyed('b-1'))).toEqual({
+      status: 'duplicate',
+      idempotencyKey: 'b-1',
+      replayed: true,
+      result: null,
+      traceId: '',
+    });
+    const replayed = reply({ idempotency: { store: bare, onDuplicate: 'replay' }, reply: 'raw' });
+    expect(await run(replayed, keyed('b-1'))).toBeUndefined();
+    expect(seen).toHaveLength(0);
+  });
+
+  it('when complete() and fail() both reject, the complete() error is the one thrown', async () => {
+    const stuck = new Error('complete down');
+    const fail = jest.fn(() => Promise.reject(new Error('fail down')));
+    const store = brokenStore({ complete: () => Promise.reject(stuck), fail });
+    const { run, seen } = makeWorld();
+    await expect(run(reply({ idempotency: { store } }), keyed('d-1'))).rejects.toBe(stuck);
+    expect(fail).toHaveBeenCalledWith('inbound:work', 'd-1', stuck);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('a rejecting fail() never masks the business error', async () => {
+    const fail = jest.fn(() => Promise.reject(new Error('fail down')));
+    const store = brokenStore({ fail });
+    const world = makeWorld();
+    const business = new Error('nope');
+    world.world.behave = () => {
+      throw business;
+    };
+    await expect(world.run(reply({ idempotency: { store } }), keyed('d-2'))).rejects.toBe(business);
+    expect(fail).toHaveBeenCalledWith('inbound:work', 'd-2', business);
+    expect((await store.get('inbound:work', 'd-2'))?.status).toBe('in-flight');
+  });
+
+  it('a gate built without a warn sink still degrades a dynamic release to keep', async () => {
+    const legacy = new LegacyStore();
+    const plan: InboundIdempotencyPlan = {
+      store: toStorePort(legacy),
+      ttlMs: 60_000,
+      scope: 'inbound:gate',
+      onDuplicate: 'envelope',
+      onInFlight: 'duplicate',
+      failure: { mode: 'classifier', classify: () => 'release' },
+      codec: new HttpExceptionFailureCodec(),
+    };
+    const ctx = { spec: accepted(), clientKey: 'g-1' } as InboundKeyContext;
+    const gate = new InboundIdempotencyGate();
+    const claim = await gate.claim(plan, ctx);
+    expect(claim.status).toBe('acquired');
+    await expect(gate.failed(claim, new Error('nope'), ctx)).resolves.toBeUndefined();
+    expect((await legacy.get('inbound:gate', 'g-1'))?.status).toBe('failed');
+  });
+});
+
+describe('inbound: remaining defaults and messages', () => {
+  it('default codec stores a thrown non-Error as a generic failure, a string as its message', () => {
+    const codec = new HttpExceptionFailureCodec();
+    expect(codec.serialize(42)).toEqual({ kind: 'error', name: 'Error', message: 'Unknown error' });
+    expect(codec.serialize('plain text')).toEqual({
+      kind: 'error',
+      name: 'Error',
+      message: 'plain text',
+    });
+    const replayed = codec.deserialize(codec.serialize(42));
+    expect(replayed).toBeInstanceOf(InboundReplayedFailureError);
+    expect((replayed as InboundReplayedFailureError).message).toBe('Unknown error');
+  });
+
+  it('an anonymous class passed as a strategy is reported as such', async () => {
+    const { run } = makeWorld();
+    const anonymous = (() =>
+      class {
+        mapReply(): string {
+          return 'never';
+        }
+      })();
+    expect(anonymous.name).toBe('');
+    const spec = reply({ reply: anonymous as unknown as InboundReplyMapper });
+    await expect(run(spec)).rejects.toThrow(
+      "inbound strategy 'anonymous' is a class; pass { useExisting: anonymous }",
+    );
+  });
+
+  it('a resolver that throws a non-Error is wrapped with a generic cause', async () => {
+    const resolver: InboundProviderResolver = {
+      resolve: () => {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        throw 'container closed';
+      },
+    };
+    const { run } = makeWorld({ resolver });
+    await expect(run(reply({ reply: { useExisting: 'MAPPER' } }))).rejects.toThrow(
+      "inbound strategy 'MAPPER' could not be resolved: unknown provider",
+    );
+  });
+
+  it('duplicateResponse without options is a replayed duplicate with no result or trace', () => {
+    expect(duplicateResponse('k-0')).toEqual({
+      status: 'duplicate',
+      idempotencyKey: 'k-0',
+      replayed: true,
+      result: null,
+      traceId: '',
+    });
   });
 });

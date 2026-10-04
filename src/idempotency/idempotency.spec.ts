@@ -58,6 +58,28 @@ describe('MemoryIdempotencyStore (spec §10)', () => {
   });
 });
 
+describe('idempotency edge cases', () => {
+  it('complete() and fail() on a key that was never begun create no record', async () => {
+    const store = new MemoryIdempotencyStore();
+    await store.complete('flow:x', 'ghost', { completed: true });
+    await store.fail('flow:x', 'ghost', new Error('x'));
+    expect(await store.get('flow:x', 'ghost')).toBeUndefined();
+    expect(await store.begin('flow:x', 'ghost', 60_000)).toBe(true);
+    expect((await store.get('flow:x', 'ghost'))?.status).toBe('in-flight');
+  });
+
+  it('IdempotencyService.purgeExpired delegates to the store and reports its count', async () => {
+    const store = new MemoryIdempotencyStore();
+    const service = new IdempotencyService({ store });
+    await service.begin('flow:x', 'short', 5);
+    await service.begin('flow:x', 'long', 60_000);
+    await delay(20);
+    expect(await service.purgeExpired()).toBe(1);
+    expect(await store.begin('flow:x', 'short', 60_000)).toBe(true);
+    expect(await store.begin('flow:x', 'long', 60_000)).toBe(false);
+  });
+});
+
 describe('release (optional store operation, 0.6.0)', () => {
   it('MemoryIdempotencyStore.release frees the key in its scope only', async () => {
     const store = new MemoryIdempotencyStore();

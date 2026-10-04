@@ -12,7 +12,6 @@ import { ACTIVATOR_METADATA, type ActivatorMetadata } from './decorators';
 import { ChannelRegistry } from './channel-registry';
 import { ChannelFactoryRegistry, type ChannelSpec } from './channel-factory';
 import type { RabbitInboundMapping } from './inbound/inbound.explorer';
-import type { ChannelDeps as ChannelDepsType } from './channels/channel-deps';
 import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
 import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.interceptor';
 import type { InboundDefaults } from './inbound/inbound.types';
@@ -101,7 +100,6 @@ export class IntegrationModule {
       errorChannel: options.errorChannel ?? 'error.channel',
     };
     const logger = new Logger('IntegrationModule');
-    const holder: { registry?: ChannelRegistry } = {};
 
     const providers: Provider[] = [
       TraceContext,
@@ -116,25 +114,26 @@ export class IntegrationModule {
       {
         provide: ChannelRegistry,
         useFactory: (trace: TraceContext, opts: ResolvedIntegrationOptions): ChannelRegistry => {
-          const channelDeps: ChannelDepsType = {
-            trace,
-            onWarn: (message) => logger.warn(message),
-            onError: (error, msg) => {
-              const target = holder.registry;
-              if (target === undefined) return;
-              const envelope = createMessage(
-                { error: serializeError(error), causedBy: msg.headers.id },
-                {
-                  traceId: msg.headers.traceId,
-                  correlationId: msg.headers.correlationId,
-                  causationId: msg.headers.id,
-                },
-              );
-              void target.sendMessage(opts.errorChannel, envelope).catch(() => undefined);
+          // The error hook only runs on a channel send, long after `registry` is assigned.
+          const registry: ChannelRegistry = new ChannelRegistry(
+            {
+              trace,
+              onWarn: (message) => logger.warn(message),
+              onError: (error, msg) => {
+                const envelope = createMessage(
+                  { error: serializeError(error), causedBy: msg.headers.id },
+                  {
+                    traceId: msg.headers.traceId,
+                    correlationId: msg.headers.correlationId,
+                    causationId: msg.headers.id,
+                  },
+                );
+                void registry.sendMessage(opts.errorChannel, envelope).catch(() => undefined);
+              },
             },
-          };
-          holder.registry = new ChannelRegistry(channelDeps, new ChannelFactoryRegistry());
-          return holder.registry;
+            new ChannelFactoryRegistry(),
+          );
+          return registry;
         },
         inject: [TraceContext, INTEGRATION_OPTIONS],
       },

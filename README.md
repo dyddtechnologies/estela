@@ -4,7 +4,7 @@
   **The Enterprise Integration Patterns runtime for NestJS.**
   *The flow talks to channels, not to classes.*
 
-  [![tests](https://img.shields.io/badge/tests-251%2F251-brightgreen)](#status)
+  [![tests](https://img.shields.io/badge/tests-274%2F274-brightgreen)](#status)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -468,7 +468,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **251/251** · 26 suites · real HTTP e2e |
+| Tests | **274/274** · 26 suites · real HTTP e2e |
 | Spec | 10/10 minimal tests · DoD §15 complete |
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
