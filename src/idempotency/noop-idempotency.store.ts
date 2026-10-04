@@ -18,6 +18,10 @@ export class NoopIdempotencyStore implements IdempotencyStore {
     return undefined;
   }
 
+  async release(_scope: string, _key: string): Promise<void> {
+    return undefined;
+  }
+
   async purgeExpired(): Promise<number> {
     return 0;
   }

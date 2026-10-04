@@ -46,6 +46,26 @@ describe('ReplyGateway — test 7 del spec (request/reply, spec §8)', () => {
     expect(registry.list()).toHaveLength(sizeBefore);
   });
 
+  it('a late reply on an awaited channel surfaces as the timeout, other errors untouched', async () => {
+    const { registry, gateway } = makeWorld();
+    let executions = 0;
+    registry.create({ name: 'slow', type: 'direct' }).subscribe(async (msg) => {
+      executions += 1;
+      await delay(60);
+      if (msg.payload === 'boom') throw new Error('business failure');
+      await registry.send(msg.headers.replyChannel!, { late: true });
+    });
+    const sizeBefore = registry.list().length;
+    await expect(gateway.sendAndReceive('slow', 'p', {}, 15)).rejects.toBeInstanceOf(
+      ReplyTimeoutError,
+    );
+    await expect(gateway.sendAndReceive('slow', 'boom', {}, 15)).rejects.toThrow(
+      'business failure',
+    );
+    expect(executions).toBe(2);
+    expect(registry.list()).toHaveLength(sizeBefore);
+  });
+
   it('integración inbound requestReply:true end-to-end vía interceptor', async () => {
     const { registry, trace, gateway } = makeWorld();
     registry.create({ name: 'echo', type: 'direct' }).subscribe(async (msg) => {

@@ -1,6 +1,7 @@
 import {
   Inject,
   Injectable,
+  Logger,
   type CallHandler,
   type ExecutionContext,
   type NestInterceptor,
@@ -15,7 +16,7 @@ import {
   type HeaderMapper,
 } from '../adapters/header-mapper';
 import { createMessage, type IntegrationMessage, type MessageHeadersInit } from '../message';
-import { IdempotencyService } from '../idempotency/idempotency.service';
+import type { IdempotencyService } from '../idempotency/idempotency.service';
 import type { TraceContext } from '../trace/trace-context';
 import {
   GraphQLInboundStrategy,
@@ -23,14 +24,22 @@ import {
   HttpInboundStrategy,
   type InboundTransportStrategy,
 } from './inbound.transport';
+import { InboundIdempotencyGate, forwardedHeaders, type InboundClaim } from './inbound.idempotency';
+import { createInboundPlanner, type InboundPlan } from './inbound.plan';
 import {
-  acceptedResponse,
-  duplicateResponse,
+  acceptedOutcome,
+  buildReplyContext,
+  repeatOutcome,
+  replyOutcome,
+  type InboundReplyOutcome,
+} from './inbound.reply';
+import {
   InboundError,
   readInboundSpec,
-  replyResponse,
-  type InboundAcceptedResponse,
-  type InboundDuplicateResponse,
+  type InboundDefaults,
+  type InboundKeyContext,
+  type InboundProviderResolver,
+  type InboundRequestContext,
   type InboundSpec,
 } from './inbound.types';
 
@@ -50,25 +59,31 @@ export interface InboundInterceptorDeps {
   idempotency?: IdempotencyService;
   replyGateway?: RequestReplyPort;
   strategies?: readonly InboundTransportStrategy[];
+  /** Module-wide reply and idempotency defaults (`forRoot({ inbound })`). */
+  defaults?: InboundDefaults;
+  /** Resolves `{ useExisting }` strategies; without it only functions and instances work. */
+  resolver?: InboundProviderResolver;
 }
 
 /** Token DI del bundle de deps — resuelve en cualquier modulo (global). */
 export const INBOUND_DEPS = 'INTEGRATION_INBOUND_DEPS';
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /**
  * NestInterceptor (spec sec.7.2): executes el handler (pipes/guards intactos),
  * extrae payload + headers crudos, mapea tracing y despacha:
  * requestReply -> ReplyGateway (`{status:'ok'}`) | si no -> channel (`{status:'accepted'}`)
  * | replay de idempotency -> `{status:'duplicate'}`.
+ *
+ * Since 0.6.0 the reply shape and the idempotency rules are a per-endpoint plan
+ * (`InboundSpec.reply` / `InboundSpec.idempotency` over the module defaults); with nothing
+ * configured the plan reproduces the behaviour above.
  */
 @Injectable()
 export class InboundInterceptor implements NestInterceptor {
   private readonly strategies = new Map<string, InboundTransportStrategy>();
   private readonly mappers = new Map<string, HeaderMapper<never>>();
+  private readonly planFor: (spec: InboundSpec) => InboundPlan;
+  private readonly gate: InboundIdempotencyGate;
 
   constructor(@Inject(INBOUND_DEPS) private readonly deps: InboundInterceptorDeps) {
     const defaults: readonly InboundTransportStrategy[] = deps.strategies ?? [
@@ -81,6 +96,9 @@ export class InboundInterceptor implements NestInterceptor {
     this.mappers.set('grpc', new GrpcHeaderMapper());
     this.mappers.set('graphql', new GraphQLHeaderMapper());
     this.mappers.set('rabbit', new AmqpHeaderMapper());
+    this.planFor = createInboundPlanner(deps);
+    const logger = new Logger('InboundInterceptor');
+    this.gate = new InboundIdempotencyGate((message) => logger.warn(message));
   }
 
   intercept(context: ExecutionContext, next: CallHandler): Promise<Observable<unknown>> {
@@ -90,86 +108,63 @@ export class InboundInterceptor implements NestInterceptor {
     if (strategy === undefined) {
       return Promise.reject(new InboundError(`sin strategy para transporte '${spec.transport}'`));
     }
+    const receivedAt = Date.now();
     return Promise.resolve(
       next.handle().pipe(
         mergeMap(async (handlerResult) => {
           const extraction = strategy.extract(context, handlerResult, spec);
-          return this.dispatch(spec, extraction, handlerResult);
+          return this.dispatch({ spec, ...extraction, handlerResult, context, receivedAt });
         }),
       ),
     );
   }
 
-  private async dispatch(
-    spec: InboundSpec,
-    extraction: { payload: unknown; rawHeaders: Record<string, unknown> },
-    handlerResult: unknown,
-  ): Promise<unknown> {
+  private async dispatch(request: InboundRequestContext): Promise<unknown> {
+    const { spec } = request;
     const mapper = this.mappers.get(spec.transport);
     if (mapper === undefined) throw new InboundError(`sin header-mapper para '${spec.transport}'`);
-    const headersInit = mapper.mapIn(extraction.rawHeaders as never);
-    const idempotencyKey = headersInit.idempotencyKey;
-    const scope = `inbound:${spec.channel}`;
-    const idem = this.deps.idempotency;
-    if (idem !== undefined && idempotencyKey !== undefined) {
-      const duplicate = await this.resolveDuplicate(idem, scope, idempotencyKey, headersInit);
-      if (duplicate !== null) return duplicate;
-    }
-    const msg: IntegrationMessage = createMessage(extraction.payload, headersInit);
+    const headersInit = mapper.mapIn(request.rawHeaders as never);
+    const plan = this.planFor(spec);
+    const clientKey =
+      plan.clientKey === undefined ? headersInit.idempotencyKey : plan.clientKey(request);
+    const keyContext: InboundKeyContext = { ...request, clientKey };
+    const claim = await this.gate.claim(plan.idempotency, keyContext);
+    const outcome =
+      claim.status === 'repeat'
+        ? repeatOutcome(claim.repeat, keyContext, headersInit)
+        : await this.send(plan, keyContext, claim, headersInit);
+    // Mapped after the claim is settled: a mapper throw never triggers the failure policy.
+    return plan.reply(buildReplyContext(request, clientKey, outcome));
+  }
+
+  private async send(
+    plan: InboundPlan,
+    request: InboundKeyContext,
+    claim: InboundClaim,
+    headersInit: MessageHeadersInit,
+  ): Promise<InboundReplyOutcome> {
+    const { spec, payload } = request;
+    const storageKey = claim.status === 'acquired' ? claim.at.key : undefined;
+    const rule = { forward: plan.forward, customClientKey: plan.clientKey !== undefined };
+    const headers = forwardedHeaders(rule, headersInit, request.clientKey, storageKey);
+    const msg: IntegrationMessage = createMessage(payload, headers);
+    let result: unknown;
     try {
       if (spec.requestReply === true) {
-        const result = await this.requestReplyViaGateway(spec, extraction.payload, headersInit);
-        await this.completeIdempotency(idem, scope, idempotencyKey, { cachedResult: result });
-        return replyResponse(msg, result);
+        result = await this.requestReplyViaGateway(spec, payload, headers);
+      } else {
+        await this.deps.registry.send(spec.channel, payload, headers);
       }
-      await this.deps.registry.send(spec.channel, extraction.payload, headersInit);
-      await this.completeIdempotency(idem, scope, idempotencyKey, {
-        accepted: true,
-        id: msg.headers.id,
-      });
-      return this.acceptedWithMerge(acceptedResponse(msg), handlerResult);
     } catch (error) {
-      await this.failIdempotency(idem, scope, idempotencyKey, error);
+      await this.gate.failed(claim, error, request);
       throw error;
     }
-  }
-
-  private async completeIdempotency(
-    idem: IdempotencyService | undefined,
-    scope: string,
-    key: string | undefined,
-    record: Record<string, unknown>,
-  ): Promise<void> {
-    if (idem === undefined || key === undefined) return;
-    await idem.complete(scope, key, record);
-  }
-
-  private async failIdempotency(
-    idem: IdempotencyService | undefined,
-    scope: string,
-    key: string | undefined,
-    error: unknown,
-  ): Promise<void> {
-    if (idem === undefined || key === undefined) return;
-    await idem.fail(scope, key, error).catch(() => undefined);
-  }
-
-  private async resolveDuplicate(
-    idem: IdempotencyService,
-    scope: string,
-    key: string,
-    headersInit: MessageHeadersInit,
-  ): Promise<InboundDuplicateResponse | null> {
-    const acquired = await idem.begin(scope, key);
-    if (acquired) return null;
-    const record = await idem.get(scope, key);
-    const cached =
-      record?.result !== undefined && 'cachedResult' in record.result
-        ? record.result.cachedResult
-        : null;
-    const opts: { result: unknown; traceId?: string } = { result: cached };
-    if (typeof headersInit.traceId === 'string') opts.traceId = headersInit.traceId;
-    return duplicateResponse(key, opts);
+    if (spec.requestReply === true) {
+      await this.gate.succeed(claim, { cachedResult: result });
+      return replyOutcome(msg, result);
+    }
+    await this.gate.succeed(claim, { accepted: true, id: msg.headers.id });
+    return acceptedOutcome(msg, request.handlerResult);
   }
 
   private async requestReplyViaGateway(
@@ -186,11 +181,5 @@ export class InboundInterceptor implements NestInterceptor {
       headersInit,
       spec.timeoutMs,
     );
-  }
-
-  private acceptedWithMerge(accepted: InboundAcceptedResponse, handlerResult: unknown): unknown {
-    // "+ merge" (spec sec.7.2): los campos canonical del accepted win
-    if (isPlainObject(handlerResult)) return Object.assign({}, handlerResult, accepted);
-    return accepted;
   }
 }

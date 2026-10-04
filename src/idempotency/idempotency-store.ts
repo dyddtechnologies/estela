@@ -12,6 +12,8 @@ export interface IdempotencyStore {
   fail(scope: string, key: string, error: unknown): Promise<void>;
   get(scope: string, key: string): Promise<IdempotencyRecord | undefined>;
   purgeExpired(): Promise<number>;
+  /** Optional: frees the key so a retry runs for real. Stores without it keep the key blocked. */
+  release?(scope: string, key: string): Promise<void>;
 }
 
 /** Key de almacenamiento canonica (spec sec.10): `${scope}::${key}`. */

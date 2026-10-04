@@ -4,7 +4,7 @@
   **The Enterprise Integration Patterns runtime for NestJS.**
   *The flow talks to channels, not to classes.*
 
-  [![tests](https://img.shields.io/badge/tests-110%2F110-brightgreen)](#status)
+  [![tests](https://img.shields.io/badge/tests-251%2F251-brightgreen)](#status)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -15,7 +15,7 @@
 
   **English** · [Español](./README.es.md) · [Português](./README.pt.md) · [Français](./README.fr.md)
 
-  [Installation](#installation) · [Quick start](#quick-start) · [Channels](#channels) · [Flow DSL](#flow-dsl) · [Tracing](#tracing--idempotency) · [Observability](#observability) · [Architecture](#architecture)
+  [Installation](#installation) · [Quick start](#quick-start) · [Channels](#channels) · [Flow DSL](#flow-dsl) · [Tracing](#tracing--idempotency) · [Inbound adapters](#inbound-adapters-reply-mapping--idempotency) · [Observability](#observability) · [Architecture](#architecture)
 </div>
 
 ---
@@ -166,11 +166,199 @@ export class RedisIdempotencyStore implements IdempotencyStore {
   async fail(scope: string, key: string, error: unknown) { /* KEEPTTL + failed status */ }
   async get(scope: string, key: string) { /* JSON → IdempotencyRecord | undefined */ }
   async purgeExpired() { return 0; } // native Redis TTL
+  // Optional (0.6.0): lets inbound `onFailure: 'release'` free a key so the retry runs for real
+  async release(scope: string, key: string) { await this.redis.del(this.k(scope, key)); }
 }
 
 forRoot({ channels, idempotency: { store: new RedisIdempotencyStore(redis) } });
 ```
 </details>
+
+## Inbound adapters: reply mapping & idempotency
+
+`@InboundRest`, `@InboundGrpc` and `@InboundGraphQL` launch a flow from an annotated handler. Since
+0.6.0 each endpoint can answer with **its own response contract** and apply **its own idempotency
+rules**. Options go on the decorator, or module-wide in `forRoot({ inbound })`; an endpoint overrides
+the module default, which overrides the built-in.
+
+**With nothing configured, nothing changes**: the endpoint answers the estela envelope
+(`{status:'ok'|'accepted'|'duplicate', …}`) and deduplicates on `idempotency-key` under the scope
+`inbound:<channel>`, exactly as in 0.5.0.
+
+### Reply mapping
+
+```ts
+@InboundRest({ channel: 'orders.place', requestReply: true, reply: 'raw' })   // just the flow result
+
+@InboundRest({
+  channel: 'wf.start', requestReply: true,
+  reply: ({ result, payload, receivedAt }: InboundReplyContext<StartPayload, StartResult>) => ({
+    data: { ...result, correlationId: payload.correlationId, responseTime: Date.now() - receivedAt },
+    success: true,
+  }),
+})
+
+// gRPC: answer the proto message shape
+@InboundGrpc({
+  channel: 'wf.complete', requestReply: true,
+  reply: ({ result, payload }: InboundReplyContext<CompleteInput, CompleteResult>) => ({
+    instanceId: result.instanceId ?? payload.instanceId,
+    resultJson: JSON.stringify(result),
+  }),
+})
+
+// A provider that injects services: pass a ref, never the bare class
+@InboundRest({ channel: 'orders.place', requestReply: true, reply: { useExisting: OrderReplyMapper } })
+
+IntegrationModule.forRoot({ channels, inbound: { reply: 'raw' } }, flows);     // module-wide default
+```
+
+| `reply` | request/reply | fire-and-forget (accepted) | repeated key (duplicate) |
+|---|---|---|---|
+| `'envelope'` (default) | `{status:'ok', result, …}` | `{status:'accepted', …}` | `{status:'duplicate', …}` |
+| `'raw'` | the flow result | the handler return value | `{status:'duplicate', …}` |
+| function · `{ mapReply }` · `{ useExisting }` | your shape | your shape | your shape |
+
+A custom mapper receives an `InboundReplyContext`: `kind` (`'reply' \| 'accepted' \| 'duplicate'`),
+`result`, `payload`, `rawHeaders`, `handlerResult`, the Nest `context`, `receivedAt`, `replayed`,
+`duplicateOf`, `acceptedId`, the `message` and the `envelope` estela would have answered. It may be
+async. It runs after the idempotency record is written, so a mapper that throws never releases or
+fails the key.
+
+### Idempotency options
+
+```ts
+@InboundRest({ channel, idempotency: false })            // no inbound claim for this endpoint
+@InboundRest({ channel, idempotency: { /* options */ } })
+IntegrationModule.forRoot({ channels, inbound: { idempotency: { /* options */ } } }, flows);
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` skips the claim. **Not inherited**: an endpoint that passes an options object is enabled unless it says otherwise, even when the module default is `false`. |
+| `clientKey` | `idempotency-key`, `x-idempotency-key` | Where the client key comes from: a header name, a list of names (case-insensitive) or `(ctx) => string \| undefined`. |
+| `key` | the client key | Storage-key resolver: function, `{ resolveKey }` or `{ useExisting }`. Receives `payload`, `rawHeaders`, `context`, `clientKey`. Returns a string (used verbatim), an array of parts (escaped and joined with `:`), `{ scope, key }`, or `undefined`/`null` to skip the claim. May be async. **May throw**: the request is rejected and nothing is claimed. It is called even when the client sent no key, so guard `clientKey`: an empty key or a part that is not a non-empty string or a finite number (`undefined`, `null`, `''`) is rejected with an `InboundError` instead of merging callers into one key. |
+| `scope` | `inbound:<channel>` | Storage scope (storage key = `${scope}::${key}`). |
+| `ttlMs` | module `idempotency.ttlMs`, else 1 h | TTL passed to `store.begin`. |
+| `store` | the module `IdempotencyService` | An `IdempotencyStore` instance or `{ useExisting }`. |
+| `onDuplicate` | `'envelope'` | `'replay'` answers a completed repeat **through the same reply mapper** as the first time. |
+| `onInFlight` | `'duplicate'` | `'reject'` throws `InboundIdempotencyInFlightError`; a function returns the error to throw. |
+| `onFailure` | `'keep'` | `'release'`, `'store'`, `'marker'`, or a classifier `(error, ctx) => 'keep' \| 'release' \| 'store'` (function, `{ classify }`, `{ useExisting }`). |
+| `failureCodec` | `HttpExceptionFailureCodec` | `{ serialize, deserialize }` for stored failures. |
+| `forward` | see [Forwarding](#forwarding-the-key-downstream) | `'raw' \| 'resolved' \| 'none'`. |
+
+**A repeated key** (`store.begin` returned `false`):
+
+| Stored record | `onDuplicate: 'envelope'` | `onDuplicate: 'replay'` |
+|---|---|---|
+| completed request/reply | duplicate (`result` = cached result) | mapped as `kind:'reply'`, `replayed:true` |
+| completed fire-and-forget | duplicate (`result: null`) | mapped as `kind:'accepted'` with the stored message id |
+| stored failure | rethrows the stored error | rethrows the stored error |
+| failed and kept | duplicate (`duplicateOf:'failed'`, `result: null`) | same |
+| still in flight | `onInFlight` | `onInFlight` |
+
+**A failed dispatch** (the first run always rethrows the error it got, unchanged):
+
+| Action | Store call | Next request with the same key |
+|---|---|---|
+| `keep` | `fail()` | answered as a duplicate until the TTL expires |
+| `release` | `release()` | runs for real |
+| `store` | `complete()` with the serialized failure | rethrows the deserialized failure |
+
+How the action is chosen: `'keep'` (default) ignores everything. Any other `onFailure` first honours
+a mark left on the error with `markInboundFailure(error, action)`; without a mark, `'marker'` keeps,
+`'release'`/`'store'` apply (except to a `ReplyTimeoutError` or a `NoSubscriberError`, which are kept
+because the flow may still be running or may have finished without being answered), and a classifier
+decides. A flow on awaited channels that outlives `timeoutMs` surfaces as `ReplyTimeoutError`. The default codec round-trips a Nest `HttpException` (status
+and body); any other error is replayed as `InboundReplayedFailureError`, which Nest renders as a 500.
+No stack is stored.
+
+### Multi-tenant example
+
+```ts
+@Injectable()
+export class TenantKeyResolver implements InboundKeyResolver<CompletePayload> {
+  constructor(private readonly steps: StepGuard) {}
+
+  async resolveKey({ payload, clientKey }: InboundKeyContext<CompletePayload>) {
+    await this.steps.assertCompletable(payload);      // a rejected request never claims a key
+    if (clientKey === undefined) return undefined;    // no key sent: no idempotency
+    return {
+      scope: 'wf-complete',
+      key: [payload.tenantId, payload.flowId, payload.stepId, clientKey],   // bound to the tenant
+    };
+  }
+}
+
+@Post(':flowId/steps/:stepId/complete')
+@InboundRest({
+  channel: 'wf.complete',
+  requestReply: true,
+  reply: 'raw',
+  idempotency: {
+    key: { useExisting: TenantKeyResolver },
+    store: { useExisting: PgIdempotencyStore },       // your own IdempotencyStore provider
+    onDuplicate: 'replay',                            // a repeat gets the first answer again
+    onInFlight: () => new ConflictException('IDEMPOTENCY_KEY_IN_PROGRESS'),   // HTTP 409
+    onFailure: 'marker',                              // the business code decides, per error
+  },
+})
+complete(@Param() params: CompleteParams, @Tenant() tenantId: string, @Body() body: CompleteBody) {
+  return { ...params, tenantId, ...body };            // the returned value is the flow payload
+}
+
+// Where the work happens (activator, saga…): say what a failure means for the key
+throw markInboundFailure(error, committedLevels === 0 ? 'release' : 'store');
+```
+
+Two tenants sending the same `Idempotency-Key` now own two different storage keys, so neither can
+receive the other's cached answer. A validation error releases the key and the retry runs; a
+partially committed failure is stored and every retry gets the same HTTP error back.
+
+### Forwarding the key downstream
+
+`headers.idempotencyKey` of the dispatched message is what the `flow:<name>` and
+`activator:<Class>.<method>` scopes deduplicate on.
+
+| `forward` | Flow and activator scopes see |
+|---|---|
+| `'raw'` | the client key |
+| `'resolved'` | the encoded storage key (tenant-bound when your resolver is) |
+| `'none'` | nothing |
+
+The default is `'raw'`. It becomes `'none'` as soon as `key` or an `onFailure` policy other than
+`'keep'` is configured: a raw key downstream would let two tenants block each other at the flow scope,
+and a key released at the inbound scope but still claimed by the flow would turn the retry into a
+silent flow duplicate (a `ReplyTimeoutError`). For that reason an `onFailure` policy combined with an
+explicit `'raw'` or `'resolved'` is rejected.
+
+With the claim disabled (`idempotency: false`) nothing answers a repeat at the inbound scope, so the
+default is `'none'` on a `requestReply` endpoint or when a `key` resolver is configured, and `'raw'`
+on a plain fire-and-forget endpoint. Set `forward: 'raw'` to pass the key on regardless.
+
+An option present with the value `undefined` on an endpoint inherits the module default; it never
+erases it.
+
+### Caveats
+
+- Guards, pipes and the handler body run **before** the claim and again on every repeat: validate
+  there freely, but handler side effects are not deduplicated.
+- `idempotency: false` turns off the inbound claim. On a fire-and-forget endpoint the header still
+  travels in the message headers, so flows and activators still deduplicate on it; add
+  `forward: 'none'` to switch that off too. On a `requestReply` endpoint it is not forwarded unless
+  you ask for `forward: 'raw'` (a repeat dropped by the flow scope would end in a reply timeout).
+  The raw request headers always reach your handler, whatever `forward` says.
+- `{ useExisting }` resolves singleton providers only (no request or transient scope), once, on the
+  first request of the endpoint. Misconfigurations surface as an `InboundError` on that request.
+- GraphQL: the default header lookup does not see request headers. Set `clientKey` explicitly
+  (for example `clientKey: 'idempotency-key'`) to enable inbound idempotency on a resolver.
+- `InboundIdempotencyInFlightError` carries `code: 'IDEMPOTENCY_KEY_IN_PROGRESS'`; map it to HTTP 409
+  or a gRPC status in your own exception filter.
+- With the default envelope, a replayed request/reply answer carries fresh `id`/`traceId` values;
+  use `'raw'` or a custom mapper when repeats must be byte-identical.
+- The swagger DTOs (`InboundReplyDto`, …) describe the default envelope only.
+- A custom store without the optional `release()` keeps working: `onFailure: 'release'` is rejected
+  for it, and a classifier that answers `'release'` degrades to `keep` with one warning.
 
 ## Sagas: units of work and idempotency
 
@@ -280,7 +468,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **110/110** · 18 suites · real HTTP e2e |
+| Tests | **251/251** · 26 suites · real HTTP e2e |
 | Spec | 10/10 minimal tests · DoD §15 complete |
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |

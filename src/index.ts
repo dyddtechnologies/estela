@@ -57,6 +57,16 @@ export * from './inbound/inbound.decorators';
 export * from './inbound/inbound.interceptor';
 export * from './inbound/inbound.explorer';
 export * from './inbound/inbound.swagger';
+export {
+  HttpExceptionFailureCodec,
+  INBOUND_STORED_FAILURE_KEY,
+  InboundIdempotencyInFlightError,
+  InboundReplayedFailureError,
+  markInboundFailure,
+  readInboundFailureMark,
+} from './inbound/inbound.failure';
+export { encodeInboundKey } from './inbound/inbound.idempotency';
+export { envelopeReplyMapper, rawReplyMapper } from './inbound/inbound.reply';
 
 // ---------- Fase 8: gateway + outbound adapters ----------
 export * from './channels/one-shot';

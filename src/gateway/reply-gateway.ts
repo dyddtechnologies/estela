@@ -1,5 +1,5 @@
 import { openFirstMessageWait } from '../channels/one-shot';
-import { ChannelError } from '../channel';
+import { ChannelError, NoSubscriberError } from '../channel';
 import { newId, type MessageHeadersInit } from '../message';
 import type { ChannelRegistry } from '../channel-registry';
 import type { TraceContext } from '../trace/trace-context';
@@ -34,13 +34,24 @@ export class ReplyGateway {
     const timeout = timeoutMs ?? this.deps.defaultTimeoutMs ?? 10_000;
     const replyName = `reply.${newId()}`;
     this.deps.registry.create({ name: replyName, type: 'direct' });
+    const timedOut: { error?: ReplyTimeoutError } = {};
     const wait = openFirstMessageWait(this.deps.registry.get(replyName), {
       timeoutMs: timeout,
       name: replyName,
-      timeoutError: () => new ReplyTimeoutError(channel, timeout),
+      timeoutError: () => {
+        timedOut.error = new ReplyTimeoutError(channel, timeout);
+        return timedOut.error;
+      },
     });
     try {
-      await this.deps.registry.send(channel, payload, { ...headers, replyChannel: replyName });
+      await this.deps.registry
+        .send(channel, payload, { ...headers, replyChannel: replyName })
+        .catch((error: unknown) => {
+          // An awaited flow that outlives the timeout finds nobody on its reply channel:
+          // that late reply is the timeout, not a missing subscriber.
+          const lateReply = error instanceof NoSubscriberError && error.message.includes(replyName);
+          throw timedOut.error !== undefined && lateReply ? timedOut.error : error;
+        });
       const reply = await wait.promise;
       return reply.payload;
     } finally {
