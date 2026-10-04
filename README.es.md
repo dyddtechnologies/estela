@@ -4,7 +4,7 @@
   **El runtime de Enterprise Integration Patterns para NestJS.**
   *El flow habla con canales, no con clases.*
 
-  [![tests](https://img.shields.io/badge/tests-274%2F274-brightgreen)](#estado)
+  [![tests](https://img.shields.io/badge/tests-301%2F301-brightgreen)](#estado)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#arquitectura)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#instalaci%C3%B3n)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#instalaci%C3%B3n)
@@ -377,6 +377,21 @@ flowchart LR
   inventory_reserve --> act["activator: InventoryActivator.reserve"]
 ```
 
+El log de arranque lista cada punto de entrada cableado: una línea por activator y una por
+endpoint inbound anotado (`@InboundRest` / `@InboundGrpc` / `@InboundGraphQL`); cada inbound
+queda además registrado en el graph:
+
+```
+activator: InventoryActivator.reserve -> inventory.reserve
+inbound rest: POST /V1/Workflows/:id/Start -> wf.start (request-reply)
+inbound grpc: WorkflowLifecycleService/Start -> wf.start (request-reply)
+inbound graphql: mutation placeOrder -> orders.place
+```
+
+Solo se imprimen transporte, ruta o patrón, canal y el flag request-reply. Si la metadata de
+ruta no se puede leer, la línea usa `Class.method`. El warning de `AMQP_CHANNEL` ausente solo
+se emite cuando hay `rabbitMappings` declarados sin `rabbitChannel`.
+
 ## Arquitectura
 
 Hexagonal (puertos y adaptadores) con SOLID y GoF explícitos:
@@ -411,7 +426,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **274/274** · 26 suites · e2e HTTP real |
+| Tests | **301/301** · 28 suites · e2e HTTP real |
 | Spec | 10/10 tests mínimos · DoD §15 completo |
 | Boundaries | dominio puro · barrel sin brokers · testing sin inbound (0 violaciones) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |

@@ -24,7 +24,7 @@ export interface InboundExplorerOptions {
   onError?: (error: unknown) => void;
 }
 
-/** Bindea rabbit en `onModuleInit` solo si el token existe; si no -> warn (spec sec.7.2). */
+/** Binds rabbit at `onModuleInit` only when the token exists; warns when mappings stay unbound (spec sec.7.2). */
 export class InboundExplorer {
   constructor(private readonly options: InboundExplorerOptions) {}
 
@@ -33,13 +33,17 @@ export class InboundExplorer {
   }
 
   async onModuleInit(): Promise<void> {
+    const mappings = this.options.mappings ?? [];
     if (this.options.amqp === undefined) {
-      this.options.log?.(
-        'AMQP_CHANNEL ausente — inbound rabbit declarado pero no bindeado (warn, no throw)',
-      );
+      // Silent for services that never declared a rabbit mapping.
+      if (mappings.length > 0) {
+        this.options.log?.(
+          `AMQP_CHANNEL missing: ${mappings.length} rabbit inbound mapping(s) declared but not bound (warn, no throw)`,
+        );
+      }
       return;
     }
-    for (const mapping of this.options.mappings ?? []) {
+    for (const mapping of mappings) {
       await bindRabbitInbound(this.options.amqp, mapping, {
         registry: this.options.registry,
         trace: this.options.trace,

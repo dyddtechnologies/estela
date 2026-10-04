@@ -16,6 +16,7 @@ import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
 import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.interceptor';
 import type { InboundDefaults } from './inbound/inbound.types';
 import { InboundExplorer } from './inbound/inbound.explorer';
+import { discoverInbounds } from './inbound/inbound.discovery';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
 import type { FlowDefinition } from './flow/integration-flow';
@@ -45,7 +46,7 @@ export interface IntegrationModuleOptions {
   idempotency?: IntegrationIdempotencyOptions;
   /** Opt-in per-flow / per-hop logging (flow, channel, correlation). Default off. */
   logging?: IntegrationLoggingOptions;
-  /** Port AMQP opcional — si falta, explorer hace warn y no lanza (spec sec.7.2). */
+  /** Optional AMQP port: when missing, declared mappings are reported with a warn, never a throw (spec sec.7.2). */
   rabbitChannel?: AmqpLikeChannel;
   rabbitMappings?: readonly RabbitInboundMapping[];
   /** Module-wide reply mapping and idempotency defaults of the inbound adapters. */
@@ -217,6 +218,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
 
     // 2. activators (DiscoveryModule)
     this.subscribeDiscoveredActivators();
+    this.logDiscoveredInbounds();
 
     // 3. flows: graph.recordFlow + flow.bind + attach (spec sec.11 step 3)
     for (const definition of this.options.flows) {
@@ -274,6 +276,26 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
+
+  /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */
+  private logDiscoveredInbounds(): void {
+    const skipped = (error: unknown): void => {
+      this.logger.warn(`inbound discovery skipped: ${String(error)}`);
+    };
+    try {
+      const sources = [...this.discovery.getControllers(), ...this.discovery.getProviders()];
+      const inbounds = discoverInbounds(sources, {
+        methodNames: (proto) => this.metadataScanner.getAllMethodNames(proto),
+        onError: skipped,
+      });
+      for (const inbound of inbounds) {
+        this.graph.recordInbound(inbound.spec);
+        this.logger.log(inbound.line);
+      }
+    } catch (error) {
+      skipped(error);
+    }
+  }
 
   private hopLoggerInstance: HopLogger | undefined;
 

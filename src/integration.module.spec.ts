@@ -1,9 +1,11 @@
 import 'reflect-metadata';
 
 import { Test } from '@nestjs/testing';
-import { Injectable, Logger, Module } from '@nestjs/common';
+import { Controller, Injectable, Logger, Module, Post } from '@nestjs/common';
+import { DiscoveryService } from '@nestjs/core';
 import { INTEGRATION_OPTIONS, IntegrationModule } from './integration.module';
 import { ServiceActivator } from './decorators';
+import { InboundGraphQL, InboundRest } from './inbound/inbound.decorators';
 import { IntegrationFlow, type FlowDefinition } from './flow/integration-flow';
 import { ChannelRegistry } from './channel-registry';
 import { ChannelGraph } from './graph/channel-graph';
@@ -352,5 +354,102 @@ describe('IntegrationModule.forRoot: channel hooks, rabbit wiring and idempotenc
       ['ttl-1', 1234],
       ['ttl-1', 1234],
     ]);
+  });
+});
+
+@Controller('V1/Workflows')
+class WorkflowController {
+  @Post(':id/Start')
+  @InboundRest({ channel: 'wf.start', requestReply: true })
+  start(): void {}
+}
+
+@Injectable()
+class OrdersResolver {
+  @InboundGraphQL({ channel: 'orders.place', operation: 'mutation' })
+  placeOrder(): void {}
+}
+
+describe('IntegrationModule.forRoot: inbound endpoints in the boot log', () => {
+  const closers: (() => Promise<void>)[] = [];
+  let log: jest.SpyInstance;
+  let warn: jest.SpyInstance;
+
+  const boot = async (options: IntegrationModuleOptions, withInbounds: boolean) => {
+    const module = await Test.createTestingModule({
+      imports: [IntegrationModule.forRoot(options)],
+      controllers: withInbounds ? [WorkflowController] : [],
+      providers: withInbounds ? [OrdersResolver, BillingActivator] : [BillingActivator],
+    }).compile();
+    const app = module.createNestApplication();
+    await app.init();
+    closers.push(() => app.close());
+    return module;
+  };
+
+  const channels: IntegrationModuleOptions['channels'] = [
+    { name: 'wf.start', type: 'direct' },
+    { name: 'orders.place', type: 'direct' },
+    { name: 'billing.charge', type: 'direct' },
+  ];
+
+  const inboundLines = (): string[] =>
+    log.mock.calls
+      .map(([message]) => String(message))
+      .filter((message) => message.startsWith('inbound '));
+
+  beforeEach(() => {
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(async () => {
+    for (const close of closers.splice(0)) await close();
+    jest.restoreAllMocks();
+  });
+
+  it('logs one line per annotated controller and provider method and records the graph', async () => {
+    const module = await boot({ channels }, true);
+    expect(inboundLines()).toEqual([
+      'inbound rest: POST /V1/Workflows/:id/Start -> wf.start (request-reply)',
+      'inbound graphql: mutation placeOrder -> orders.place',
+    ]);
+    expect(log).toHaveBeenCalledWith('activator: BillingActivator.charge -> billing.charge');
+    const snapshot = module.get(ChannelGraph).snapshot(module.get(ChannelRegistry));
+    expect(snapshot.nodes.find((node) => node.channel === 'wf.start')?.inbounds).toEqual([
+      { transport: 'rest', requestReply: true },
+    ]);
+    expect(snapshot.edges).toContainEqual({
+      from: 'inbound:graphql',
+      to: 'orders.place',
+      via: 'inbound',
+    });
+  });
+
+  it('logs no inbound line and no rabbit warning when the service declares neither', async () => {
+    await boot({ channels }, false);
+    expect(inboundLines()).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns about rabbit mappings that have no AMQP channel to bind to', async () => {
+    await boot(
+      { channels, rabbitMappings: [{ queue: 'orders.q', channel: 'orders.place' }] },
+      false,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      'AMQP_CHANNEL missing: 1 rabbit inbound mapping(s) declared but not bound (warn, no throw)',
+    );
+  });
+
+  it('a failing discovery is swallowed: boot completes and activators still work', async () => {
+    jest.spyOn(DiscoveryService.prototype, 'getControllers').mockImplementation(() => {
+      throw new Error('discovery exploded');
+    });
+    const module = await boot({ channels }, true);
+    expect(inboundLines()).toEqual([]);
+    expect(warn).toHaveBeenCalledWith('inbound discovery skipped: Error: discovery exploded');
+    expect(log).toHaveBeenCalledWith('activator: BillingActivator.charge -> billing.charge');
+    expect(module.get(ChannelRegistry).get('wf.start').kind).toBe('direct');
   });
 });
