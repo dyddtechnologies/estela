@@ -4,7 +4,7 @@
   **The Enterprise Integration Patterns runtime for NestJS.**
   *The flow talks to channels, not to classes.*
 
-  [![tests](https://img.shields.io/badge/tests-274%2F274-brightgreen)](#status)
+  [![tests](https://img.shields.io/badge/tests-301%2F301-brightgreen)](#status)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -419,6 +419,21 @@ On startup the first `IntegrationModule` prints this banner once per process:
 Turn it off with `forRoot({ logging: { banner: false } })` or `ESTELA_BANNER=false`. Per-hop
 logging is separate and opt-in: `forRoot({ logging: { hops: true } })`.
 
+The boot log also lists every wired entry point, one line per activator and per annotated
+inbound endpoint (`@InboundRest` / `@InboundGrpc` / `@InboundGraphQL`), and each inbound is
+recorded in the graph:
+
+```
+activator: InventoryActivator.reserve -> inventory.reserve
+inbound rest: POST /V1/Workflows/:id/Start -> wf.start (request-reply)
+inbound grpc: WorkflowLifecycleService/Start -> wf.start (request-reply)
+inbound graphql: mutation placeOrder -> orders.place
+```
+
+Only transport, route or pattern, channel and the request-reply flag are printed. When route
+metadata is not readable the line falls back to `Class.method`. The missing `AMQP_CHANNEL`
+warning is emitted only when `rabbitMappings` are declared without a `rabbitChannel`.
+
 ## Architecture
 
 Hexagonal (ports & adapters) with explicit SOLID + GoF:
@@ -468,7 +483,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **274/274** · 26 suites · real HTTP e2e |
+| Tests | **301/301** · 28 suites · real HTTP e2e |
 | Spec | 10/10 minimal tests · DoD §15 complete |
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
