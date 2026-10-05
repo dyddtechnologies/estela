@@ -162,6 +162,96 @@ describe('REST outbound (spec §9)', () => {
   });
 });
 
+describe('REST outbound: bindRestOut keeps its fire-and-forget defaults', () => {
+  type Init = Parameters<RestFetch>[1];
+  const okFetch = (
+    calls: { url: string; init: Init }[],
+    text: () => Promise<string>,
+  ): RestFetch => {
+    return async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, text };
+    };
+  };
+
+  it('sends exactly method, headers and body: no signal, no timeout, no extra header', async () => {
+    const { registry } = makeWorld();
+    const calls: { url: string; init: Init }[] = [];
+    registry.create({ name: 'http.legacy', type: 'direct' });
+    bindRestOut(registry, 'http.legacy', {
+      url: 'https://erp.example/orders?v=1',
+      method: 'PUT',
+      headers: { 'x-api': 'static', 'x-trace-id': 'static-loses' },
+      fetchFn: okFetch(calls, async () => '{"ignored":true}'),
+    });
+    await registry.send('http.legacy', { a: 1 }, { traceId: 't-9', correlationId: 'c-9' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe('https://erp.example/orders?v=1');
+    expect(Object.keys(calls[0]?.init ?? {}).sort()).toEqual(['body', 'headers', 'method']);
+    expect(calls[0]?.init.method).toBe('PUT');
+    expect(calls[0]?.init.body).toBe('{"a":1}');
+    expect(calls[0]?.init.headers).toEqual({
+      'content-type': 'application/json',
+      'x-api': 'static',
+      'x-trace-id': 't-9',
+      'x-span-id': expect.any(String) as string,
+      'x-correlation-id': 'c-9',
+    });
+  });
+
+  it('drains and discards the response body: nothing is replied, even with a reply channel', async () => {
+    const { registry } = makeWorld();
+    const replies: unknown[] = [];
+    registry.create({ name: 'reply.legacy', type: 'direct' }).subscribe(async (msg) => {
+      replies.push(msg.payload);
+    });
+    const text = jest.fn(async () => '{"id":"o-1"}');
+    registry.create({ name: 'http.legacy', type: 'direct' });
+    bindRestOut(registry, 'http.legacy', {
+      url: 'https://erp.example/orders',
+      fetchFn: okFetch([], text),
+    });
+    await registry.send('http.legacy', {}, { replyChannel: 'reply.legacy' });
+    expect(text).toHaveBeenCalledTimes(1);
+    expect(replies).toEqual([]);
+  });
+
+  it('fails with a plain Error and the historical message', async () => {
+    const { registry } = makeWorld();
+    const text = jest.fn(async () => 'never read');
+    registry.create({ name: 'http.legacy', type: 'direct' });
+    bindRestOut(registry, 'http.legacy', {
+      url: 'https://erp.example/fail',
+      method: 'PATCH',
+      fetchFn: async () => ({ ok: false, status: 503, text }),
+    });
+    const error: unknown = await registry
+      .send('http.legacy', {})
+      .catch((caught: unknown) => caught);
+    expect(Object.getPrototypeOf(error)).toBe(Error.prototype);
+    expect((error as Error).message).toBe('restOut PATCH https://erp.example/fail → HTTP 503');
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it('uses globalThis.fetch when no fetch is injected', async () => {
+    const { registry } = makeWorld();
+    const original = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      seen.push(url);
+      return { ok: true, status: 200, text: async () => '' };
+    }) as unknown as typeof fetch;
+    try {
+      registry.create({ name: 'http.legacy', type: 'direct' });
+      bindRestOut(registry, 'http.legacy', { url: 'https://erp.example/global' });
+      await registry.send('http.legacy', {});
+      expect(seen).toEqual(['https://erp.example/global']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
 describe('gRPC outbound/inbound (spec §9 — cero @grpc/grpc-js)', () => {
   it('stub inyectado recibe metadata de traza; replyChannel reenvía resultado', async () => {
     const { registry } = makeWorld();

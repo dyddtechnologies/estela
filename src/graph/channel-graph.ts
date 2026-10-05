@@ -8,11 +8,21 @@ export interface GraphInboundRef {
   operation?: GraphqlOperation;
 }
 
+/** Outbound transports a channel can be bound to. */
+export type OutboundTransport = 'rest';
+
+export interface GraphOutboundRef {
+  transport: OutboundTransport;
+  /** `POST https://host/path` or `dynamic`; never a query string or credentials. */
+  target: string;
+}
+
 export interface GraphNode {
   channel: string;
   kind: string;
   bindings: readonly string[];
   inbounds: GraphInboundRef[];
+  outbounds: GraphOutboundRef[];
   activators: string[];
   flowsFrom: string[];
 }
@@ -27,6 +37,7 @@ export type GraphEdgeVia =
   | 'route'
   | 'binding'
   | 'inbound'
+  | 'outbound'
   | 'activator';
 
 export interface GraphEdge {
@@ -82,6 +93,7 @@ function sanitizeId(value: string): string {
  */
 export class ChannelGraph {
   private readonly inbounds = new Map<string, GraphInboundRef[]>();
+  private readonly outbounds = new Map<string, GraphOutboundRef[]>();
   private readonly activators = new Map<string, string[]>();
   private readonly flows: GraphFlowEntry[] = [];
   private readonly flowEdges: GraphEdge[] = [];
@@ -101,6 +113,13 @@ export class ChannelGraph {
     if (spec.operation !== undefined) ref.operation = spec.operation;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
+  }
+
+  /** Records an outbound adapter bound to `channel` (declared bindings and `@OutboundRest`). */
+  recordOutbound(channel: string, ref: GraphOutboundRef): void {
+    const refs = this.outbounds.get(channel) ?? [];
+    refs.push({ transport: ref.transport, target: ref.target });
+    this.outbounds.set(channel, refs);
   }
 
   recordFlow(name: string, built: BuiltFlow): void {
@@ -142,22 +161,13 @@ export class ChannelGraph {
         kind: channel.kind,
         bindings,
         inbounds: this.inbounds.get(channel.name) ?? [],
+        outbounds: this.outbounds.get(channel.name) ?? [],
         activators: this.activators.get(channel.name) ?? [],
         flowsFrom: this.flows
           .filter((flow) => flow.source === channel.name)
           .map((flow) => flow.name),
       });
-      if (isFanout) {
-        for (const binding of bindings) {
-          edges.push({ from: channel.name, to: binding, via: 'binding' });
-        }
-      }
-      for (const ref of this.inbounds.get(channel.name) ?? []) {
-        edges.push({ from: `inbound:${ref.transport}`, to: channel.name, via: 'inbound' });
-      }
-      for (const label of this.activators.get(channel.name) ?? []) {
-        edges.push({ from: channel.name, to: `activator:${label}`, via: 'activator' });
-      }
+      edges.push(...this.channelEdges(channel.name, bindings));
     }
     edges.push(...this.flowEdges);
     const mermaid = this.renderMermaid(nodes, edges);
@@ -169,6 +179,24 @@ export class ChannelGraph {
     };
   }
 
+  /** Edges that hang off one channel: fanout bindings, inbounds, outbounds and activators. */
+  private channelEdges(name: string, bindings: readonly string[]): GraphEdge[] {
+    const edges: GraphEdge[] = [];
+    for (const binding of bindings) {
+      edges.push({ from: name, to: binding, via: 'binding' });
+    }
+    for (const ref of this.inbounds.get(name) ?? []) {
+      edges.push({ from: `inbound:${ref.transport}`, to: name, via: 'inbound' });
+    }
+    for (const ref of this.outbounds.get(name) ?? []) {
+      edges.push({ from: name, to: `outbound:${ref.transport}`, via: 'outbound' });
+    }
+    for (const label of this.activators.get(name) ?? []) {
+      edges.push({ from: name, to: `activator:${label}`, via: 'activator' });
+    }
+    return edges;
+  }
+
   private renderMermaid(nodes: readonly GraphNode[], edges: readonly GraphEdge[]): string {
     const lines: string[] = ['flowchart LR'];
     this.appendNodeLines(lines, nodes);
@@ -178,12 +206,19 @@ export class ChannelGraph {
 
   private appendNodeLines(lines: string[], nodes: readonly GraphNode[]): void {
     let inboundIndex = 0;
+    let outboundIndex = 0;
     for (const node of nodes) {
       lines.push(`  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}"]`);
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(
           `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}"] --> ${sanitizeId(node.channel)}`,
+        );
+      }
+      for (const ref of node.outbounds) {
+        outboundIndex += 1;
+        lines.push(
+          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}"]`,
         );
       }
       for (const label of node.activators) {

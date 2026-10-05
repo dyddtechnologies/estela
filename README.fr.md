@@ -4,7 +4,7 @@
   **Le runtime Enterprise Integration Patterns pour NestJS.**
   *Le flow parle aux canaux, pas aux classes.*
 
-  [![tests](https://img.shields.io/badge/tests-301%2F301-brightgreen)](#statut)
+  [![tests](https://img.shields.io/badge/tests-421%2F421-brightgreen)](#statut)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -167,6 +167,17 @@ dédié), par endpoint ou pour tout le module via `forRoot({ inbound })`. Sans c
 change par rapport à la 0.5.0. Détails, tableaux et exemple multi-tenant :
 [README (EN)](./README.md#inbound-adapters-reply-mapping--idempotency).
 
+### Outbound REST : request/reply avec votre propre contrat (0.8.0)
+
+Un message envoyé à un canal lié (`forRoot({ outbound: { rest: { defaults, bindings } } })` ou
+`@OutboundRest`) part en appel HTTP et la réponse `{ status, headers, body }` revient sur
+`replyChannel` ; `OutboundRestGateway.request(...)` offre le même moteur sans canal (étape
+`outbound` d'une saga). Cible dynamique par message, sérialisation du body, timeout par
+`AbortController`, erreurs typées (`OutboundHttpError`, `OutboundNetworkError`,
+`OutboundTimeoutError`) avec `mapError`, clé d'idempotence stable (jamais générée), retry désactivé
+par défaut. `bindRestOut` ne change pas. Détails et exemple :
+[README (EN)](./README.md#outbound-rest-requestreply-with-your-own-contract).
+
 ## Observabilité
 
 ```bash
@@ -198,7 +209,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **301/301** · 28 suites · e2e HTTP réel |
+| Tests | **421/421** · 31 suites · e2e HTTP réel |
 | Spec | 10/10 tests minimaux · DoD §15 complet |
 | Boundaries | domaine pur · barrel sans brokers · testing sans inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |

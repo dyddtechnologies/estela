@@ -4,7 +4,7 @@
   **El runtime de Enterprise Integration Patterns para NestJS.**
   *El flow habla con canales, no con clases.*
 
-  [![tests](https://img.shields.io/badge/tests-301%2F301-brightgreen)](#estado)
+  [![tests](https://img.shields.io/badge/tests-421%2F421-brightgreen)](#estado)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#arquitectura)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#instalaci%C3%B3n)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#instalaci%C3%B3n)
@@ -362,6 +362,163 @@ borra.
 - Un store propio sin el `release()` opcional sigue funcionando: `onFailure: 'release'` se rechaza
   para él, y un clasificador que responde `'release'` degrada a `keep` con un único warning.
 
+## Outbound REST: request/reply con tu propio contrato
+
+Desde la 0.8.0 un servicio puede llamar a otros servicios **a través de estela** y recibir la
+respuesta HTTP como reply, con su propio destino, headers, idempotency key, timeout, política de
+reintentos y contrato de error. Las opciones van en cada binding o, para todo el módulo, en
+`forRoot({ outbound: { rest: { defaults } } })`; la llamada gana sobre el binding, este sobre el
+default del módulo y este sobre el de fábrica. Cada estrategia es una función, una instancia o una
+referencia DI `{ useExisting: token }` (singletons).
+
+**`bindRestOut` no cambia**: sigue siendo fire-and-forget (url estática, body JSON, `Error` plano
+ante un status no 2xx, body de la respuesta descartado, sin timeout). La API nueva es opt-in.
+
+Dos entradas, un mismo motor:
+
+- **Binding de canal**: un mensaje enviado al canal se entrega como llamada HTTP y la respuesta se
+  contesta en `headers.replyChannel`, así que `ReplyGateway.sendAndReceive(canal, …)`, un `jumpTo`
+  de flow y `to` funcionan. Sin reply channel la llamada se hace y no se contesta nada.
+- **`OutboundRestGateway`**: un puerto inyectable para código que no tiene canal (un paso `outbound`
+  de saga, un activator): `await gateway.request(nombreUOpciones, { payload, headers? }, call?)`.
+
+```ts
+IntegrationModule.forRoot({
+  channels: [{ name: 'payments.http', type: 'direct' }],
+  outbound: {
+    rest: {
+      defaults: { timeoutMs: 30_000, mapError: { useExisting: UpstreamErrors } },
+      bindings: [
+        // destino estático, alcanzable como canal y por nombre
+        { channel: 'payments.http', url: 'https://pay.example/charges',
+          idempotency: { key: ({ payload }: OutboundCallContext<Charge>) => ['charge', payload.tenantId, payload.orderId] } },
+        // destino dinámico, sin canal: solo gateway.request('partner-api', …)
+        { name: 'partner-api', target: { useExisting: PartnerTargets } },
+      ],
+    },
+  },
+});
+```
+
+El reply es `{ status, headers, body }` (`body` es el JSON parseado, si no el texto, `null` si viene
+vacío). `response: 'body'` responde solo el body; un mapper (función, instancia o ref DI) responde lo
+que tu contrato necesite.
+
+### Destino dinámico, key estable, timeout y mapeo de errores
+
+```ts
+@Injectable()
+export class PartnerTargets {
+  constructor(private readonly apis: ApiCatalog) {}
+
+  // El método anotado ES el target resolver del canal: (payload, message) => target.
+  @OutboundRest({
+    channel: 'partner.call',
+    timeoutMs: 30_000,                                   // por intento, con AbortController
+    idempotency: { header: 'X-Idempotency-Key' },        // la key la define el target de abajo
+    mapHeaders: ({ message }) => ({                      // auth / headers propagados desde el mensaje
+      authorization: message.headers.authorization as string | undefined,
+      'x-client-id': message.headers.clientId as string | undefined,
+    }),
+    response: ({ response, target }) => (target.data as ApiRow).mapResponse(response.body),
+    mapError: { useExisting: UpstreamErrors },
+  })
+  async target(cmd: CallApi): Promise<OutboundRestTarget> {
+    const api = await this.apis.find(cmd.apiId);         // url, verbo y headers salen de datos
+    return {
+      url: api.url,
+      method: api.verb,                                  // GET, HEAD, DELETE, POST, PUT, PATCH, OPTIONS
+      headers: api.headers,
+      query: { tenant: cmd.tenantId },
+      body: api.buildRequest(cmd.session),               // nunca se envía en GET / HEAD
+      idempotencyKey: [cmd.correlationId, cmd.apiId],    // ESTABLE: derivada de ids de negocio
+      data: api,                                         // llega a las estrategias siguientes; no se envía
+    };
+  }
+}
+
+@Injectable()
+export class UpstreamErrors implements OutboundErrorMapper {
+  mapError(error: OutboundRestError, ctx: OutboundExchangeContext) {
+    return new BadRequestException({
+      type: { http: 'HttpError', network: 'NetworkError', timeout: 'Timeout' }[error.kind],
+      status: error instanceof OutboundHttpError ? error.status : 0,
+      upstream: error instanceof OutboundHttpError ? error.body : error.message,
+      url: error.url, method: error.method, responseTime: ctx.durationMs, attempts: error.attempts,
+    });
+  }
+}
+```
+
+Dentro de un paso `outbound` de saga (no hay transacción abierta mientras corre la llamada):
+
+```ts
+const complete = saga<CompleteCtx, EntityManager, CompleteReply>('complete')
+  .transaction('claim', claimStep)
+  .outbound('call-api', async (ctx) => {
+    ctx.apiResult = await outbound.request(
+      'partner.call',                                       // un binding declarado, por nombre
+      { payload: ctx.command, headers: { correlationId: ctx.correlationId, authorization: ctx.authorization } },
+    );
+  }, { compensate: releaseClaim })                          // corre si la llamada (o su mapper) lanza
+  .transaction('mark-completed', markCompleted)
+  .reply((ctx) => ctx.response);
+```
+
+### Opciones
+
+| Opción | Default | Notas |
+|---|---|---|
+| `url` · `method` · `headers` · `query` | `method: 'POST'` | parte estática del destino; headers y query se fusionan sobre los defaults del módulo |
+| `target` | — | por mensaje: `{ url, method, headers, query, body, timeoutMs, idempotencyKey, data }`; cada campo pisa al estático |
+| `mapHeaders` | — | hook `(ctx) => headers`; los valores `undefined` se omiten |
+| `traceHeaders` | `true` | `x-trace-id`, `x-span-id`, `x-parent-span-id`, `x-correlation-id`, `x-causation-id` |
+| `serializer` | `'json'` | `'text'`, `'form'` (`x-www-form-urlencoded`), o función / instancia / ref que devuelve `{ body, contentType }` o un string |
+| `response` | `'full'` | `'body'`, o un mapper que recibe `{ response, request, payload, message, target, attempts, durationMs }` |
+| `timeoutMs` | `30000` | por intento; `0` lo desactiva; llamada > target > binding > módulo |
+| `idempotency` | reenvía la key del mensaje | ver abajo; `false` no envía key |
+| `retry` | apagado | ver abajo |
+| `mapError` | — | recibe `OutboundHttpError` / `OutboundNetworkError` / `OutboundTimeoutError`; lo que devuelve se lanza |
+| `fetchFn` | `globalThis.fetch` | inyectable; sin dependencia de cliente HTTP |
+
+Precedencia de headers, de menor a mayor: content type del serializer, headers estáticos, headers de
+traza, headers del `target`, `mapHeaders`, headers de la llamada, header de idempotencia. Los nombres
+se comparan sin distinguir mayúsculas, así que tu `X-Correlation-ID` reemplaza al `x-correlation-id`
+de traza en vez de enviarse dos veces.
+
+**Idempotency key.** **Nunca se genera** una key. Por defecto se envía como `Idempotency-Key` el
+header `idempotencyKey` del mensaje (el que reenvió un adaptador inbound). `header` lo renombra;
+`key` resuelve una key estable a partir del mensaje (un string, o partes que se escapan y se unen con
+`:`) y apaga el reenvío salvo `forward: true`; `idempotencyKey` en el target o en la llamada gana
+sobre el resolver; `idempotency: false` no envía nada.
+
+**Reintentos.** Apagados salvo que se configure `retry`. `{ maxAttempts = 3, backoff, retryOn, methods }`:
+un fallo se reintenta solo si se clasifica como reintentable (default: errores de red, timeouts, HTTP
+408, 429 y 5xx) **y** el método es seguro de repetir: GET, HEAD u OPTIONS, cualquier método mientras
+se envía una idempotency key, o un método listado en `methods`. El request se construye una sola vez,
+así que todos los intentos llevan la misma key. `backoff` es un delay fijo,
+`{ initialMs = 200, factor = 2, maxMs = 10000 }` o una función; el error mapper corre una vez, tras
+el último intento.
+
+**Errores.** Los tres extienden `OutboundRestError` (`kind`, `binding`, `url`, `method`, `attempts`):
+`OutboundHttpError` agrega `status`, `statusText`, `headers` y el `body` parseado;
+`OutboundNetworkError` agrega `code` (`ECONNREFUSED`, `ENOTFOUND`, …) y `cause`;
+`OutboundTimeoutError` agrega `timeoutMs`. Una mala configuración lanza `OutboundError` al declarar el
+binding (en el arranque), no en el primer mensaje.
+
+**Observabilidad.** Una línea de arranque por binding
+(`outbound rest: payments.http -> POST https://pay.example/charges`, o `-> dynamic`), los bindings de
+canal quedan en el grafo (`outbounds` en el nodo, una arista `outbound`, una línea Mermaid) y una
+línea de hop por llamada cuando `logging.hops` está activo. Nunca se registran bodies, headers,
+valores de key, query strings ni credenciales de la url; los mensajes de error llevan la url sin su
+query string (`error.url` conserva la completa).
+
+Advertencias: las estrategias resuelven solo providers singleton; `{ useExisting }` y la configuración
+se validan en el arranque para los bindings declarados y en la primera llamada para opciones ad-hoc
+(guárdalas en una constante para reutilizar el plan); un response mapper que lanza no pasa por
+`mapError`; el timeout aplica a cada intento, no a toda la secuencia de reintentos; el backoff por
+defecto no respeta `Retry-After` (usa una función de backoff).
+
 ## Observabilidad
 
 ```bash
@@ -426,7 +583,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **301/301** · 28 suites · e2e HTTP real |
+| Tests | **421/421** · 31 suites · e2e HTTP real |
 | Spec | 10/10 tests mínimos · DoD §15 completo |
 | Boundaries | dominio puro · barrel sin brokers · testing sin inbound (0 violaciones) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |

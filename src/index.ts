@@ -75,6 +75,18 @@ export * from './adapters/rest.adapter';
 export * from './adapters/grpc.adapter';
 export * from './adapters/rabbit.adapter';
 
+// ---------- Outbound: adaptable request/reply REST ----------
+export * from './outbound/outbound.types';
+export * from './outbound/outbound.errors';
+export * from './outbound/outbound.decorators';
+export * from './outbound/outbound-rest.gateway';
+export {
+  DEFAULT_OUTBOUND_IDEMPOTENCY_HEADER,
+  DEFAULT_OUTBOUND_MAX_ATTEMPTS,
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
+} from './outbound/outbound.plan';
+export { formSerializer, jsonSerializer, textSerializer } from './outbound/outbound.serializers';
+
 // ---------- Fase 9: graph ----------
 export * from './graph/channel-graph';
 export * from './graph/channel-graph.controller';
