@@ -4,7 +4,7 @@
   **The Enterprise Integration Patterns runtime for NestJS.**
   *The flow talks to channels, not to classes.*
 
-  [![tests](https://img.shields.io/badge/tests-301%2F301-brightgreen)](#status)
+  [![tests](https://img.shields.io/badge/tests-421%2F421-brightgreen)](#status)
   [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](#architecture)
   [![Node](https://img.shields.io/badge/node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#installation)
   [![NestJS](https://img.shields.io/badge/NestJS-10%20%7C%2011-E0234E?logo=nestjs&logoColor=white)](#installation)
@@ -360,6 +360,159 @@ erases it.
 - A custom store without the optional `release()` keeps working: `onFailure: 'release'` is rejected
   for it, and a classifier that answers `'release'` degrades to `keep` with one warning.
 
+## Outbound REST: request/reply with your own contract
+
+Since 0.8.0 a service can call other services **through estela** and get the HTTP response back as
+the reply, with its own target, headers, idempotency key, timeout, retry policy and error contract.
+Options go on each binding, or module-wide in `forRoot({ outbound: { rest: { defaults } } })`; a call
+overrides the binding, which overrides the module default, which overrides the built-in. Every
+strategy is a function, an instance, or a DI ref `{ useExisting: token }` (singletons).
+
+**`bindRestOut` is unchanged**: it stays fire-and-forget (static url, JSON body, plain `Error` on a
+non-2xx status, response body discarded, no timeout). The new API is opt-in.
+
+Two ways in, same engine:
+
+- **Channel binding**: a message sent to the channel is delivered as an HTTP call and the response
+  is replied on `headers.replyChannel`, so `ReplyGateway.sendAndReceive(channel, …)`, a flow
+  `jumpTo` and `to` all work. Without a reply channel the call is made and nothing is replied.
+- **`OutboundRestGateway`**: an injectable port for code that has no channel (a saga `outbound`
+  step, an activator): `await gateway.request(nameOrOptions, { payload, headers? }, call?)`.
+
+```ts
+IntegrationModule.forRoot({
+  channels: [{ name: 'payments.http', type: 'direct' }],
+  outbound: {
+    rest: {
+      defaults: { timeoutMs: 30_000, mapError: { useExisting: UpstreamErrors } },
+      bindings: [
+        // static target, reachable as a channel and by name
+        { channel: 'payments.http', url: 'https://pay.example/charges',
+          idempotency: { key: ({ payload }: OutboundCallContext<Charge>) => ['charge', payload.tenantId, payload.orderId] } },
+        // dynamic target, no channel: only gateway.request('partner-api', …)
+        { name: 'partner-api', target: { useExisting: PartnerTargets } },
+      ],
+    },
+  },
+});
+```
+
+The reply is `{ status, headers, body }` (`body` is parsed JSON, else the text, `null` when empty).
+`response: 'body'` answers just the body; a mapper function, instance or DI ref answers whatever your
+contract needs.
+
+### Dynamic target, stable key, timeout and error mapping
+
+```ts
+@Injectable()
+export class PartnerTargets {
+  constructor(private readonly apis: ApiCatalog) {}
+
+  // The annotated method IS the target resolver of the channel: (payload, message) => target.
+  @OutboundRest({
+    channel: 'partner.call',
+    timeoutMs: 30_000,                                   // per attempt, enforced with AbortController
+    idempotency: { header: 'X-Idempotency-Key' },        // the key itself comes from the target below
+    mapHeaders: ({ message }) => ({                      // auth / propagated headers from the message
+      authorization: message.headers.authorization as string | undefined,
+      'x-client-id': message.headers.clientId as string | undefined,
+    }),
+    response: ({ response, target }) => (target.data as ApiRow).mapResponse(response.body),
+    mapError: { useExisting: UpstreamErrors },
+  })
+  async target(cmd: CallApi): Promise<OutboundRestTarget> {
+    const api = await this.apis.find(cmd.apiId);         // url, verb and headers come from data
+    return {
+      url: api.url,
+      method: api.verb,                                  // GET, HEAD, DELETE, POST, PUT, PATCH, OPTIONS
+      headers: api.headers,
+      query: { tenant: cmd.tenantId },
+      body: api.buildRequest(cmd.session),               // never sent for GET / HEAD
+      idempotencyKey: [cmd.correlationId, cmd.apiId],    // STABLE: derived from business ids
+      data: api,                                         // handed to the later strategies, never sent
+    };
+  }
+}
+
+@Injectable()
+export class UpstreamErrors implements OutboundErrorMapper {
+  mapError(error: OutboundRestError, ctx: OutboundExchangeContext) {
+    return new BadRequestException({
+      type: { http: 'HttpError', network: 'NetworkError', timeout: 'Timeout' }[error.kind],
+      status: error instanceof OutboundHttpError ? error.status : 0,
+      upstream: error instanceof OutboundHttpError ? error.body : error.message,
+      url: error.url, method: error.method, responseTime: ctx.durationMs, attempts: error.attempts,
+    });
+  }
+}
+```
+
+Inside a saga `outbound` step (no transaction is open while the call runs):
+
+```ts
+const complete = saga<CompleteCtx, EntityManager, CompleteReply>('complete')
+  .transaction('claim', claimStep)
+  .outbound('call-api', async (ctx) => {
+    ctx.apiResult = await outbound.request(
+      'partner.call',                                       // a declared binding, by name
+      { payload: ctx.command, headers: { correlationId: ctx.correlationId, authorization: ctx.authorization } },
+    );
+  }, { compensate: releaseClaim })                          // runs when the call (or its mapper) throws
+  .transaction('mark-completed', markCompleted)
+  .reply((ctx) => ctx.response);
+```
+
+### Options
+
+| Option | Default | Notes |
+|---|---|---|
+| `url` · `method` · `headers` · `query` | `method: 'POST'` | static part of the target; headers and query merge over the module defaults |
+| `target` | — | per-message `{ url, method, headers, query, body, timeoutMs, idempotencyKey, data }`; each field overrides the static one |
+| `mapHeaders` | — | hook `(ctx) => headers`; `undefined` values are skipped |
+| `traceHeaders` | `true` | `x-trace-id`, `x-span-id`, `x-parent-span-id`, `x-correlation-id`, `x-causation-id` |
+| `serializer` | `'json'` | `'text'`, `'form'` (`x-www-form-urlencoded`), or a function / instance / ref returning `{ body, contentType }` or a string |
+| `response` | `'full'` | `'body'`, or a mapper receiving `{ response, request, payload, message, target, attempts, durationMs }` |
+| `timeoutMs` | `30000` | per attempt; `0` disables; call > target > binding > module |
+| `idempotency` | forward the message key | see below; `false` sends no key |
+| `retry` | off | see below |
+| `mapError` | — | receives `OutboundHttpError` / `OutboundNetworkError` / `OutboundTimeoutError`; what it returns is thrown |
+| `fetchFn` | `globalThis.fetch` | injectable; no HTTP client dependency |
+
+Header precedence, lowest first: serializer content type, static headers, trace headers, `target`
+headers, `mapHeaders`, call headers, idempotency header. Names match case-insensitively, so your
+`X-Correlation-ID` replaces the trace `x-correlation-id` instead of being sent twice.
+
+**Idempotency key.** A key is **never generated**. By default the `idempotencyKey` header of the
+message (the one an inbound adapter forwarded) is sent as `Idempotency-Key`. `header` renames it;
+`key` resolves a stable key from the message (a string, or parts that are escaped and joined with
+`:`) and turns forwarding off unless `forward: true`; `idempotencyKey` on the target or on the call
+wins over the resolver; `idempotency: false` sends nothing.
+
+**Retry.** Off unless `retry` is set. `{ maxAttempts = 3, backoff, retryOn, methods }`: a failure is
+retried only when it is classified retryable (default: network errors, timeouts, HTTP 408, 429 and
+5xx) **and** the method is safe to repeat: GET, HEAD or OPTIONS, any method while an idempotency key
+is being sent, or a method listed in `methods`. The request is built once, so every attempt carries
+the same key. `backoff` is a fixed delay, `{ initialMs = 200, factor = 2, maxMs = 10000 }` or a
+function; the error mapper runs once, after the last attempt.
+
+**Errors.** All three extend `OutboundRestError` (`kind`, `binding`, `url`, `method`, `attempts`):
+`OutboundHttpError` adds `status`, `statusText`, `headers` and the parsed `body`;
+`OutboundNetworkError` adds `code` (`ECONNREFUSED`, `ENOTFOUND`, …) and `cause`;
+`OutboundTimeoutError` adds `timeoutMs`. Misconfigurations throw `OutboundError` when the binding is
+declared (at boot), not on the first message.
+
+**Observability.** One boot line per binding (`outbound rest: payments.http -> POST https://pay.example/charges`,
+or `-> dynamic`), channel bindings recorded in the graph (`outbounds` on the node, an `outbound`
+edge, a Mermaid line), and one hop line per call when `logging.hops` is on. Bodies, headers, key
+values, query strings and url credentials are never logged; error messages carry the url without its
+query string (`error.url` keeps the full one).
+
+Caveats: strategies resolve singleton providers only; `{ useExisting }` and the configuration are
+validated at boot for declared bindings and on the first call for ad-hoc options (keep those in a
+constant so the plan is reused); a response mapper that throws is not passed to `mapError`; the
+timeout applies to each attempt, not to the whole retry sequence; `Retry-After` is not honoured by
+the default backoff (use a backoff function).
+
 ## Sagas: units of work and idempotency
 
 A saga lists the steps of one business operation in order. Consecutive `transaction` steps share
@@ -419,15 +572,17 @@ On startup the first `IntegrationModule` prints this banner once per process:
 Turn it off with `forRoot({ logging: { banner: false } })` or `ESTELA_BANNER=false`. Per-hop
 logging is separate and opt-in: `forRoot({ logging: { hops: true } })`.
 
-The boot log also lists every wired entry point, one line per activator and per annotated
-inbound endpoint (`@InboundRest` / `@InboundGrpc` / `@InboundGraphQL`), and each inbound is
-recorded in the graph:
+The boot log also lists every wired entry and exit point, one line per activator, per annotated
+inbound endpoint (`@InboundRest` / `@InboundGrpc` / `@InboundGraphQL`) and per declared outbound
+REST binding; inbounds and channel-bound outbounds are recorded in the graph:
 
 ```
 activator: InventoryActivator.reserve -> inventory.reserve
 inbound rest: POST /V1/Workflows/:id/Start -> wf.start (request-reply)
 inbound grpc: WorkflowLifecycleService/Start -> wf.start (request-reply)
 inbound graphql: mutation placeOrder -> orders.place
+outbound rest: payments.http -> POST https://pay.example/charges
+outbound rest: partner.call -> dynamic
 ```
 
 Only transport, route or pattern, channel and the request-reply flag are printed. When route
@@ -483,7 +638,7 @@ const reply = await waitFor(registry, 'reply.http-1', 2_000);
 
 | | |
 |---|---|
-| Tests | **301/301** · 28 suites · real HTTP e2e |
+| Tests | **421/421** · 31 suites · real HTTP e2e |
 | Spec | 10/10 minimal tests · DoD §15 complete |
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |

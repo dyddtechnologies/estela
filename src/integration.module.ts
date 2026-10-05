@@ -30,6 +30,13 @@ import { TraceContext } from './trace/trace-context';
 import { subscribeActivator, type ActivatorDeps } from './activator/activator-wrapper';
 import { HopLogger, type IntegrationLoggingOptions } from './trace/hop-logger';
 import { printEstelaBanner } from './trace/banner';
+import { OutboundRestGateway } from './outbound/outbound-rest.gateway';
+import {
+  OUTBOUND_REST_METADATA,
+  outboundRestBindingOf,
+  type OutboundRestSpec,
+} from './outbound/outbound.decorators';
+import type { OutboundModuleOptions } from './outbound/outbound.types';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
 
@@ -51,6 +58,8 @@ export interface IntegrationModuleOptions {
   rabbitMappings?: readonly RabbitInboundMapping[];
   /** Module-wide reply mapping and idempotency defaults of the inbound adapters. */
   inbound?: InboundDefaults;
+  /** Outbound adapters: module-wide defaults and declared bindings (REST request/reply). */
+  outbound?: OutboundModuleOptions;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
@@ -86,6 +95,35 @@ function inboundDepsProvider(): Provider {
       INTEGRATION_OPTIONS,
       ModuleRef,
     ],
+  };
+}
+
+function hopLoggerOf(options: IntegrationModuleOptions): HopLogger | undefined {
+  if (options.logging?.hops !== true) return undefined;
+  return new HopLogger(options.logging.level ?? 'log');
+}
+
+/** Outbound REST port: module defaults, DI-resolved strategies and the module hop logging. */
+function outboundRestProvider(): Provider {
+  return {
+    provide: OutboundRestGateway,
+    useFactory: (
+      registry: ChannelRegistry,
+      trace: TraceContext,
+      opts: ResolvedIntegrationOptions,
+      moduleRef: ModuleRef,
+    ): OutboundRestGateway => {
+      const defaults = opts.outbound?.rest?.defaults;
+      const logger = hopLoggerOf(opts);
+      return new OutboundRestGateway({
+        registry,
+        trace,
+        ...(defaults === undefined ? {} : { defaults }),
+        ...(logger === undefined ? {} : { logger }),
+        resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
+      });
+    },
+    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef],
   };
 }
 
@@ -145,6 +183,7 @@ export class IntegrationModule {
         inject: [ChannelRegistry, TraceContext],
       },
       inboundDepsProvider(),
+      outboundRestProvider(),
       {
         provide: InboundExplorer,
         useFactory: (
@@ -179,6 +218,7 @@ export class IntegrationModule {
         ChannelGraph,
         INBOUND_DEPS,
         InboundExplorer,
+        OutboundRestGateway,
       ],
     };
   }
@@ -198,6 +238,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     private readonly explorer: InboundExplorer,
     @Inject(INTEGRATION_OPTIONS)
     private readonly options: ResolvedIntegrationOptions,
+    private readonly outbound: OutboundRestGateway,
   ) {}
 
   /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
@@ -219,6 +260,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     // 2. activators (DiscoveryModule)
     this.subscribeDiscoveredActivators();
     this.logDiscoveredInbounds();
+    this.bindOutbounds();
 
     // 3. flows: graph.recordFlow + flow.bind + attach (spec sec.11 step 3)
     for (const definition of this.options.flows) {
@@ -250,32 +292,56 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
   }
 
-  // Reflexion sobre metadata own (escrita por nuestro decorador).
+  // Reflection over metadata written by our own decorators.
   /* eslint-disable @typescript-eslint/no-unsafe-assignment */
-  private subscribeDiscoveredActivators(): void {
+  private *annotatedMethods<T>(
+    metadataKey: string,
+  ): Generator<{ instance: object; methodName: string; metadata: T }> {
     for (const wrapper of this.discovery.getProviders()) {
       const instance: unknown = wrapper.instance;
       if (instance === null || typeof instance !== 'object') continue;
       let proto: object | null = Object.getPrototypeOf(instance);
       while (proto !== null && proto !== Object.prototype) {
         for (const methodName of this.metadataScanner.getAllMethodNames(proto)) {
-          const metadata = Reflect.getMetadata(ACTIVATOR_METADATA, proto, methodName) as
-            ActivatorMetadata | undefined;
-          if (metadata === undefined) continue;
-          subscribeActivator({ instance, methodName, metadata }, this.activatorDeps());
-          this.graph.recordActivator(
-            metadata.channel,
-            `${instance.constructor.name}.${methodName}`,
-          );
-          this.logger.log(
-            `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
-          );
+          const metadata = Reflect.getMetadata(metadataKey, proto, methodName) as T | undefined;
+          if (metadata !== undefined) yield { instance, methodName, metadata };
         }
         proto = Object.getPrototypeOf(proto);
       }
     }
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
+
+  private subscribeDiscoveredActivators(): void {
+    const found = this.annotatedMethods<ActivatorMetadata>(ACTIVATOR_METADATA);
+    for (const { instance, methodName, metadata } of found) {
+      subscribeActivator({ instance, methodName, metadata }, this.activatorDeps());
+      this.graph.recordActivator(metadata.channel, `${instance.constructor.name}.${methodName}`);
+      this.logger.log(
+        `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
+      );
+    }
+  }
+
+  /**
+   * Declared outbound bindings (module options, then `@OutboundRest` methods): bound, logged
+   * with one line each and recorded in the graph. A misconfigured binding fails the boot.
+   */
+  private bindOutbounds(): void {
+    for (const binding of this.options.outbound?.rest?.bindings ?? []) {
+      this.outbound.bind(binding);
+    }
+    const annotated = this.annotatedMethods<OutboundRestSpec>(OUTBOUND_REST_METADATA);
+    for (const { instance, methodName, metadata } of annotated) {
+      this.outbound.bind(outboundRestBindingOf(instance, methodName, metadata));
+    }
+    for (const info of this.outbound.bindings()) {
+      if (info.channel !== undefined) {
+        this.graph.recordOutbound(info.channel, { transport: 'rest', target: info.target });
+      }
+      this.logger.log(info.line);
+    }
+  }
 
   /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */
   private logDiscoveredInbounds(): void {
@@ -300,8 +366,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   private hopLoggerInstance: HopLogger | undefined;
 
   private hopLogger(): HopLogger | undefined {
-    if (this.options.logging?.hops !== true) return undefined;
-    this.hopLoggerInstance ??= new HopLogger(this.options.logging.level ?? 'log');
+    this.hopLoggerInstance ??= hopLoggerOf(this.options);
     return this.hopLoggerInstance;
   }
 

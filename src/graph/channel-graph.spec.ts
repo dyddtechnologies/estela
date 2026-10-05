@@ -19,6 +19,56 @@ const makeWorld = () => {
 };
 
 describe('ChannelGraph (spec §12)', () => {
+  it('records outbound bindings: node refs, edges and a mermaid line per binding', () => {
+    const { registry, graph } = makeWorld();
+    graph.recordOutbound('orders.persist', {
+      transport: 'rest',
+      target: 'POST https://erp.example/orders',
+    });
+    graph.recordOutbound('orders.persist', { transport: 'rest', target: 'dynamic "quoted"' });
+    const snapshot = graph.snapshot(registry);
+
+    const persist = snapshot.nodes.find((n) => n.channel === 'orders.persist');
+    expect(persist?.outbounds).toEqual([
+      { transport: 'rest', target: 'POST https://erp.example/orders' },
+      { transport: 'rest', target: 'dynamic "quoted"' },
+    ]);
+    expect(snapshot.nodes.find((n) => n.channel === 'orders.place')?.outbounds).toEqual([]);
+    expect(
+      snapshot.edges.filter((edge) => edge.via === 'outbound' && edge.from === 'orders.persist'),
+    ).toEqual([
+      { from: 'orders.persist', to: 'outbound:rest', via: 'outbound' },
+      { from: 'orders.persist', to: 'outbound:rest', via: 'outbound' },
+    ]);
+    expect(snapshot.mermaid).toContain(
+      '  orders_persist --> out_1_rest["outbound rest: POST https://erp.example/orders"]',
+    );
+    expect(snapshot.mermaid).toContain(
+      `  orders_persist --> out_2_rest["outbound rest: dynamic 'quoted'"]`,
+    );
+    expect(snapshot.mermaid).toContain('  orders_persist -->|outbound| outbound_rest');
+  });
+
+  it('a fanout-kind channel that exposes no bindings is drawn without binding edges', () => {
+    const { registry, graph } = makeWorld();
+    registry.register({
+      name: 'custom.fanout',
+      kind: 'fanout',
+      send: async () => undefined,
+      subscribe: () => () => undefined,
+    });
+    const snapshot = graph.snapshot(registry);
+    expect(snapshot.nodes.find((n) => n.channel === 'custom.fanout')?.bindings).toEqual([]);
+    expect(snapshot.edges.some((edge) => edge.from === 'custom.fanout')).toBe(false);
+  });
+
+  it('a graph without outbound bindings renders no outbound line', () => {
+    const { registry, graph } = makeWorld();
+    const snapshot = graph.snapshot(registry);
+    expect(snapshot.mermaid).not.toContain('outbound');
+    expect(snapshot.edges.some((edge) => edge.via === 'outbound')).toBe(false);
+  });
+
   it('snapshot: nodes con kind/bindings/inbounds/activators/flowsFrom', () => {
     const { registry, graph } = makeWorld();
     graph.recordInbound({ channel: 'orders.place', transport: 'rest', requestReply: true });
