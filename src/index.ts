@@ -1,27 +1,24 @@
 /**
- * @dyddtechnologies/estela — barrel publico.
+ * @estela/nest: public barrel.
  *
- * Fase 0 (scaffolding): placeholder compilable.
- * Los exports reales llegan por fase (PLAN-arquitectura.md sec.10):
- * Fase 1 -> message/trace · Fase 2 -> channels · Fase 3 -> registry/dispatcher ·
- * Fase 4 -> flow · Fase 5 -> idempotency · Fase 6 -> decoradores ·
- * Fase 7 -> inbound · Fase 8 -> gateway/adapters · Fase 9 -> graph ·
- * Fase 10 -> IntegrationModule.
+ * Exports are grouped by the build phase that introduced them (PLAN-arquitectura.md sec.10):
+ * phase 1 message/trace, 2 channels, 3 registry/dispatcher, 4 flow, 5 idempotency,
+ * 6 decorators, 7 inbound, 8 gateway/adapters, 9 graph, 10 IntegrationModule, then sagas.
  *
- * Rule (enforzada por dependency-cruiser): este archivo Never importa
- * amqplib ni @grpc/grpc-js, ni directa ni transitivamente.
+ * Rule (enforced by dependency-cruiser): this file never imports amqplib or @grpc/grpc-js,
+ * directly or transitively. The saga Postgres adapters have zero npm imports, so they are safe here.
  */
 import { version } from '../package.json';
 
 export const INTEGRATION_LIBRARY_VERSION: string = version;
 
-// ---------- Fase 1: kernel de message + trace ----------
+// ---------- Phase 1: message kernel + trace ----------
 export * from './message';
 export * from './trace/trace-context';
 export * from './trace/hop-logger';
 export { ESTELA_BANNER, ESTELA_BANNER_ENV, printEstelaBanner } from './trace/banner';
 
-// ---------- Fase 2: channels ----------
+// ---------- Phase 2: channels ----------
 export * from './channel';
 export * from './channels/channel-deps';
 export * from './channels/glob';
@@ -30,27 +27,27 @@ export * from './channels/queue.channel';
 export * from './channels/pubsub.channel';
 export * from './channels/fanout.channel';
 
-// ---------- Fase 3: factory + registry + dispatcher ----------
+// ---------- Phase 3: factory + registry + dispatcher ----------
 export * from './channel-factory';
 export * from './message-dispatcher';
 export * from './channel-registry';
 
-// ---------- Fase 4: flow engine ----------
+// ---------- Phase 4: flow engine ----------
 export * from './flow/flow-step';
 export * from './flow/integration-flow';
 export * from './flow/flow-executor';
 
-// ---------- Fase 5: idempotency ----------
+// ---------- Phase 5: idempotency ----------
 export * from './idempotency/idempotency-store';
 export * from './idempotency/memory-idempotency.store';
 export * from './idempotency/noop-idempotency.store';
 export * from './idempotency/idempotency.service';
 
-// ---------- Fase 6: decoradores + activator wrapper ----------
+// ---------- Phase 6: decorators + activator wrapper ----------
 export * from './decorators';
 export * from './activator/activator-wrapper';
 
-// ---------- Fase 7: inbound ----------
+// ---------- Phase 7: inbound ----------
 export * from './inbound/inbound.types';
 export * from './inbound/inbound.transport';
 export * from './inbound/inbound.decorators';
@@ -68,7 +65,7 @@ export {
 export { encodeInboundKey } from './inbound/inbound.idempotency';
 export { envelopeReplyMapper, rawReplyMapper } from './inbound/inbound.reply';
 
-// ---------- Fase 8: gateway + outbound adapters ----------
+// ---------- Phase 8: gateway + outbound adapters ----------
 export * from './channels/one-shot';
 export * from './gateway/reply-gateway';
 export * from './adapters/rest.adapter';
@@ -87,11 +84,11 @@ export {
 } from './outbound/outbound.plan';
 export { formSerializer, jsonSerializer, textSerializer } from './outbound/outbound.serializers';
 
-// ---------- Fase 9: graph ----------
+// ---------- Phase 9: graph ----------
 export * from './graph/channel-graph';
 export * from './graph/channel-graph.controller';
 
-// ---------- Fase 10: modulo root ----------
+// ---------- Phase 10: root module ----------
 export * from './integration.module';
 
 // ---------- Saga: units of work, outbound boundaries, transactional idempotency ----------
@@ -99,3 +96,8 @@ export * from './saga/transaction-port';
 export * from './saga/idempotency-ledger';
 export * from './saga/saga';
 export * from './saga/saga-runner';
+export * from './saga/concurrency-errors';
+export * from './saga/lock-port';
+export * from './saga/state-machine';
+export * from './saga/transition';
+export * from './saga/postgres/index';

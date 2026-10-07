@@ -51,4 +51,13 @@ export class HopLogger {
   hopEnd(channel: string, target: string, h: MessageHeaders, ok: boolean, ms: number): void {
     this.emit(`← hop ${channel} ${target} ${ok ? 'ok' : 'FAIL'} ${ms}ms [${this.tag(h)}]`);
   }
+
+  /** Always logged at error level, regardless of the configured hop level. */
+  hopError(channel: string, target: string, h: MessageHeaders, error: unknown): void {
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    this.logger.error(
+      `✖ hop ${channel} ${target} ERROR ${reason} [${this.tag(h)}]`,
+      error instanceof Error ? error.stack : undefined,
+    );
+  }
 }
