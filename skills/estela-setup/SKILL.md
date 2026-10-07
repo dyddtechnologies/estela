@@ -41,6 +41,57 @@ IntegrationModule.forRoot(
 4. The module is `global: true` — feature modules can inject `ChannelRegistry`, `TraceContext`, `ReplyGateway`, `ChannelGraph` without importing.
 5. Init order is fixed: channels → activators (discovered) → flows (`graph.recordFlow` + attach) → Rabbit explorer.
 
+## Wire sagas (TransactionPort, locks, CAS)
+
+```ts
+import {
+  HopLogger, SagaRunner, classifyPostgresError, postgresAdvisoryLockPort, postgresTransitionPort,
+  type SqlQueryOf,
+} from '@estela/nest';
+
+// One query function fits every adapter (no pg dependency in Estela):
+const query: SqlQueryOf<EntityManager> = (m) => (sql, params) => m.query(sql, [...params]);
+// pg:     (c: PoolClient) => (s, p) => c.query(s, [...p])
+// Prisma: (tx) => (s, p) => tx.$queryRawUnsafe(s, ...p)
+
+const runner = new SagaRunner<EntityManager>({
+  // run() must open a NEW top-level transaction (never join an ambient one).
+  transactions: { run: (work) => dataSource.transaction(work), classify: classifyPostgresError },
+  ledger: pgLedger,
+  locks: postgresAdvisoryLockPort({ query, defaultTimeoutMs: 5_000 }),
+  logger: new HopLogger(),
+  onAfterCommitError: (error, info) => metrics.increment('after_commit_failed', info),
+});
+const instances = postgresTransitionPort({ query, table: 'instances', stateColumn: 'status', versionColumn: 'version' });
+```
+
+Map errors at the edge: `StaleStateError` -> 409; `LockTimeoutError` / `DeadlockError` /
+`SerializationError` (all `ConcurrencyError`) -> 503 with `Retry-After`. Their `message` is safe
+(kind, saga, unit, attempts); the driver error in `cause` names tables and constraints, so log it,
+never return it.
+
+- Lock keys: the advisory lock port hashes `(namespace, key)` to 64 bits of SHA-256, so keys may
+  include user-chosen text without letting one user collide with another's lock. Code outside
+  Estela that takes the same lock uses `ADVISORY_LOCK_KEY_SQL` with `[namespace, key]`. Postgres 11+.
+- A custom classifier must return exactly `'lock-timeout'`, `'deadlock'`, `'serialization'` or
+  `undefined`; anything else is treated as unclassified (no retry, original error rethrown).
+- Prefer `retry()` over a retry loop inside `TransactionPort.run`. If the port does re-run `work`,
+  the runner resets the claim, in-process locks and afterCommit callbacks per call.
+
+- Isolation: advisory locks protect step reads only under READ COMMITTED. The lock port throws
+  `SagaUsageError` in a REPEATABLE READ transaction (its snapshot predates the lock wait); opt out
+  with `allowSnapshotIsolation: true` only if steps never read what the lock guards. Under
+  SERIALIZABLE, retry on `'serialization'`.
+- Prisma: `classifyPostgresError` reads raw-query `meta.code` and maps the ORM-level `P2034`
+  (no SQLSTATE) to `deadlock`; list both `'deadlock'` and `'serialization'` in `retry.on`.
+  A bigint `versionColumn` is read from Prisma's `bigint` values. Prisma binds strings as `text`,
+  so a uuid id or an enum state column needs `idType: 'uuid'` / `stateType: 'schema.enum_name'`
+  on `postgresTransitionPort` (pg and TypeORM need neither).
+- Ledger: a retry policy on an idempotent saga needs a ledger that writes through `tx`.
+  `MemoryIdempotencyLedger` (`transactional = false`) is refused there with `SagaUsageError`.
+- `maxLocksPerUnit` (default 64) caps the lock requests of one unit: raise it deliberately for
+  batch keys, never from unbounded user input.
+
 ## Verify adoption
 
 - `moduleRef.get(ChannelRegistry).get('error.channel')` exists.

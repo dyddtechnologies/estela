@@ -538,7 +538,134 @@ await runner.run(complete, ctx, { correlationId });
 the key is claimed inside the first unit of work and the reply is stored inside the last one, so the
 ledger row commits together with the saga's writes, on every replica. A repeated key returns the
 stored reply; one whose first run is still going raises `IdempotencyInProgressError`. A failed run
-frees the key. `MemoryIdempotencyLedger` is for tests only: it is not atomic with any database.
+frees the key. `MemoryIdempotencyLedger` is for tests only: it is not atomic with any database, so
+it declares `transactional = false` and the runner refuses it on an idempotent saga with a retry
+policy (a rolled-back claim would survive and turn the retry into in-progress or a false replay).
+
+### Locks
+
+```ts
+const start = saga<StartCtx, EntityManager, StartReply>('start')
+  .lock('flow', (ctx) => ctx.flowId, 'shared')                               // Publish takes it 'exclusive'
+  .lock('flow-start', (ctx) => `${ctx.flowId}:${ctx.userId}`, 'exclusive', { timeoutMs: 2_000 })
+  .transaction('create-instance', createInstance)
+  .reply((ctx) => ctx.reply);
+
+const runner = new SagaRunner({
+  transactions: { run: typeOrmRun, classify: classifyPostgresError },
+  locks: postgresAdvisoryLockPort({ query: (m: EntityManager) => (s, p) => m.query(s, [...p]) }),
+});
+```
+
+A lock binds **forward** to the next `transaction` step; all locks of a unit of work are taken once,
+at its start, right after the idempotency claim, deduplicated (exclusive wins over shared) and in
+one canonical order, so two sagas never deadlock on each other's locks. `mode` is required. A lock
+not followed by a transaction step in the same unit (`.lock().outbound()`, a trailing `.lock()`) is
+a `SagaDefinitionError`. Keys are computed from `ctx` as it is when the unit starts; `keyOf` may
+return an array, and `undefined` is an error unless `{ optional: true }`. One unit may resolve at
+most 64 locks after dedupe (`SagaRunnerOptions.maxLocksPerUnit`): each Postgres advisory lock takes
+a slot in the server-wide shared lock table (`max_locks_per_transaction * max_connections`), so a
+key list taken from user input could otherwise exhaust it for every session. Locks are
+transaction-scoped: COMMIT or ROLLBACK releases them, and they never span an outbound step. A
+failed outbound's `compensate` re-acquires the same locks (`compensateLocks: 'none'` opts out).
+`postgresAdvisoryLockPort` maps `(namespace, key)` to one int8: the first 64 bits of SHA-256 over
+a length-prefixed encoding, so a key built partly from user input (a username) cannot be crafted to
+collide with someone else's lock (a 32-bit `hashtext` could be brute-forced offline). Code outside
+Estela that must take the same lock binds `[namespace, key]` to `ADVISORY_LOCK_KEY_SQL`. Postgres
+11+.
+
+**Isolation level.** A lock protects what a step *reads* only under READ COMMITTED, where every
+statement takes a fresh snapshot after the lock is granted. Under REPEATABLE READ the snapshot is
+taken by the first statement of the transaction, before the lock wait, so a read-then-insert
+check still sees pre-wait data: `postgresAdvisoryLockPort` throws `SagaUsageError` there unless
+`allowSnapshotIsolation: true` (for steps that never read what the lock protects). Under
+SERIALIZABLE the same race surfaces as `40001`: add `'serialization'` to `retry.on`.
+
+### Retry
+
+```ts
+.retry({ on: ['deadlock', 'lock-timeout', 'serialization'], attempts: 3, backoffMs: 20 })
+```
+
+Only a failed unit of work is re-run; it is atomic, so that is safe. Committed units and outbound
+steps are never re-run. `attempts` counts every attempt including the first (1..20); the backoff is
+exponential (`maxBackoffMs` defaults to `backoffMs * 32`) with `'full'` jitter by default. Before
+each unit the runner snapshots `ctx` with `structuredClone` and restores it in place before a
+retry; a ctx holding class instances or functions, symbol-keyed or non-enumerable properties, or a
+frozen root with mutable children cannot be snapshotted that way (`SagaUsageError`), so pass
+`checkpoint: (ctx) => restoreThunk` instead. Do the same for a class-instance ctx that keeps state
+in `#private` fields: the clone cannot see them. A failing checkpoint fails the run (before any
+transaction) only for the first unit; a later unit (after a commit or an outbound call, including a
+compensation and the ledger record) still runs, once and without retry, and the failure is logged
+at error level. The policy is re-validated by `run()`, so a hand-built `SagaDefinition` gets the
+same bounds as `.retry()`. The idempotency claim is redone on every attempt. A
+`TransactionPort` that re-runs `work` itself (its own retry on 40001) is handled the same way: each
+call gets a fresh claim, fresh in-process locks and no callbacks from the rolled-back call, and
+ctx is restored when the saga has a retry policy. A
+classifier is required for database kinds (`TransactionPort.classify` or `classifyError`), so the
+error identity only changes when you opt in: exhausted or unlisted kinds throw `LockTimeoutError`,
+`DeadlockError` or `SerializationError` (all `ConcurrencyError`, with `cause`, `saga`, `unit`,
+`attempts`). Their message holds only the kind, saga, unit and attempts; the driver error (table
+and constraint names) stays in `cause`, so do not send `cause` to clients. A classifier result
+other than `'lock-timeout'`, `'deadlock'` or `'serialization'` (a typo, `'stale-state'`) counts as
+unclassified: the original error is rethrown. `IdempotencyInProgressError`,
+`IllegalTransitionError`, `TransitionOutcomeUnknownError` and `SagaUsageError` are never retried or
+wrapped, whatever the classifier says. Map them to 503 + `Retry-After`, and `StaleStateError` to
+409.
+
+### afterCommit
+
+Transaction steps receive a third argument: `(ctx, tx, unit) => unit.afterCommit(() => cache.del(key))`.
+A 2-argument step is still accepted, but `unit` is required on the call side of
+`TransactionStep`: code that calls a stored step or `options.compensate` itself must forward
+`unit` (`(ctx, tx, unit) => inner(ctx, tx, unit)`), and a wrapper that drops it is a compile error
+instead of an `undefined` dereference at run time. In unit tests, pass `testUnitOfWork()` from
+`@estela/nest/testing` and call `unit.commit()` to run the callbacks.
+Callbacks run in registration order only after that unit of work commits, before the next step and
+before `run()` resolves; callbacks of a rolled-back or retried attempt are discarded. A failing
+callback cannot un-commit: it is logged at error level (`HopLogger.hopError`, or a Nest `Logger`)
+and passed to `onAfterCommitError`, and the saga still succeeds. It is not durable (use an outbox
+for effects that must happen) and it does not close reader/cache races on its own: use versioned
+cache keys or a TTL.
+
+### State machine with `transition()`
+
+```ts
+const Instance = defineStateMachine('instance', {
+  PENDING: ['RUNNING', 'CANCELLED'], RUNNING: ['DONE', 'FAILED'], DONE: [], FAILED: [], CANCELLED: [],
+});
+const instances = postgresTransitionPort({ query: (m: EntityManager) => (s, p) => m.query(s, [...p]),
+  table: 'instances', stateColumn: 'status', versionColumn: 'version' });
+
+.transaction('start', async (ctx, tx) => {
+  await transition(Instance, instances, tx, { id: ctx.id, to: 'RUNNING' });
+})
+```
+
+`transition` throws `IllegalTransitionError` before touching the database, then runs one
+`UPDATE ... WHERE id = $2 AND state = ANY($3) [AND version = $4]` (version bumped) and requires
+`affected === 1`. `0` is `StaleStateError`: the row moved under you, never a silent success.
+Anything that is not an exact integer 0 or 1 (`undefined`, `null`, `"1"`, `2`) is
+`TransitionOutcomeUnknownError`: adapt the driver result in your query function. States are typed
+from the machine only, so a misspelled `to` or `from` is a compile error. A `versionColumn` may be
+int4 or int8 (string from pg, `bigint` from Prisma); a version that is not a safe integer throws
+rather than being dropped. The Postgres
+adapters need no `pg` dependency: they take `query: (tx) => (sql, params) => Promise<rows | { rows }>`
+(pg: `(c) => (s, p) => c.query(s, [...p])`; Prisma: `(tx) => (s, p) => tx.$queryRawUnsafe(s, ...p)`).
+Identifiers are validated and quoted, values are always bound, locks use
+`pg_advisory_xact_lock[_shared](int8)` (see Locks) with a parameterized local
+`lock_timeout`, and `classifyPostgresError` maps SQLSTATE `55P03` / `40P01` / `40001` (pg `code`,
+TypeORM `driverError.code`, Prisma raw-query `meta.code`). Prisma's ORM-level `P2034` ("write
+conflict or a deadlock") has no SQLSTATE and is mapped to `deadlock`; with Prisma list both
+`'deadlock'` and `'serialization'` in `retry.on`. Prisma also binds a JS string as `text` (pg and
+TypeORM leave parameters untyped for Postgres to infer), so with Prisma a non-text id or state
+column needs its type: `idType: 'uuid'`, `stateType: 'app.status_enum'` (validated, quoted, bound as
+`$n::text::type`).
+
+Rules of thumb: a lock protects a unit of work, a state machine protects a saga (move to a PENDING
+state with CAS before an outbound call); transaction steps only touch the database, because a retry
+re-runs them; never swallow a database error inside a step (Postgres turns the COMMIT into a silent
+ROLLBACK); `TransactionPort.run` must open a new top-level transaction, never join an ambient one.
 
 ## Observability
 
@@ -633,6 +760,11 @@ bindFlow(PlaceOrderFlow, registry, { idempotency: new IdempotencyService({ store
 await registry.send('orders.place', { qty: 2, sku: 'A' });
 const reply = await waitFor(registry, 'reply.http-1', 2_000);
 ```
+
+Saga helpers: `MemoryLockPort` (in-process, NOT cross-process), `MemoryTransitionPort`, and
+`testUnitOfWork()` to call a transaction step directly. The published type declarations stay
+parseable by TypeScript 4.9 (no TS 5-only syntax such as `const` type parameters; checked by
+`test/dist-typescript4.spec.ts`).
 
 ## Status
 

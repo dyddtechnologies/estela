@@ -1,7 +1,6 @@
 /**
- * @dyddtechnologies/estela/testing — subpath publico de testing (spec sec.14).
- * Rule (enforzada por dependency-cruiser): Never importa de src/inbound
- * ni src/adapters.
+ * @estela/nest/testing: public testing subpath (spec sec.14).
+ * Rule (enforced by dependency-cruiser): never imports from src/inbound or src/adapters.
  */
 import { awaitFirstMessage } from '../channels/one-shot';
 import type { Unsubscribe } from '../channel';
@@ -12,8 +11,11 @@ import { FlowExecutor, type FlowDeps, type FlowIdempotencyPort } from '../flow/f
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
 
 export { MemoryIdempotencyStore };
+export { MemoryLockPort } from './memory-lock-port';
+export { MemoryTransitionPort } from './memory-transition-port';
+export { testUnitOfWork, type TestUnitOfWork } from './test-unit-of-work';
 
-/** Alias semantico del spec sec.14 — mismas invariants que `createMessage`. */
+/** Semantic alias from spec sec.14: same invariants as `createMessage`. */
 export function createTestMessage<T>(
   payload: T,
   headers?: MessageHeadersInit,
@@ -29,8 +31,8 @@ export interface BindFlowOptions {
 }
 
 /**
- * `bindFlow(flow, registry)` (spec sec.14): asegura error.channel y channel source,
- * builds el executor con defaults y lo subscribes al channel source.
+ * `bindFlow(flow, registry)` (spec sec.14): ensures error.channel and the source channel,
+ * builds the executor with defaults and subscribes it to the source channel.
  */
 export function bindFlow(
   definition: FlowDefinition,
@@ -58,7 +60,7 @@ export function bindFlow(
   return executor;
 }
 
-/** `waitFor(channel, timeout)` (spec sec.14): primer message del channel o throw. */
+/** `waitFor(channel, timeout)` (spec sec.14): first message of the channel, or throw. */
 export async function waitFor(
   registry: ChannelRegistry,
   channel: string,
@@ -71,7 +73,7 @@ export async function waitFor(
   });
 }
 
-/** Helper extra: subscription de coleccion para asserts deterministas. */
+/** Extra helper: collecting subscription for deterministic asserts. */
 export function collect<T = unknown>(
   registry: ChannelRegistry,
   channel: string,

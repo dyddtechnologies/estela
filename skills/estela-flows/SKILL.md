@@ -45,6 +45,36 @@ pipeline; `reply()` does not (put it before `to`, or last without `to`).
 - Return value + `replyChannel` present → wrapper auto-replies (this is the jump protocol).
 - Idempotent scope: `activator:Class.method`; duplicate with cached result → re-send cached.
 
+## Sagas (units of work across a database and the outside world)
+
+```ts
+saga<Ctx, Tx, Reply>('start')
+  .idempotent((c) => c.key)
+  .lock('flow', (c) => c.flowId, 'shared')                         // binds to the NEXT transaction
+  .lock('flow-start', (c) => `${c.flowId}:${c.userId}`, 'exclusive') // per-user, not a global mutex
+  .transaction('create', async (c, tx, unit) => {
+    await transition(Instance, instances, tx, { id: c.id, to: 'RUNNING' }); // CAS, never a plain UPDATE
+    unit.afterCommit(() => cache.del(c.id));                        // only after COMMIT
+  })
+  .outbound('notify', (c) => api.notify(c), { compensate: undo })   // never inside a tx, never retried
+  .retry({ on: ['deadlock', 'lock-timeout', 'serialization'], attempts: 3, backoffMs: 20 })
+  .reply((c) => c.reply);
+```
+
+- Consecutive `transaction` steps = one unit of work. Locks are taken once at its start (after the
+  idempotency claim), deduplicated and canonically ordered; `.lock()` before an `outbound` or at the
+  end is a `SagaDefinitionError`. `mode` is required: pick `shared` unless you mutate the guarded thing.
+- `retry` re-runs only the failed unit, with `ctx` restored (`structuredClone`, or `checkpoint`
+  for class instances, `#private` fields, symbol or non-enumerable keys, or a frozen root with
+  mutable children; the default refuses those with `SagaUsageError` instead of skipping them). It needs a classifier (`TransactionPort.classify`). A ctx that becomes
+  uncloneable after the first unit does not block compensation or the ledger record: that unit
+  runs once, without retry, and the checkpoint error is logged.
+- A saga started from inside a unit of work is rejected when either side uses locks or retry.
+- `TransactionStep` takes `(ctx, tx, unit)`; a 2-argument implementation is fine, but code that
+  calls a stored step or a `compensate` must forward `unit` (dropping it is a compile error).
+- A lock protects a unit of work; a state machine + `transition()` protects the whole saga.
+- Steps only touch the database (retries re-run them) and never swallow database errors.
+
 ## Anti-patterns (reject in review)
 
 - Importing business classes from a flow (flows are strings + functions only).

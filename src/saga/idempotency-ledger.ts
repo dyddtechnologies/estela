@@ -7,6 +7,13 @@ export type LedgerClaim =
   { status: 'new' } | { status: 'replay'; response: unknown } | { status: 'in-progress' };
 
 export interface IdempotencyLedger<Tx = unknown> {
+  /**
+   * false: claim/record/release ignore `tx`, so they survive a rollback. The runner then refuses
+   * a retry policy on an idempotent saga, because attempt 2 would see its own rolled-back claim
+   * (in-progress) or a reply whose writes never committed (false replay). Undefined counts as
+   * true: a production ledger writes through `tx`.
+   */
+  readonly transactional?: boolean;
   /** Takes `key` in this transaction, or reports the stored response / an unfinished first run. */
   claim(tx: Tx, scope: string, key: string): Promise<LedgerClaim>;
   /** Stores the response of the run that took `key`. */
@@ -34,8 +41,10 @@ interface LedgerEntry {
 /**
  * In-process ledger for tests and single-process apps. It ignores the transaction handle, so it is
  * NOT atomic with the app's database: production code uses a ledger backed by the same database.
+ * Not transactional, so it cannot be combined with a retry policy (SagaUsageError at run()).
  */
 export class MemoryIdempotencyLedger<Tx = unknown> implements IdempotencyLedger<Tx> {
+  readonly transactional = false;
   private readonly entries = new Map<string, LedgerEntry>();
 
   claim(_tx: Tx, scope: string, key: string): Promise<LedgerClaim> {

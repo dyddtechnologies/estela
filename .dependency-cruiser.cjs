@@ -35,6 +35,31 @@ module.exports = {
       from: { path: '^src/testing/' },
       to: { path: '^src/(inbound|adapters)[\\/]' },
     },
+    {
+      name: 'saga-postgres-no-npm',
+      comment:
+        'Spec SAGA_CONCURRENCY sec.3: the Postgres saga adapters take a query function from the app ' +
+        'and import no npm package, so the main barrel can export them.',
+      severity: 'error',
+      from: { path: '^src/saga/postgres/' },
+      to: {
+        dependencyTypes: [
+          'npm',
+          'npm-dev',
+          'npm-optional',
+          'npm-peer',
+          'npm-no-pkg',
+          'npm-unknown',
+        ],
+      },
+    },
+    {
+      name: 'src-no-pg',
+      comment: 'pg is a devDependency for the gated integration tests only; src never imports it.',
+      severity: 'error',
+      from: { path: '^src/' },
+      to: { path: 'node_modules[\\/](pg|pg-[^\\/]+|@types[\\/]pg)[\\/]' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

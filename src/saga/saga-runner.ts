@@ -1,12 +1,35 @@
+import { randomInt } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createMessage, type MessageHeaders } from '../message';
 import type { HopLogger } from '../trace/hop-logger';
+import { SagaUsageError, type ErrorClassifier } from './concurrency-errors';
 import {
   IdempotencyInProgressError,
   type IdempotencyLedger,
   type LedgerClaim,
 } from './idempotency-ledger';
+import type { LockPort, LockRequest } from './lock-port';
+import type { RetryPolicy } from './retry-policy';
 import type { SagaDefinition, SagaStep, TransactionStep } from './saga';
+import { validateLockDeclaration, validateRetryPolicy } from './saga-definition';
+import { SagaTracer } from './saga-tracer';
+import {
+  declaresLocks,
+  DEFAULT_MAX_LOCKS_PER_UNIT,
+  resolveLocks,
+  segmentsOf,
+  type TransactionSegment,
+} from './segments';
 import type { TransactionPort } from './transaction-port';
+import {
+  UnitOfWorkExecutor,
+  unitOfWorkScope,
+  type AfterCommitErrorInfo,
+  type RunState,
+  type UnitPlan,
+} from './unit-of-work';
+
+export type { AfterCommitErrorInfo } from './unit-of-work';
 
 export interface SagaRunnerOptions<Tx> {
   transactions: TransactionPort<Tx>;
@@ -14,33 +37,38 @@ export interface SagaRunnerOptions<Tx> {
   ledger?: IdempotencyLedger<Tx>;
   /** Optional hop logging: one line per saga and per step, like flows. */
   logger?: HopLogger;
+  /** Required when a definition declares locks (SagaUsageError at run(), before any tx). */
+  locks?: LockPort<Tx>;
+  /** Overrides transactions.classify. Order: Estela typed errors, then this, then transactions.classify. */
+  classifyError?: ErrorClassifier;
+  /** Called when an afterCommit callback throws; its own throw is caught and logged. */
+  onAfterCommitError?: (error: unknown, info: AfterCommitErrorInfo) => void;
+  /** Most lock requests one unit of work may resolve (after dedupe); default 64. Above it the run
+   *  fails with SagaUsageError before the transaction: every Postgres advisory lock takes a slot
+   *  in the server-wide shared lock table. */
+  maxLocksPerUnit?: number;
+  /** Test seam; default node:timers/promises setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Test seam; default node:crypto randomInt. */
+  random?: (maxExclusive: number) => number;
 }
 
 export interface SagaRunOptions {
   correlationId?: string;
 }
 
-type Segment<Ctx, Tx> =
-  | { kind: 'transaction'; steps: { name: string; run: TransactionStep<Ctx, Tx> }[] }
-  | { kind: 'outbound'; step: Extract<SagaStep<Ctx, Tx>, { kind: 'outbound' }> };
+type OutboundSagaStep<Ctx, Tx> = Extract<SagaStep<Ctx, Tx>, { kind: 'outbound' }>;
 
-/** Groups consecutive transaction steps: each group is one unit of work. */
-function segmentsOf<Ctx, Tx>(steps: readonly SagaStep<Ctx, Tx>[]): Segment<Ctx, Tx>[] {
-  const segments: Segment<Ctx, Tx>[] = [];
-  for (const step of steps) {
-    const last = segments[segments.length - 1];
-    if (step.kind === 'outbound') segments.push({ kind: 'outbound', step });
-    else if (last?.kind === 'transaction') last.steps.push(step);
-    else segments.push({ kind: 'transaction', steps: [step] });
-  }
-  return segments;
+interface RunContext<Ctx, Tx, Reply> {
+  definition: SagaDefinition<Ctx, Tx, Reply>;
+  /** The definition's policy, re-validated at run(): a definition may be a plain object. */
+  retry: Readonly<RetryPolicy<Ctx>> | undefined;
+  ctx: Ctx;
+  state: RunState<Reply>;
+  headers: MessageHeaders;
 }
 
-interface RunState<Reply> {
-  key?: string;
-  claimed: boolean;
-  replay?: { response: Reply };
-}
+const DATABASE_KINDS = ['lock-timeout', 'deadlock', 'serialization'];
 
 /**
  * Runs saga definitions against the app's transaction port. One run walks its segments in order:
@@ -51,21 +79,49 @@ interface RunState<Reply> {
  * the last one when the saga ends with a transaction segment (otherwise in a short extra one), so
  * the ledger row and the saga's writes commit together. A failure after an outbound step has
  * succeeded is not compensated, because its external effect already happened.
+ *
+ * Concurrency: inside every unit of work the claim comes first, then all locks of the unit in
+ * canonical order, then the steps. Under a retry policy a failed unit of work is re-run with ctx
+ * and the claim state restored; a committed unit and an outbound step are never re-run.
  */
 export class SagaRunner<Tx = unknown> {
-  constructor(private readonly options: SagaRunnerOptions<Tx>) {}
+  private readonly tracer: SagaTracer;
+  private readonly units: UnitOfWorkExecutor<Tx>;
+
+  private readonly maxLocksPerUnit: number;
+
+  constructor(private readonly options: SagaRunnerOptions<Tx>) {
+    const max = options.maxLocksPerUnit ?? DEFAULT_MAX_LOCKS_PER_UNIT;
+    if (!Number.isSafeInteger(max) || max < 1) {
+      throw new TypeError(`maxLocksPerUnit must be a positive integer, got ${String(max)}`);
+    }
+    this.maxLocksPerUnit = max;
+    this.tracer = new SagaTracer(options.logger);
+    this.units = new UnitOfWorkExecutor<Tx>({
+      transactions: options.transactions,
+      tracer: this.tracer,
+      sleep: options.sleep ?? ((ms) => delay(ms)),
+      random: options.random ?? ((max) => randomInt(max)),
+      ...(options.locks === undefined ? {} : { locks: options.locks }),
+      ...(options.classifyError === undefined ? {} : { classifyError: options.classifyError }),
+      ...(options.onAfterCommitError === undefined
+        ? {}
+        : { onAfterCommitError: options.onAfterCommitError }),
+    });
+  }
 
   async run<Ctx, Reply>(
     definition: SagaDefinition<Ctx, Tx, Reply>,
     ctx: Ctx,
     runOptions: SagaRunOptions = {},
   ): Promise<Reply> {
+    const retry = this.assertRunnable(definition);
     const headers = this.traceHeaders(runOptions);
     const channel = `saga:${definition.name}`;
     const started = Date.now();
     this.options.logger?.flowStart(definition.name, channel, headers);
     try {
-      const reply = await this.walk(definition, ctx, headers);
+      const reply = await this.walk(definition, retry, ctx, headers);
       this.options.logger?.flowEnd(
         definition.name,
         channel,
@@ -86,42 +142,134 @@ export class SagaRunner<Tx = unknown> {
     }
   }
 
+  /** Fail-fast misuse checks, before any transaction starts. Returns the validated policy. */
+  private assertRunnable<Ctx, Reply>(
+    definition: SagaDefinition<Ctx, Tx, Reply>,
+  ): Readonly<RetryPolicy<Ctx>> | undefined {
+    const retry =
+      definition.retry === undefined
+        ? undefined
+        : validateRetryPolicy(definition.name, definition.retry);
+    const hasLocks = this.assertLocks(definition);
+    const scope = unitOfWorkScope.getStore();
+    if (
+      scope !== undefined &&
+      (scope.holdsLocks || scope.retries || hasLocks || retry !== undefined)
+    ) {
+      throw new SagaUsageError(
+        `saga "${definition.name}" started inside a unit of work that holds locks or uses retry`,
+      );
+    }
+    if (retry !== undefined) this.assertRetryable(definition, retry);
+    return retry;
+  }
+
+  /** Re-validates lock declarations (a definition may be a plain object). True when any exists. */
+  private assertLocks<Ctx, Reply>(definition: SagaDefinition<Ctx, Tx, Reply>): boolean {
+    for (const step of definition.steps) {
+      if (step.kind !== 'transaction') continue;
+      for (const lock of step.locks ?? []) {
+        validateLockDeclaration(
+          definition.name,
+          lock.namespace,
+          lock.keyOf,
+          lock.mode,
+          lock.timeoutMs,
+        );
+      }
+    }
+    const hasLocks = declaresLocks(definition.steps);
+    if (hasLocks && this.options.locks === undefined) {
+      throw new SagaUsageError(
+        `saga "${definition.name}" declares locks but the runner has no LockPort (options.locks)`,
+      );
+    }
+    return hasLocks;
+  }
+
+  private assertRetryable<Ctx, Reply>(
+    definition: SagaDefinition<Ctx, Tx, Reply>,
+    retry: Readonly<RetryPolicy<Ctx>>,
+  ): void {
+    const needsClassifier = retry.on.some((kind) => DATABASE_KINDS.includes(kind));
+    const hasClassifier =
+      this.options.classifyError !== undefined || this.options.transactions.classify !== undefined;
+    if (needsClassifier && !hasClassifier) {
+      throw new SagaUsageError(
+        `saga "${definition.name}" retries database errors but no classifier is configured (transactions.classify or classifyError)`,
+      );
+    }
+    // A claim that survives a rollback would turn attempt 2 into in-progress or a false replay.
+    if (definition.idempotencyKey !== undefined && this.options.ledger?.transactional === false) {
+      throw new SagaUsageError(
+        `saga "${definition.name}" uses retry with a ledger that is not transactional (e.g. MemoryIdempotencyLedger); use a ledger bound to the transaction`,
+      );
+    }
+  }
+
   private async walk<Ctx, Reply>(
     definition: SagaDefinition<Ctx, Tx, Reply>,
+    retry: Readonly<RetryPolicy<Ctx>> | undefined,
     ctx: Ctx,
     headers: MessageHeaders,
   ): Promise<Reply> {
     const segments = segmentsOf(definition.steps);
     const key = this.options.ledger === undefined ? undefined : definition.idempotencyKey?.(ctx);
     const state: RunState<Reply> = key === undefined ? { claimed: false } : { key, claimed: false };
+    const run: RunContext<Ctx, Tx, Reply> = { definition, retry, ctx, state, headers };
     let reply: { value: Reply } | undefined;
+    let lastLocks: readonly LockRequest[] = [];
 
     for (const [index, segment] of segments.entries()) {
-      const isLast = index === segments.length - 1;
       if (segment.kind === 'outbound') {
-        await this.runOutbound(definition, segment.step, ctx, state, headers);
+        await this.runOutbound(run, segment.step, lastLocks, index);
         continue;
       }
-      reply = await this.runUnitOfWork(definition, segment.steps, ctx, state, headers, isLast);
+      const locks = resolveLocks(definition.name, segment.locks, ctx, this.maxLocksPerUnit);
+      lastLocks = locks;
+      const isLast = index === segments.length - 1;
+      reply = await this.runUnitOfWork(run, segment, locks, index, isLast);
       if (state.replay !== undefined) return state.replay.response;
     }
     if (reply !== undefined) return reply.value;
-    return this.finishAfterOutbound(definition, ctx, state);
+    return this.finishAfterOutbound(run);
+  }
+
+  /** `beforeAnyEffect`: no unit committed and no outbound step ran yet (tx#0, the first claim). */
+  private plan<Ctx, Reply>(
+    run: RunContext<Ctx, Tx, Reply>,
+    label: string,
+    locks: readonly LockRequest[],
+    beforeAnyEffect = false,
+  ): UnitPlan<Ctx> {
+    return {
+      saga: run.definition.name,
+      ctx: run.ctx,
+      state: run.state,
+      headers: run.headers,
+      label,
+      locks,
+      retry: run.retry,
+      strictCheckpoint: beforeAnyEffect,
+    };
   }
 
   private async runUnitOfWork<Ctx, Reply>(
-    definition: SagaDefinition<Ctx, Tx, Reply>,
-    steps: { name: string; run: TransactionStep<Ctx, Tx> }[],
-    ctx: Ctx,
-    state: RunState<Reply>,
-    headers: MessageHeaders,
+    run: RunContext<Ctx, Tx, Reply>,
+    segment: TransactionSegment<Ctx, Tx>,
+    locks: readonly LockRequest[],
+    index: number,
     isLast: boolean,
   ): Promise<{ value: Reply } | undefined> {
-    return this.options.transactions.run(async (tx) => {
+    const { definition, ctx, state, headers } = run;
+    const plan = this.plan(run, `tx#${index}`, locks, index === 0);
+    return this.units.execute(plan, async (tx, unit, acquire) => {
+      // Claim first: a replay or an in-progress duplicate never takes or waits on a lock.
       if (!(await this.claimOnce(definition.name, tx, state))) return undefined;
-      for (const step of steps) {
-        await this.traced(definition.name, `transaction:${step.name}`, headers, () =>
-          step.run(ctx, tx),
+      await acquire();
+      for (const step of segment.steps) {
+        await this.tracer.traced(definition.name, `transaction:${step.name}`, headers, () =>
+          step.run(ctx, tx, unit),
         );
       }
       if (!isLast) return undefined;
@@ -132,49 +280,55 @@ export class SagaRunner<Tx = unknown> {
   }
 
   private async runOutbound<Ctx, Reply>(
-    definition: SagaDefinition<Ctx, Tx, Reply>,
-    step: Extract<SagaStep<Ctx, Tx>, { kind: 'outbound' }>,
-    ctx: Ctx,
-    state: RunState<Reply>,
-    headers: MessageHeaders,
+    run: RunContext<Ctx, Tx, Reply>,
+    step: OutboundSagaStep<Ctx, Tx>,
+    lastLocks: readonly LockRequest[],
+    index: number,
   ): Promise<void> {
+    const { definition, ctx, state, headers } = run;
     if (state.key !== undefined && !state.claimed) {
       // A saga that opens with an outbound step still claims its key before calling out.
-      await this.options.transactions.run((tx) => this.claimOnce(definition.name, tx, state));
+      await this.units.execute(this.plan(run, `claim#${index}`, [], index === 0), (tx) =>
+        this.claimOnce(definition.name, tx, state),
+      );
       if (state.replay !== undefined) return;
     }
     try {
-      await this.traced(definition.name, `outbound:${step.name}`, headers, () => step.run(ctx));
+      await this.tracer.traced(definition.name, `outbound:${step.name}`, headers, () =>
+        step.run(ctx),
+      );
     } catch (error) {
-      await this.compensate(definition.name, step.compensate, ctx, state);
+      const locks = step.compensateLocks === 'none' ? [] : lastLocks;
+      await this.compensate(run, step.compensate, locks, `compensate#${index}`);
       throw error;
     }
   }
 
   private async compensate<Ctx, Reply>(
-    sagaName: string,
+    run: RunContext<Ctx, Tx, Reply>,
     compensate: TransactionStep<Ctx, Tx> | undefined,
-    ctx: Ctx,
-    state: RunState<Reply>,
+    inheritedLocks: readonly LockRequest[],
+    label: string,
   ): Promise<void> {
+    const { definition, ctx, state } = run;
     if (compensate === undefined && !state.claimed) return;
-    await this.options.transactions.run(async (tx) => {
-      if (compensate !== undefined) await compensate(ctx, tx);
+    // Locks protect the compensation's own writes; a bare ledger release needs none.
+    const locks = compensate === undefined ? [] : inheritedLocks;
+    await this.units.execute(this.plan(run, label, locks), async (tx, unit, acquire) => {
+      await acquire();
+      if (compensate !== undefined) await compensate(ctx, tx, unit);
       if (state.claimed && state.key !== undefined) {
-        await this.options.ledger?.release(tx, sagaName, state.key);
+        await this.options.ledger?.release(tx, definition.name, state.key);
       }
     });
   }
 
-  private async finishAfterOutbound<Ctx, Reply>(
-    definition: SagaDefinition<Ctx, Tx, Reply>,
-    ctx: Ctx,
-    state: RunState<Reply>,
-  ): Promise<Reply> {
+  private async finishAfterOutbound<Ctx, Reply>(run: RunContext<Ctx, Tx, Reply>): Promise<Reply> {
+    const { definition, ctx, state } = run;
     if (state.replay !== undefined) return state.replay.response;
     const value = definition.reply(ctx);
     if (state.claimed) {
-      await this.options.transactions.run((tx) =>
+      await this.units.execute(this.plan(run, 'record', []), (tx) =>
         this.recordIfClaimed(definition.name, tx, state, value),
       );
     }
@@ -207,24 +361,6 @@ export class SagaRunner<Tx = unknown> {
   ): Promise<void> {
     if (state.claimed && state.key !== undefined) {
       await this.options.ledger?.record(tx, sagaName, state.key, value);
-    }
-  }
-
-  private async traced(
-    sagaName: string,
-    target: string,
-    headers: MessageHeaders,
-    work: () => Promise<void> | void,
-  ): Promise<void> {
-    const channel = `saga:${sagaName}`;
-    const started = Date.now();
-    this.options.logger?.hopStart(channel, target, headers);
-    let ok = false;
-    try {
-      await work();
-      ok = true;
-    } finally {
-      this.options.logger?.hopEnd(channel, target, headers, ok, Date.now() - started);
     }
   }
 

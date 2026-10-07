@@ -22,6 +22,15 @@ Reject the PR if ANY of these fail:
       importing amqplib/@grpc/grpc-js; `/testing` importing inbound/adapters.
 - [ ] New switch-case instead of a registered factory/strategy (OCP violation: channels,
       transports, mappers, stores are maps).
+- [ ] Saga using `SELECT ... FOR UPDATE` (or an exclusive lock) on a shared row as a global
+      mutex for a per-user/per-entity invariant: lock the narrowest key, `shared` for readers.
+- [ ] State changes written as a plain UPDATE instead of `transition()` (compare-and-set), or code
+      that trusts a falsy/undefined update result as "no change": 0 rows must be `StaleStateError`.
+- [ ] Non-database side effects (HTTP, cache, events) inside a saga `transaction` step: retries
+      re-run them. Use `unit.afterCommit` (not durable) or an outbox, or an `outbound` step.
+- [ ] A database error caught and swallowed inside a step (Postgres then turns COMMIT into ROLLBACK).
+- [ ] Advisory locks used to protect a read-then-write check in a REPEATABLE READ transaction (the
+      snapshot predates the lock wait): use READ COMMITTED, or SERIALIZABLE + retry on serialization.
 - [ ] Missing tests for the touched invariant (error semantics + precedence always have tests).
 
 Approve checklist: `npm run verify` green · invariants intact · graph/`describe()` updated
