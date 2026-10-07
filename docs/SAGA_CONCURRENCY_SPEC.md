@@ -43,6 +43,12 @@ With retry it becomes a real bug. Attempt 2 would skip the claim because `claime
 
 **Fix.** Treat `RunState` as tentative per attempt: copy `{ claimed, replay }` before each attempt and restore the copy when the attempt fails. A regression test covers this (test U5a).
 
+### 1.1 Ledgers the rollback cannot reach (D33)
+
+The fix above assumes the claim row rolled back with the attempt. A ledger with `transactional === false` (`MemoryIdempotencyLedger`) ignores `tx`, so its entry survives: a step failure left the key `pending` forever (every client retry got `IdempotencyInProgressError`), and a COMMIT failure after `record` left it `applied` with a reply whose writes never committed (every client retry got a false replay). Both are "a retry reusing an entry of a partial failure".
+
+**Fix.** When the call that took the claim fails (a thrown step, a failed COMMIT, or a call the port re-invokes), the runner frees the key through `ledger.release(tx, saga, key)` with that call's handle, which such a ledger ignores. `UnitPlan.releaseClaim` carries the hook and the runner sets it only when `ledger.transactional === false` and the run has a key; a transactional ledger gets `undefined`, because its rollback already did it and a `release` on a rolled-back handle would fail. The release covers only the call that took the claim: a failure after a successful outbound keeps the key claimed, as in 0.8.0 (R10). A failing release is reported at error level (`ledger-release:<unit>`) and never replaces the attempt's own error. `MemoryIdempotencyLedger` models the entry as `pending` (claim to record) or `applied` (recorded); `release` deletes it, and `statusOf(scope, key)` exposes the state for tests. D22 (no retry policy with such a ledger) stays, see section 2.5. Tests U30.
+
 ## 2. Public API
 
 All new files sit under `src/saga/` and import nothing from npm. Every comment is English and ASCII-only (`scripts/check-comments-en.cjs`), so comments must not contain arrows or em-dashes.
@@ -241,9 +247,9 @@ export interface AfterCommitErrorInfo { saga: string; unit: string; index: numbe
 - `definition.retry` and every lock declaration are re-validated with the builder's rules (`SagaDefinitionError`). `SagaDefinition` is a public plain interface, so a hand-built or spread definition must not bypass `attempts` 1..20, the kind list or the integer backoff (an `attempts: Infinity` policy would otherwise hot-loop against the database). The runner uses the validated, frozen copy.
 - the definition declares any lock and `options.locks` is undefined: `SagaUsageError`;
 - `definition.retry.on` contains a database kind (`lock-timeout`, `deadlock` or `serialization`), and neither `classifyError` nor `transactions.classify` is set: `SagaUsageError`. Without a classifier the retry would silently never fire. A policy whose `on` is only `['stale-state']` needs no classifier.
-- the definition has a retry policy and an idempotency key, and `options.ledger.transactional === false`: `SagaUsageError`. Section 1's fix assumes the claim rolls back with the attempt; a ledger that ignores `tx` (`MemoryIdempotencyLedger`) keeps it, so attempt 2 would see `in-progress`, or a `replay` of a reply whose writes never committed (a commit-time failure after `record`).
+- the definition has a retry policy and an idempotency key, and `options.ledger.transactional === false`: `SagaUsageError`. Such a ledger is not atomic with the database: between `record` and a failing COMMIT a concurrent duplicate can replay a reply whose writes never committed, and the release of section 1.1 only closes that window after the fact. A ledger that belongs to tests and single-process tools must not be combined with a production retry path (D22).
 
-**`IdempotencyLedger.transactional?: boolean`** (additive, optional). `false` declares that claim/record/release ignore `tx`; undefined counts as `true`. `MemoryIdempotencyLedger` sets `false`.
+**`IdempotencyLedger.transactional?: boolean`** (additive, optional). `false` declares that claim/record/release ignore `tx`; undefined counts as `true`. `MemoryIdempotencyLedger` sets `false`, and the runner then frees a claim whose call rolled back (section 1.1). `MemoryIdempotencyLedger.statusOf(scope, key)` returns `'pending' | 'applied' | undefined`.
 
 ### 2.6 `trace/hop-logger.ts` (one additive method)
 
@@ -395,11 +401,12 @@ export function postgresTransitionPort<Tx>(options: PostgresTransitionPortOption
 
 Every value is bound as a parameter. Only transaction-scoped `_xact_` functions are used.
 
-1. Compute physical identities, and read the isolation level, in one round trip:
+1. Compute physical identities, read the isolation level, and set the transaction probe, in one round trip:
    ```sql
    SELECT l.i::int AS i,
           ('x' || left(encode(sha256(convert_to(length(l.n) || ':' || l.n || l.k, 'UTF8')), 'hex'), 16))::bit(64)::int8::text AS h,
-          current_setting('transaction_isolation') AS iso
+          current_setting('transaction_isolation') AS iso,
+          set_config('estela.unit_of_work', 'open', true) AS probe
    FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS l(n, k, i)
    ```
    The identity is one int8: the first 64 bits of SHA-256 over `length(n) || ':' || n || k`. The length prefix makes the encoding injective (no `("a:b", "c")` / `("a", "b:c")` aliasing), and SHA-256 makes a targeted collision cost about 2^64 work. The earlier `(hashtext(n), hashtext(k))` identity let anyone who controls part of a key (a username) brute-force a 32-bit `hashtext` collision with another user's key offline, then hold that user's lock (targeted denial of service). The key is returned as text so pg, TypeORM and Prisma all read it the same way; the client parses it as a decimal int8 and rejects anything else (`UnexpectedQueryResultError`). Needs Postgres 11+ (`sha256`). `ADVISORY_LOCK_KEY_SQL` exports the same expression over `$1::text`, `$2::text`.
@@ -409,9 +416,10 @@ Every value is bound as a parameter. Only transaction-scoped `_xact_` functions 
 3. If any request has an effective timeout, read the current value once with `SELECT current_setting('lock_timeout') AS prev`.
 4. For each lock:
    - if its timeout differs from the one currently set, run `SELECT set_config('lock_timeout', $1, true)` with `$1 = \`${ms}ms\``. `ms` must pass `Number.isSafeInteger(ms) && ms >= 1 && ms <= 2147483647`, otherwise `TypeError` before any query;
-   - then run `SELECT 1 AS ok FROM pg_advisory_xact_lock($1::int8)` with the key as a decimal string, or the `_shared` variant.
+   - then run `SELECT current_setting('estela.unit_of_work', true) AS probe FROM pg_advisory_xact_lock($1::int8)` with the key as a decimal string, or the `_shared` variant;
+   - the row must read `probe = 'open'`. `NULL` (never set in this session) or `''` (the reset value of a placeholder an earlier autocommit statement defined) means step 1 and this statement ran in separate implicit transactions: `TransactionPort.run` did not open a transaction block, the lock just granted is already gone, and the port throws `SagaUsageError` naming autocommit before any step runs. Any other value is `UnexpectedQueryResultError`.
 
-   The lock function sits in FROM, so no `void` column is ever returned. Prisma's raw deserializer rejects `void` columns.
+   The lock function sits in FROM, so no `void` column is ever returned. Prisma's raw deserializer rejects `void` columns. The probe costs no extra round trip: `set_config(..., true)` is transaction-local, so it is discarded with the transaction and never leaks into a pooled session.
 5. If step 3 ran, restore with `SELECT set_config('lock_timeout', $1, true)` and `$1 = prev`. The lock timeout therefore never leaks into the step's own row locks.
 
 #### Isolation
@@ -424,6 +432,25 @@ A unit's first statement (the ledger claim, or the hash query above) takes the t
 Notes:
 - `set_config(..., true)` is the parameterized form of `SET LOCAL`. `SET LOCAL` itself cannot take bind parameters.
 - The single-int8 form shares its key space (`objsubid = 1`: `classid` holds the high 32 bits, `objid` the low 32) with apps that call `pg_advisory_xact_lock(bigint)` themselves. A clash with such an app's own keys is as unlikely as a 64-bit hash collision, and only over-serializes.
+
+#### Lock scope: transaction, never session (D32)
+
+The port uses only `pg_advisory_xact_lock` / `pg_advisory_xact_lock_shared`. It never issues `pg_advisory_lock` (session scope) and has no unlock path, and a unit test (U32) asserts both over every statement the port emits.
+
+**Semantics of a unit of work.** `LockPort.acquire` is called by the runner inside `transactions.run(work)`, after the ledger claim and before the first step (U3, D32 test). So the lock, the CAS `transition()` and every step write share one transaction, and the lock is held exactly as long as that transaction: COMMIT publishes the writes and releases the lock in the same instant, ROLLBACK discards both. There is nothing to release in a `finally`, which is the point: a release step that lives in application code can be skipped by a crash, a killed pod or a thrown `finally`, and a session lock then survives on a pooled connection until the pool closes it, blocking every later holder of that key.
+
+**Why not a session lock taken before BEGIN.** It was the one way to make advisory locks protect reads under REPEATABLE READ: `pg_advisory_lock` outside the transaction, then `BEGIN` (the snapshot is taken after the lock), then `pg_advisory_unlock` in `finally` after COMMIT or ROLLBACK. Rejected:
+- `LockPort` only ever sees the transaction handle, so the lock would have to move into `TransactionPort.run`, which Estela does not own; every app would re-implement the ordering, the timeout and the release;
+- the release lives in app code and can be lost (see above); with PgBouncer in transaction pooling mode the server connection changes between transactions, so the unlock may even run on a connection that never held the lock;
+- REPEATABLE READ is the only case it helps, and that case already has two correct answers: READ COMMITTED (recommended) or SERIALIZABLE with `retry({ on: ['serialization'] })` (P14).
+So the isolation rule stands: the port rejects REPEATABLE READ unless `allowSnapshotIsolation: true`, and that opt-out is for steps that never read what the lock guards.
+
+**CAS under each isolation level.** `transition()` is safe at every level, with a different failure shape (P8, P17):
+- READ COMMITTED: the losing UPDATE re-evaluates its WHERE on the newest row version, affects 0 rows and `transition()` raises `StaleStateError`;
+- REPEATABLE READ and SERIALIZABLE: the losing UPDATE hits a row changed after its snapshot, Postgres raises `40001`, the classifier maps it to `serialization`, and a retry (fresh snapshot) then reports `StaleStateError`.
+Neither level can turn a lost CAS into `affected = 1`.
+
+**Autocommit guard.** A transaction-scoped lock is only a lock inside a transaction block: in autocommit mode each statement is its own transaction, so `pg_advisory_xact_lock` is released as soon as it is granted and the saga would run unprotected and look successful. The probe in steps 1 and 4 detects a `TransactionPort.run` that never issued `BEGIN` and fails the unit with `SagaUsageError` before any step (unit test U32, integration test P16).
 
 #### CAS SQL
 
@@ -576,8 +603,8 @@ runAttempt(plan, body, n, restore):
              : traced(`locks:${plan.locks.length}`, () => lockPort.acquire(tx, plan.locks, { onRelease: f => releases.push(f) }))
   work = tx => {
     if this is not the first call of work in this run():     // the port re-invoked it (section 2.2)
-      state.claimed = saved.claimed; state.replay = saved.replay
-      callbacks = []; run and empty releases; restore?.()
+      await undoCall(previous tx); run and empty releases; restore?.()
+    lastTx = tx
     return body(tx, unit, acquire)
   }
   try:
@@ -585,10 +612,16 @@ runAttempt(plan, body, n, restore):
               transactions.run(work))
     return { ok: true, value, callbacks }
   catch (error):
-    state.claimed = saved.claimed; state.replay = saved.replay      // section 1 fix
+    await undoCall(lastTx)
     return { ok: false, error }                                     // callbacks dropped
   finally:
     open = false; for r of releases reversed: try r() catch log
+
+undoCall(tx):                                                       // section 1 and 1.1
+  claimedHere = state.claimed && !saved.claimed
+  state.claimed = saved.claimed; state.replay = saved.replay; callbacks = []
+  if claimedHere && plan.releaseClaim && tx: try await plan.releaseClaim(tx) catch hopError(`ledger-release:<label>`)
+  // releaseClaim is set by the runner only for ledger.transactional === false (D33)
 
 classify(e):
   e instanceof ConcurrencyError                          -> e.kind
@@ -678,6 +711,8 @@ The resulting requests then go through `canonicalLocks`.
 | run() checks | non-transactional ledger + retry + idempotency key | SagaUsageError before any tx | | |
 | resolveLocks | more than maxLocksPerUnit requests | not retried (before tx): SagaUsageError | | |
 | lock acquire (Postgres) | REPEATABLE READ transaction | SagaUsageError, never retried | | |
+| lock acquire (Postgres) | `TransactionPort.run` never opened a transaction (autocommit probe) | SagaUsageError, never retried; no step ran | same | same |
+| ledger claim, `transactional === false` | the call that took it fails (step, COMMIT, re-invoked `work`) | n/a (D22 refuses retry) | runner calls `release`; the key is free for the client retry | same |
 | ledger claim | `in-progress` | never retried: IdempotencyInProgressError | same | |
 | ledger claim | `replay` | empty tx commits, stored reply returned, no locks, no callbacks | | |
 | claim on attempt > 1 | another run committed the key in between | attempt sees replay (returns their reply) or in-progress (error), both correct | | |
@@ -796,6 +831,9 @@ The resulting requests then go through `canonicalLocks`.
 - **U27.** `delayFor`: without `maxBackoffMs` the delay stops at 32 x `backoffMs` (also as the jitter bound); with a huge `backoffMs` no jitter mode exceeds 2147483647 ms (`retry-policy.spec.ts`).
 - **U28.** A typed error's message holds no driver text; the driver error is its `cause`.
 - **U29.** `test/dist-typescript4.spec.ts`: the built `.d.ts` files contain no TS 5-only syntax (`const` type parameters, global `NoInfer`), so they parse on TS 4.9.
+- **U30.** Non-transactional ledger after a partial failure (section 1.1): a step failure after the claim frees the key and the client's next run executes (no `IdempotencyInProgressError`); a COMMIT failure after `record` frees it and the next run executes instead of replaying the phantom reply; the claim-only unit of an outbound-first saga is freed on a COMMIT failure; a port that re-invokes `work` gets the first call's claim freed before the second claims; a failure after a successful outbound keeps the key claimed (R10); a transactional ledger never gets `release` called after a rollback; a failing release is reported as `ledger-release:tx#0` and the step's error survives. Plus the `MemoryIdempotencyLedger` state walk: `pending`, `in-progress`, `applied`, `replay`, released.
+- **U31.** The checkpoint survives failing effects (`checkpointOf` before the attempt loop): a step that mutates ctx deeply (nested fields, a new key, a deleted key), registers an afterCommit and throws on attempts 1 and 2 sees the pristine ctx on every attempt, only attempt 3's callback runs, and `structuredClone` is called exactly once for the snapshot plus once per restore (never re-taken from a failed attempt's state); the same holds when the failure happens at COMMIT after the mutation; a custom checkpoint is taken once and its thunk runs before each retry.
+- **U32.** Lock scope (D32): every lock statement the Postgres port emits is `pg_advisory_xact_lock[_shared](`, none is `pg_advisory_lock` or `pg_advisory_unlock`; the probe shapes `NULL` and `''` are rejected with `SagaUsageError` naming autocommit after the first lock statement; an unknown probe value is `UnexpectedQueryResultError`; at the runner level `LockPort.acquire` runs while `transactions.run` is active and an afterCommit callback runs after it ended.
 - **U21.** A `ConcurrencyError` subclass loaded twice (`jest.isolateModules`) matches across copies by brand and kind and is retried; `test/dist-identity.spec.ts` checks the built CJS and ESM entries.
 - **U22.** `transition()` with a misspelled `to` or `from` is a compile error (`@ts-expect-error`).
 - **U23.** Postgres adapters: `idType`/`stateType` emit `$n::text::"type"` and reject invalid type names; REPEATABLE READ is rejected before any lock (allowed with the opt-out; serializable and read committed pass); a `bigint` version is read and an unreadable one throws; Prisma `P2034` maps to `deadlock`.
@@ -859,6 +897,8 @@ Cases:
 - **Holders always released.** P1, P2 and P14 release their lock-holding saga in `finally`, so a failed assertion never leaves a pooled client in an open transaction (which would hang `pool.end()`).
 - **P15.** A query function that binds strings as `text` (as Prisma does): a uuid id plus an enum state fails with 42883/42804 without `idType`/`stateType`, and transitions (then reports Stale on a repeat) with them.
 - **P13.** ms-bpm Start scenario: `lock('flow', id, 'shared')` plus `lock('flow-start', \`${flowId}:${userId}\`, 'exclusive')`. Different users run concurrently (wall time below 1.5 times a single run), and the same user is serialized. A Publish with `lock('flow', id, 'exclusive')` excludes all Starts.
+- **P16.** A `TransactionPort` that hands out a pooled client without `BEGIN` is rejected with `SagaUsageError` naming autocommit, on a fresh session (`NULL` probe) and on a reused one (`''` probe); no step runs and nothing is left in the pooled session.
+- **P17.** CAS under REPEATABLE READ: two transactions pin their snapshot, then both `transition()` the same row; the winner commits, the loser gets `SerializationError` with `cause.code = '40001'` and the row's version moved once. With `retry({ on: ['serialization'] })` the loser's second attempt reports `StaleStateError`. Never a silent success.
 
 ## 7. Documentation
 
@@ -901,6 +941,8 @@ It also adds the four rules of thumb from section 4.4.
 - **R13. Release type.** The third step argument, `hopError`, `TransactionPort.classify` and the `locks` field are all additive. Typed wrapping is opt-in, so this is a minor release (0.9.0).
 - **R14. Isolation level.** Advisory locks protect reads only under READ COMMITTED. The Postgres port rejects REPEATABLE READ; a custom LockPort on another database must document the same caveat.
 - **R15. Degraded checkpoint.** A later unit whose ctx cannot be snapshotted runs without retry; the failure is logged (hopError), not thrown.
+- **R16. Autocommit ports.** A `TransactionPort.run` without `BEGIN` would make every transaction-scoped lock a no-op. The probe (section 2.9) turns that into `SagaUsageError` on the first lock statement, at the cost of one extra column on two statements the port already issues. It cannot detect a port that opens a transaction but hands the steps a different connection; `run` must pass the same handle it began on.
+- **R17. Non-transactional ledger window.** With `transactional === false` the runner frees a rolled-back claim after the fact (section 1.1), but between `record` and a failing COMMIT a concurrent duplicate can still replay a reply that never committed. That window does not exist for a transactional ledger, which is why D22 keeps refusing a retry policy with such a ledger and why `MemoryIdempotencyLedger` stays a test and single-process tool.
 
 ## 9. Decisions log (both designs' open questions, resolved)
 
@@ -939,3 +981,6 @@ It also adds the four rules of thumb from section 4.4.
 | D31 | Port re-invoking `work` | Supported: per-call reset of claim, callbacks, in-process locks (and ctx under a policy) | Common wrapper pattern; the contract never forbade it |
 | D28 | Lock count per unit | `maxLocksPerUnit`, default 64 | Shared lock table is server-wide |
 | D29 | Prisma P2034 | Mapped to `deadlock`; docs: list both kinds | No SQLSTATE on the ORM error |
+| D32 | Lock scope: `pg_advisory_xact_lock` inside the unit's transaction, or a session lock around it | Transaction scope only; no unlock path; REPEATABLE READ stays rejected | Lock, CAS and writes share one transaction and COMMIT/ROLLBACK is the only release, so a crash or a pooler can never strand a lock; a session lock would have to live in `TransactionPort.run` and its unlock in app code |
+| D33 | A ledger with `transactional === false` after a rolled-back claim | The runner calls `release` for the call that took the claim (`UnitPlan.releaseClaim`); transactional ledgers get nothing; D22 kept | A rollback cannot reach such a ledger, so a client retry met a stuck in-progress key or a false replay; the remaining record-to-COMMIT window keeps the retry policy refused |
+| D34 | Detecting a `TransactionPort` that runs in autocommit mode | A transaction-local probe (`set_config(..., true)`) set by the hash statement and read by each lock statement; `SagaUsageError` on `NULL` or `''` | Deterministic and free of extra round trips; a timestamp heuristic (`statement_timestamp() > transaction_timestamp()`) could misfire, and a lock that is released as soon as it is granted must never pass silently |

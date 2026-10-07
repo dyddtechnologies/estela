@@ -1667,3 +1667,290 @@ describe('saga concurrency: ConcurrencyError identity across module copies', () 
     expect(calls).toBe(2);
   });
 });
+
+describe('saga concurrency: lock scope (D32)', () => {
+  it('acquires inside transactions.run, so database locks share the unit of work transaction', async () => {
+    const db = new FakeDb();
+    const inside: boolean[] = [];
+    const locks: LockPort<string[]> = {
+      acquire: () => {
+        inside.push(db.active);
+        return Promise.resolve();
+      },
+    };
+    const definition = saga<Ctx, string[], string>('scoped')
+      .lock('x', (c) => c.id, 'exclusive')
+      .transaction('a', (_c, _tx, unit) => {
+        unit.afterCommit(() => {
+          inside.push(db.active);
+        });
+      })
+      .reply(() => 'ok');
+    await expect(runnerFor(db, { locks }).run(definition, { id: 'i', trail: [] })).resolves.toBe(
+      'ok',
+    );
+    // [acquire, afterCommit]: the lock is taken with the transaction open and the callback runs
+    // after it ended, when a transaction-scoped lock is already gone.
+    expect(inside).toEqual([true, false]);
+  });
+});
+
+describe('saga concurrency: non-transactional ledger after a partial failure (U30)', () => {
+  const build = (fail: (ctx: Ctx) => void) =>
+    saga<Ctx, string[], string>('mem-partial')
+      .idempotent((c) => c.key)
+      .transaction('work', (ctx, tx) => {
+        tx.push(`${ctx.id}:work`);
+        fail(ctx);
+      })
+      .reply((ctx) => `reply:${ctx.id}`);
+
+  it('frees a pending claim when the unit that took it rolls back, so the client can retry', async () => {
+    const db = new FakeDb();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    const runner = runnerFor(db, { ledger });
+    const definition = build((ctx) => {
+      if (ctx.id === 'a') throw new Error('step broke');
+    });
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).rejects.toThrow(
+      'step broke',
+    );
+    expect(ledger.statusOf('mem-partial', 'k')).toBeUndefined();
+    await expect(runner.run(definition, { id: 'b', key: 'k', trail: [] })).resolves.toBe('reply:b');
+    expect(ledger.statusOf('mem-partial', 'k')).toBe('applied');
+    expect(db.committed).toEqual(['b:work']);
+  });
+
+  it('never replays a reply recorded by an attempt whose COMMIT failed', async () => {
+    const db = new FakeDb();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    db.failNext(pgError('40001'), 'commit');
+    const runner = runnerFor(db, { ledger });
+    const definition = build(() => undefined);
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).rejects.toBeInstanceOf(
+      SerializationError,
+    );
+    expect(ledger.statusOf('mem-partial', 'k')).toBeUndefined();
+    await expect(runner.run(definition, { id: 'b', key: 'k', trail: [] })).resolves.toBe('reply:b');
+    expect(db.committed).toEqual(['b:work']);
+  });
+
+  it('frees the claim-only unit of an outbound-first saga when its COMMIT fails', async () => {
+    const db = new FakeDb();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    const calls: string[] = [];
+    const definition = saga<Ctx, string[], number>('mem-outbound-first')
+      .idempotent((c) => c.key)
+      .outbound('send', (ctx) => {
+        calls.push(ctx.id);
+      })
+      .reply(() => 1);
+    db.failNext(pgError('40P01'), 'commit');
+    const runner = runnerFor(db, { ledger });
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).rejects.toBeInstanceOf(
+      DeadlockError,
+    );
+    expect(calls).toEqual([]);
+    expect(ledger.statusOf('mem-outbound-first', 'k')).toBeUndefined();
+    await expect(runner.run(definition, { id: 'b', key: 'k', trail: [] })).resolves.toBe(1);
+    expect(calls).toEqual(['b']);
+  });
+
+  it('frees the claim of a rolled-back call when the TransactionPort re-invokes work', async () => {
+    const db = new FakeDb();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    const port: TransactionPort<string[]> = {
+      run: async <T>(work: (tx: string[]) => Promise<T>): Promise<T> => {
+        try {
+          return await db.port.run(work);
+        } catch {
+          return db.port.run(work);
+        }
+      },
+      classify: classifyPostgresError,
+    };
+    let calls = 0;
+    const definition = saga<Ctx, string[], string>('mem-reinvoke')
+      .idempotent((c) => c.key)
+      .transaction('work', (ctx, tx) => {
+        calls += 1;
+        tx.push(`${ctx.id}:work${calls}`);
+        if (calls === 1) throw pgError('40001');
+      })
+      .reply((ctx) => ctx.id);
+    const runner = new SagaRunner<string[]>({ transactions: port, ledger });
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).resolves.toBe('a');
+    expect(calls).toBe(2);
+    expect(db.committed).toEqual(['a:work2']);
+    expect(ledger.statusOf('mem-reinvoke', 'k')).toBe('applied');
+  });
+
+  it('keeps the key claimed when a unit after a successful outbound fails (0.8.0 semantics, R10)', async () => {
+    const db = new FakeDb();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    const definition = saga<Ctx, string[], string>('mem-after-outbound')
+      .idempotent((c) => c.key)
+      .transaction('a', () => undefined)
+      .outbound('call', () => undefined)
+      .transaction('b', () => {
+        throw new Error('late failure');
+      })
+      .reply(() => 'ok');
+    const runner = runnerFor(db, { ledger });
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).rejects.toThrow(
+      'late failure',
+    );
+    expect(ledger.statusOf('mem-after-outbound', 'k')).toBe('pending');
+    await expect(runner.run(definition, { id: 'b', key: 'k', trail: [] })).rejects.toBeInstanceOf(
+      IdempotencyInProgressError,
+    );
+  });
+
+  it('does not call release on a transactional ledger: its rollback already undid the claim', async () => {
+    const db = new FakeDb();
+    const ledger = new TxLedger(db);
+    const release = jest.spyOn(ledger, 'release');
+    const definition = build(() => {
+      throw new Error('step broke');
+    });
+    await expect(
+      runnerFor(db, { ledger }).run(definition, { id: 'a', key: 'k', trail: [] }),
+    ).rejects.toThrow('step broke');
+    expect(release).not.toHaveBeenCalled();
+    expect(db.committed).toEqual([]);
+  });
+
+  it('reports a failing release at error level and keeps the original error', async () => {
+    const db = new FakeDb();
+    const { logger, errors } = recordingLogger();
+    const ledger = new MemoryIdempotencyLedger<string[]>();
+    jest.spyOn(ledger, 'release').mockRejectedValue(new Error('ledger down'));
+    const definition = build(() => {
+      throw new Error('step broke');
+    });
+    await expect(
+      runnerFor(db, { ledger, logger }).run(definition, { id: 'a', key: 'k', trail: [] }),
+    ).rejects.toThrow('step broke');
+    expect(errors).toEqual(['ledger-release:tx#0']);
+  });
+});
+
+describe('MemoryIdempotencyLedger entry states', () => {
+  it('moves pending to applied, answers in-progress then replay, and release frees the key', async () => {
+    const ledger = new MemoryIdempotencyLedger<null>();
+    expect(ledger.statusOf('s', 'k')).toBeUndefined();
+    await expect(ledger.claim(null, 's', 'k')).resolves.toEqual({ status: 'new' });
+    expect(ledger.statusOf('s', 'k')).toBe('pending');
+    await expect(ledger.claim(null, 's', 'k')).resolves.toEqual({ status: 'in-progress' });
+    await ledger.record(null, 's', 'k', { ok: 1 });
+    expect(ledger.statusOf('s', 'k')).toBe('applied');
+    await expect(ledger.claim(null, 's', 'k')).resolves.toEqual({
+      status: 'replay',
+      response: { ok: 1 },
+    });
+    await ledger.release(null, 's', 'k');
+    expect(ledger.statusOf('s', 'k')).toBeUndefined();
+    await expect(ledger.claim(null, 's', 'k')).resolves.toEqual({ status: 'new' });
+  });
+});
+
+describe('saga concurrency: the checkpoint survives failing effects (U31)', () => {
+  interface Doc {
+    id: string;
+    n: number;
+    tags: string[];
+    nested: { a: number; list: number[] };
+    extra?: string;
+    gone?: string;
+  }
+  const pristine = (): Doc => ({
+    id: 'd',
+    n: 0,
+    tags: [],
+    nested: { a: 1, list: [1] },
+    gone: 'yes',
+  });
+  const snapshot = (ctx: Doc): Doc => JSON.parse(JSON.stringify(ctx)) as Doc;
+
+  it('restores ctx from the snapshot taken before attempt 1 after every failing attempt', async () => {
+    const db = new FakeDb();
+    const clone = jest.spyOn(globalThis, 'structuredClone');
+    try {
+      const seen: Doc[] = [];
+      const committedAttempts: number[] = [];
+      const definition = saga<Doc, string[], number>('effects')
+        .transaction('mutate', (ctx, tx, unit) => {
+          seen.push(snapshot(ctx));
+          ctx.n += 10;
+          ctx.tags.push(`t${unit.attempt}`);
+          ctx.nested.a = unit.attempt;
+          ctx.nested.list.push(unit.attempt);
+          ctx.extra = 'x';
+          delete ctx.gone;
+          tx.push(`attempt${unit.attempt}`);
+          unit.afterCommit(() => {
+            committedAttempts.push(unit.attempt);
+          });
+          if (unit.attempt < 3) throw pgError('40P01');
+        })
+        .retry({ on: ['deadlock'], attempts: 3, backoffMs: 0 })
+        .reply((ctx) => ctx.n);
+      const ctx = pristine();
+      await expect(runnerFor(db).run(definition, ctx)).resolves.toBe(10);
+      expect(seen).toEqual([pristine(), pristine(), pristine()]);
+      expect(ctx).toEqual({
+        id: 'd',
+        n: 10,
+        tags: ['t3'],
+        nested: { a: 3, list: [1, 3] },
+        extra: 'x',
+      });
+      expect(ctx).not.toHaveProperty('gone');
+      expect(committedAttempts).toEqual([3]);
+      expect(db.committed).toEqual(['attempt3']);
+      // One snapshot before attempt 1, then one restore per failed attempt: never re-taken from
+      // the state a failing attempt left behind.
+      expect(clone).toHaveBeenCalledTimes(3);
+    } finally {
+      clone.mockRestore();
+    }
+  });
+
+  it('restores ctx when the failure happens at COMMIT, after the step mutated it', async () => {
+    const db = new FakeDb();
+    db.failNext(pgError('40001'), 'commit');
+    const seen: number[] = [];
+    const definition = saga<Doc, string[], number[]>('commit-effects')
+      .transaction('mutate', (ctx, tx, unit) => {
+        seen.push(ctx.n);
+        ctx.n += 1;
+        ctx.nested.list.push(unit.attempt);
+        tx.push(`a${unit.attempt}`);
+      })
+      .retry({ on: ['serialization'], attempts: 2, backoffMs: 0 })
+      .reply((ctx) => ctx.nested.list);
+    await expect(runnerFor(db).run(definition, pristine())).resolves.toEqual([1, 2]);
+    expect(seen).toEqual([0, 0]);
+    expect(db.committed).toEqual(['a2']);
+  });
+
+  it('takes a custom checkpoint once and restores it before each retry', async () => {
+    const db = new FakeDb();
+    const checkpoint = jest.fn((ctx: Doc) => {
+      const n = ctx.n;
+      return jest.fn(() => {
+        ctx.n = n;
+      });
+    });
+    const definition = saga<Doc, string[], number>('custom-effects')
+      .transaction('mutate', (ctx, _tx, unit) => {
+        ctx.n += 1;
+        if (unit.attempt < 3) throw pgError('40P01');
+      })
+      .retry({ on: ['deadlock'], attempts: 3, backoffMs: 0, checkpoint })
+      .reply((ctx) => ctx.n);
+    await expect(runnerFor(db).run(definition, pristine())).resolves.toBe(1);
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+    expect(checkpoint.mock.results[0]?.value).toHaveBeenCalledTimes(2);
+  });
+});

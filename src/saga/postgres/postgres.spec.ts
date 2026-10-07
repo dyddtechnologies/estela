@@ -10,11 +10,13 @@ interface Call {
   params: readonly unknown[];
 }
 
-/** Recording fake SqlQuery: answers the hash query with fixed int8 keys, everything else with `next`. */
+/** Recording fake SqlQuery: answers the hash query with fixed int8 keys, lock statements with the
+ *  transaction probe (`open` inside a transaction block) and everything else with `next`. */
 function fakeSql(
   hashes: Record<string, string | bigint | number>,
   shape: 'pg' | 'array' = 'pg',
   iso = 'read committed',
+  probe: string | null = 'open',
 ) {
   const calls: Call[] = [];
   let next: Record<string, unknown>[] = [];
@@ -24,9 +26,17 @@ function fakeSql(
     if (sql.includes('sha256')) {
       const [namespaces, keys] = params as [string[], string[]];
       return Promise.resolve(
-        wrap(namespaces.map((n, i) => ({ i: i + 1, h: hashes[`${n}/${keys[i]}`] ?? '0', iso }))),
+        wrap(
+          namespaces.map((n, i) => ({
+            i: i + 1,
+            h: hashes[`${n}/${keys[i]}`] ?? '0',
+            iso,
+            probe: 'open',
+          })),
+        ),
       );
     }
+    if (sql.includes('pg_advisory_xact_lock')) return Promise.resolve(wrap([{ probe }]));
     if (sql.includes('current_setting')) return Promise.resolve(wrap([{ prev: '0' }]));
     return Promise.resolve(wrap(next));
   };
@@ -60,7 +70,7 @@ describe('postgresAdvisoryLockPort (U14)', () => {
     );
     expect(fake.calls).toEqual([
       {
-        sql: "SELECT l.i::int AS i, ('x' || left(encode(sha256(convert_to(length(l.n) || ':' || l.n || l.k, 'UTF8')), 'hex'), 16))::bit(64)::int8::text AS h, current_setting('transaction_isolation') AS iso FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS l(n, k, i)",
+        sql: "SELECT l.i::int AS i, ('x' || left(encode(sha256(convert_to(length(l.n) || ':' || l.n || l.k, 'UTF8')), 'hex'), 16))::bit(64)::int8::text AS h, current_setting('transaction_isolation') AS iso, set_config('estela.unit_of_work', 'open', true) AS probe FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS l(n, k, i)",
         params: [
           ['a', 'a', 'b'],
           ['1', '2', '1'],
@@ -72,19 +82,66 @@ describe('postgresAdvisoryLockPort (U14)', () => {
         params: ['200ms'],
       },
       {
-        sql: 'SELECT 1 AS ok FROM pg_advisory_xact_lock($1::int8)',
+        sql: "SELECT current_setting('estela.unit_of_work', true) AS probe FROM pg_advisory_xact_lock($1::int8)",
         params: ['-9223372036854775808'],
       },
       { sql: "SELECT set_config('lock_timeout', $1, true) AS lock_timeout", params: ['0'] },
       {
-        sql: 'SELECT 1 AS ok FROM pg_advisory_xact_lock_shared($1::int8)',
+        sql: "SELECT current_setting('estela.unit_of_work', true) AS probe FROM pg_advisory_xact_lock_shared($1::int8)",
         params: ['4611686018427387904'],
       },
       {
-        sql: 'SELECT 1 AS ok FROM pg_advisory_xact_lock_shared($1::int8)',
+        sql: "SELECT current_setting('estela.unit_of_work', true) AS probe FROM pg_advisory_xact_lock_shared($1::int8)",
         params: ['9223372036854775807'],
       },
     ]);
+  });
+
+  it('uses only transaction-scoped lock functions: no session lock, no unlock path (D32)', async () => {
+    const fake = fakeSql({ 'a/1': '1', 'a/2': '2' });
+    const port = postgresAdvisoryLockPort<null>({ query: () => fake.query, defaultTimeoutMs: 50 });
+    await port.acquire(
+      null,
+      [
+        { namespace: 'a', key: '1', mode: 'shared' },
+        { namespace: 'a', key: '2', mode: 'exclusive' },
+      ],
+      scope,
+    );
+    const lockStatements = fake.calls.map((c) => c.sql).filter((s) => s.includes('pg_advisory'));
+    expect(lockStatements).toHaveLength(2);
+    for (const sql of lockStatements) expect(sql).toMatch(/pg_advisory_xact_lock(_shared)?\(/);
+    for (const { sql } of fake.calls) {
+      expect(sql).not.toMatch(/pg_advisory_lock(_shared)?\(/);
+      expect(sql).not.toContain('pg_advisory_unlock');
+    }
+  });
+
+  it.each([
+    ['NULL (never set in this session)', null],
+    ['the reset value of a placeholder defined earlier', ''],
+  ])(
+    'rejects a TransactionPort that runs in autocommit mode: the probe comes back as %s',
+    async (_label, probe) => {
+      const fake = fakeSql({ 'a/x': '1', 'a/y': '2' }, 'pg', 'read committed', probe);
+      const port = postgresAdvisoryLockPort<null>({ query: () => fake.query });
+      const request = [
+        { namespace: 'a', key: 'x', mode: 'exclusive' as const },
+        { namespace: 'a', key: 'y', mode: 'exclusive' as const },
+      ];
+      await expect(port.acquire(null, request, scope)).rejects.toBeInstanceOf(SagaUsageError);
+      await expect(port.acquire(null, request, scope)).rejects.toThrow('autocommit');
+      // It stops at the first lock statement: the one lock it did take is already gone.
+      expect(fake.calls.filter((c) => c.sql.includes('pg_advisory'))).toHaveLength(2);
+    },
+  );
+
+  it('reports an unreadable probe value instead of guessing', async () => {
+    const fake = fakeSql({ 'a/x': '1' }, 'array', 'read committed', 'something-else');
+    const port = postgresAdvisoryLockPort<null>({ query: () => fake.query });
+    await expect(
+      port.acquire(null, [{ namespace: 'a', key: 'x', mode: 'shared' }], scope),
+    ).rejects.toBeInstanceOf(UnexpectedQueryResultError);
   });
 
   it('merges physical collisions: exclusive and the smallest timeout win', async () => {
@@ -98,11 +155,11 @@ describe('postgresAdvisoryLockPort (U14)', () => {
       ],
       scope,
     );
-    const statements = fake.calls.map((c) => [c.sql.slice(0, 40), c.params]);
+    const statements = fake.calls.map((c) => [c.sql.split(' FROM ')[1] ?? c.sql, c.params]);
     expect(statements.slice(2)).toEqual([
-      ["SELECT set_config('lock_timeout', $1, tr", ['90ms']],
-      ['SELECT 1 AS ok FROM pg_advisory_xact_loc', ['12']],
-      ["SELECT set_config('lock_timeout', $1, tr", ['0']],
+      ["SELECT set_config('lock_timeout', $1, true) AS lock_timeout", ['90ms']],
+      ['pg_advisory_xact_lock($1::int8)', ['12']],
+      ["SELECT set_config('lock_timeout', $1, true) AS lock_timeout", ['0']],
     ]);
   });
 
@@ -112,7 +169,10 @@ describe('postgresAdvisoryLockPort (U14)', () => {
     await port.acquire(null, [], scope);
     expect(fake.calls).toEqual([]);
     await port.acquire(null, [{ namespace: 'a', key: 'x', mode: 'exclusive' }], scope);
-    expect(fake.calls.map((c) => c.sql.split(' ')[1])).toEqual(['l.i::int', '1']);
+    expect(fake.calls.map((c) => c.sql.split(' FROM ')[1]?.split(' ')[0])).toEqual([
+      'unnest($1::text[],',
+      'pg_advisory_xact_lock($1::int8)',
+    ]);
   });
 
   it.each([0, 1.5, -1, 2 ** 31, Number.NaN])(
@@ -162,7 +222,8 @@ describe('postgresAdvisoryLockPort (U14)', () => {
     ['a fraction', '1.5'],
   ])('rejects a hash result it cannot read (%s)', async (_label, h) => {
     const port = postgresAdvisoryLockPort<null>({
-      query: () => () => Promise.resolve({ rows: [{ i: 1, h, iso: 'read committed' }] }),
+      query: () => () =>
+        Promise.resolve({ rows: [{ i: 1, h, iso: 'read committed', probe: 'open' }] }),
     });
     await expect(
       port.acquire(null, [{ namespace: 'a', key: 'x', mode: 'shared' }], scope),

@@ -44,7 +44,7 @@ export interface UnitOfWorkDeps<Tx> {
   tracer: SagaTracer;
 }
 
-export interface UnitPlan<Ctx> {
+export interface UnitPlan<Ctx, Tx = unknown> {
   saga: string;
   ctx: Ctx;
   state: RunState<unknown>;
@@ -57,6 +57,12 @@ export interface UnitPlan<Ctx> {
   /** True for the first unit of a run: nothing has committed yet, so a checkpoint failure fails
    *  the run before any transaction. Later units degrade to a single attempt instead. */
   strictCheckpoint: boolean;
+  /**
+   * Set only for a ledger with `transactional === false`: its claim survives the rollback, so the
+   * runner frees the key when the call that took it fails. Called with that call's handle, which
+   * such a ledger ignores. Undefined for a transactional ledger: the rollback already did it.
+   */
+  releaseClaim?: ((tx: Tx) => Promise<void>) | undefined;
 }
 
 /** Body of a unit: `acquire` takes all locks of the unit, after the ledger claim. */
@@ -68,6 +74,8 @@ export type UnitBody<Tx, T> = (
 
 type Callback = () => Promise<void> | void;
 type Attempt<T> = { ok: true; value: T; callbacks: Callback[] } | { ok: false; error: unknown };
+/** The part of RunState an attempt may change, copied before it and restored when it fails. */
+type ClaimState = Pick<RunState<unknown>, 'claimed' | 'replay'>;
 
 /** Errors that are logic failures: never retried, never wrapped. */
 const NEVER_RETRIED = [
@@ -84,7 +92,7 @@ const NEVER_RETRIED = [
 export class UnitOfWorkExecutor<Tx> {
   constructor(private readonly deps: UnitOfWorkDeps<Tx>) {}
 
-  async execute<Ctx, T>(plan: UnitPlan<Ctx>, body: UnitBody<Tx, T>): Promise<T> {
+  async execute<Ctx, T>(plan: UnitPlan<Ctx, Tx>, body: UnitBody<Tx, T>): Promise<T> {
     const policy = plan.retry;
     const restore = policy === undefined ? undefined : this.checkpoint(plan, policy);
     for (let attempt = 1; ; attempt += 1) {
@@ -118,7 +126,7 @@ export class UnitOfWorkExecutor<Tx> {
    * failure is reported at error level. Only the first unit lets the failure end the run.
    */
   private checkpoint<Ctx>(
-    plan: UnitPlan<Ctx>,
+    plan: UnitPlan<Ctx, Tx>,
     policy: Readonly<RetryPolicy<Ctx>>,
   ): (() => void) | undefined {
     try {
@@ -151,7 +159,7 @@ export class UnitOfWorkExecutor<Tx> {
   private finalError<Ctx>(
     error: unknown,
     kind: ConcurrencyErrorKind | undefined,
-    plan: UnitPlan<Ctx>,
+    plan: UnitPlan<Ctx, Tx>,
     attempts: number,
   ): unknown {
     if (kind === undefined || kind === 'stale-state' || error instanceof ConcurrencyError) {
@@ -161,17 +169,18 @@ export class UnitOfWorkExecutor<Tx> {
   }
 
   private async runAttempt<Ctx, T>(
-    plan: UnitPlan<Ctx>,
+    plan: UnitPlan<Ctx, Tx>,
     body: UnitBody<Tx, T>,
     attempt: number,
     restore: (() => void) | undefined,
   ): Promise<Attempt<T>> {
     const { state } = plan;
-    const saved = { claimed: state.claimed, replay: state.replay };
+    const saved: ClaimState = { claimed: state.claimed, replay: state.replay };
     const callbacks: Callback[] = [];
     const releases: (() => void)[] = [];
     let open = true;
     let invocations = 0;
+    let lastTx: Tx | undefined;
     const unit: UnitOfWork = {
       attempt,
       afterCommit: (fn) => {
@@ -185,15 +194,14 @@ export class UnitOfWorkExecutor<Tx> {
     };
     // A port may call `work` again inside one run() (e.g. its own retry on 40001): each call is a
     // fresh transaction, so whatever the rolled-back call left behind is reset first.
-    const work = (tx: Tx): Promise<T> => {
+    const work = async (tx: Tx): Promise<T> => {
       invocations += 1;
       if (invocations > 1) {
-        state.claimed = saved.claimed;
-        state.replay = saved.replay;
-        callbacks.length = 0;
+        await this.undoCall(plan, saved, lastTx, callbacks);
         this.release(releases, plan);
         restore?.();
       }
+      lastTx = tx;
       return body(tx, unit, () => this.acquire(tx, plan, releases));
     };
     try {
@@ -201,8 +209,7 @@ export class UnitOfWorkExecutor<Tx> {
       const value = await unitOfWorkScope.run(scope, () => this.deps.transactions.run(work));
       return { ok: true, value, callbacks };
     } catch (error) {
-      state.claimed = saved.claimed;
-      state.replay = saved.replay;
+      await this.undoCall(plan, saved, lastTx, callbacks);
       return { ok: false, error };
     } finally {
       open = false;
@@ -210,7 +217,35 @@ export class UnitOfWorkExecutor<Tx> {
     }
   }
 
-  private async acquire<Ctx>(tx: Tx, plan: UnitPlan<Ctx>, releases: (() => void)[]): Promise<void> {
+  /**
+   * Reverts what a rolled-back call left outside the database: the claim flags (section 1 fix),
+   * the callbacks it registered and, for a ledger the rollback could not reach, the claim itself.
+   * A failing release is reported and never replaces the attempt's own error.
+   */
+  private async undoCall<Ctx>(
+    plan: UnitPlan<Ctx, Tx>,
+    saved: ClaimState,
+    tx: Tx | undefined,
+    callbacks: Callback[],
+  ): Promise<void> {
+    const { state } = plan;
+    const claimedHere = state.claimed && !saved.claimed;
+    state.claimed = saved.claimed;
+    state.replay = saved.replay;
+    callbacks.length = 0;
+    if (!claimedHere || plan.releaseClaim === undefined || tx === undefined) return;
+    try {
+      await plan.releaseClaim(tx);
+    } catch (error) {
+      this.deps.tracer.error(plan.saga, `ledger-release:${plan.label}`, plan.headers, error);
+    }
+  }
+
+  private async acquire<Ctx>(
+    tx: Tx,
+    plan: UnitPlan<Ctx, Tx>,
+    releases: (() => void)[],
+  ): Promise<void> {
     const port = this.deps.locks;
     if (plan.locks.length === 0) return;
     if (port === undefined) {
@@ -222,7 +257,7 @@ export class UnitOfWorkExecutor<Tx> {
   }
 
   /** Runs and empties the release list, last acquired first. */
-  private release<Ctx>(releases: (() => void)[], plan: UnitPlan<Ctx>): void {
+  private release<Ctx>(releases: (() => void)[], plan: UnitPlan<Ctx, Tx>): void {
     for (const fn of releases.splice(0).reverse()) {
       try {
         fn();
@@ -233,7 +268,10 @@ export class UnitOfWorkExecutor<Tx> {
   }
 
   /** Sequential, in registration order. Never throws: the unit already committed. */
-  private async drainAfterCommit<Ctx>(callbacks: Callback[], plan: UnitPlan<Ctx>): Promise<void> {
+  private async drainAfterCommit<Ctx>(
+    callbacks: Callback[],
+    plan: UnitPlan<Ctx, Tx>,
+  ): Promise<void> {
     for (const [index, callback] of callbacks.entries()) {
       const target = `after-commit:${plan.label}#${index}`;
       try {
@@ -246,7 +284,7 @@ export class UnitOfWorkExecutor<Tx> {
 
   private reportAfterCommit<Ctx>(
     error: unknown,
-    plan: UnitPlan<Ctx>,
+    plan: UnitPlan<Ctx, Tx>,
     target: string,
     index: number,
   ): void {

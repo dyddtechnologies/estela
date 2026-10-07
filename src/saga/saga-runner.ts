@@ -241,7 +241,7 @@ export class SagaRunner<Tx = unknown> {
     label: string,
     locks: readonly LockRequest[],
     beforeAnyEffect = false,
-  ): UnitPlan<Ctx> {
+  ): UnitPlan<Ctx, Tx> {
     return {
       saga: run.definition.name,
       ctx: run.ctx,
@@ -251,7 +251,18 @@ export class SagaRunner<Tx = unknown> {
       locks,
       retry: run.retry,
       strictCheckpoint: beforeAnyEffect,
+      releaseClaim: this.claimReleaser(run.definition.name, run.state.key),
     };
+  }
+
+  /** Only a ledger that ignores `tx` needs the runner to free a claim its rollback kept. */
+  private claimReleaser(
+    sagaName: string,
+    key: string | undefined,
+  ): ((tx: Tx) => Promise<void>) | undefined {
+    const ledger = this.options.ledger;
+    if (ledger?.transactional !== false || key === undefined) return undefined;
+    return (tx) => ledger.release(tx, sagaName, key);
   }
 
   private async runUnitOfWork<Ctx, Reply>(

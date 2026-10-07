@@ -621,6 +621,98 @@ d('saga concurrency on real Postgres', () => {
     expect(row.rows[0]?.status).toBe('RUNNING');
   });
 
+  it('P16: a TransactionPort that never opens a transaction is rejected before any step runs', async () => {
+    // Autocommit: every statement is its own transaction, so a transaction-scoped lock is released
+    // as soon as it is granted. The probe must catch it instead of letting the saga run unprotected.
+    const autocommit: TransactionPort<PoolClient> = {
+      run: async <T>(work: (tx: PoolClient) => Promise<T>): Promise<T> => {
+        const client = await pool.connect();
+        try {
+          return await work(client);
+        } finally {
+          client.release();
+        }
+      },
+      classify: classifyPostgresError,
+    };
+    const step = jest.fn();
+    const definition = saga<{ k: string }, PoolClient, null>('autocommit')
+      .lock(ns('p16'), (c) => c.k, 'exclusive')
+      .transaction('work', step)
+      .reply(() => null);
+    const runs = [1, 2].map(() =>
+      options({ transactions: autocommit })
+        .run(definition, { k: 'x' })
+        .catch((e: unknown) => e),
+    );
+    // The second run hits the '' (reset value) shape when it lands on the same pooled session.
+    for (const error of await Promise.all(runs)) {
+      expect(error).toBeInstanceOf(SagaUsageError);
+      expect((error as Error).message).toContain('autocommit');
+    }
+    expect(step).not.toHaveBeenCalled();
+    const probe = await pool.query<{ p: string | null }>(
+      "SELECT current_setting('estela.unit_of_work', true) AS p",
+    );
+    expect(probe.rows[0]?.p ?? '').toBe('');
+  });
+
+  it('P17: a CAS that loses the race under REPEATABLE READ raises 40001, never a silent success', async () => {
+    // Under READ COMMITTED the losing UPDATE re-evaluates its WHERE on the new row version and
+    // affects 0 rows (P8: StaleStateError). Under REPEATABLE READ the same UPDATE hits a row
+    // changed after its snapshot and Postgres raises 40001 instead. Either way the loser never
+    // sees affected = 1.
+    await pool.query(`INSERT INTO ${schema}.jobs (id, status) VALUES (17, 'PENDING')`);
+    const Job = defineStateMachine('job', { PENDING: ['RUNNING'], RUNNING: [] });
+    const port = postgresTransitionPort<PoolClient>({
+      query: pgQuery,
+      schema,
+      table: 'jobs',
+      stateColumn: 'status',
+      versionColumn: 'rev',
+    });
+    const repeatableRead = options({ transactions: poolPort(pool, 'REPEATABLE READ') });
+    const build = (retry: boolean, meet: () => Promise<void>) => {
+      const builder = saga<{ n: number }, PoolClient, string>('cas-rr').transaction(
+        'cas',
+        async (_c, tx, unit) => {
+          // Pin the snapshot before either CAS, so the loser updates a row the winner changed.
+          await tx.query(`SELECT 1 FROM ${schema}.jobs WHERE id = 17`);
+          if (unit.attempt === 1) await meet();
+          await transition(Job, port, tx, { id: 17, to: 'RUNNING' });
+        },
+      );
+      return (
+        retry ? builder.retry({ on: ['serialization'], attempts: 3, backoffMs: 10 }) : builder
+      ).reply(() => 'ok');
+    };
+    const rev = async () =>
+      (await pool.query<{ rev: number }>(`SELECT rev FROM ${schema}.jobs WHERE id = 17`)).rows[0]
+        ?.rev;
+
+    const meetPlain = barrier(2);
+    const plain = await Promise.allSettled([
+      repeatableRead.run(build(false, meetPlain), { n: 1 }),
+      repeatableRead.run(build(false, meetPlain), { n: 2 }),
+    ]);
+    expect(plain.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const lost = plain.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(lost?.reason).toMatchObject({ kind: 'serialization', cause: { code: '40001' } });
+    expect(await rev()).toBe(1);
+
+    // With retry the loser gets a fresh snapshot and the CAS reports the row as stale.
+    await pool.query(`UPDATE ${schema}.jobs SET status = 'PENDING' WHERE id = 17`);
+    const meet = barrier(2);
+    const retried = await Promise.allSettled([
+      repeatableRead.run(build(true, meet), { n: 1 }),
+      repeatableRead.run(build(true, meet), { n: 2 }),
+    ]);
+    expect(retried.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const stale = retried.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(stale?.reason).toBeInstanceOf(StaleStateError);
+    expect(await rev()).toBe(2);
+  });
+
   it('P13: ms-bpm Start/Publish: per-user starts run in parallel, same user and Publish serialize', async () => {
     const STEP_MS = 300;
     interface FlowCtx {

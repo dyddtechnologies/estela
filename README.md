@@ -539,8 +539,11 @@ the key is claimed inside the first unit of work and the reply is stored inside 
 ledger row commits together with the saga's writes, on every replica. A repeated key returns the
 stored reply; one whose first run is still going raises `IdempotencyInProgressError`. A failed run
 frees the key. `MemoryIdempotencyLedger` is for tests only: it is not atomic with any database, so
-it declares `transactional = false` and the runner refuses it on an idempotent saga with a retry
-policy (a rolled-back claim would survive and turn the retry into in-progress or a false replay).
+it declares `transactional = false`. For such a ledger the runner frees the claim itself when the
+unit of work that took it rolls back (a thrown step or a failed COMMIT), so a client retry never
+meets a stuck in-progress key or replays a reply whose writes never committed; the runner still
+refuses it on an idempotent saga with a retry policy, because between `record` and a failing
+COMMIT a concurrent duplicate can see an entry a transactional ledger would never have exposed.
 
 ### Locks
 
@@ -566,8 +569,14 @@ return an array, and `undefined` is an error unless `{ optional: true }`. One un
 most 64 locks after dedupe (`SagaRunnerOptions.maxLocksPerUnit`): each Postgres advisory lock takes
 a slot in the server-wide shared lock table (`max_locks_per_transaction * max_connections`), so a
 key list taken from user input could otherwise exhaust it for every session. Locks are
-transaction-scoped: COMMIT or ROLLBACK releases them, and they never span an outbound step. A
-failed outbound's `compensate` re-acquires the same locks (`compensateLocks: 'none'` opts out).
+transaction-scoped (`pg_advisory_xact_lock`, never a session lock): they are taken inside the unit
+of work's transaction, right after the claim, so the lock, a CAS `transition()` and the step
+writes share one transaction, COMMIT or ROLLBACK is the only release (nothing to forget in a
+`finally`, nothing stranded on a pooled connection), and they never span an outbound step. That
+only holds inside a transaction block, so `postgresAdvisoryLockPort` throws `SagaUsageError` when
+`TransactionPort.run` hands it a connection in autocommit mode (no `BEGIN`): a lock released as
+soon as it is granted protects nothing. A failed outbound's `compensate` re-acquires the same
+locks (`compensateLocks: 'none'` opts out).
 `postgresAdvisoryLockPort` maps `(namespace, key)` to one int8: the first 64 bits of SHA-256 over
 a length-prefixed encoding, so a key built partly from user input (a username) cannot be crafted to
 collide with someone else's lock (a 32-bit `hashtext` could be brute-forced offline). Code outside

@@ -7,9 +7,12 @@ import { rowsOf, UnexpectedQueryResultError, type SqlQuery, type SqlQueryOf } fr
  * of SHA-256 over `length(namespace) || ':' || namespace || key` (see ADVISORY_LOCK_KEY_SQL). The
  * length prefix makes the encoding injective, and a cryptographic hash means a caller who chooses
  * part of a key cannot build a key that collides with someone else's (32-bit `hashtext` could be
- * brute-forced offline in minutes). Only the `_xact_` functions are used, so every lock is released
- * by COMMIT or ROLLBACK and nothing leaks into a pooled session. Every value is a bound parameter;
- * no user data is ever interpolated. Needs Postgres 11+ (`sha256`).
+ * brute-forced offline in minutes). Only the `_xact_` functions are used, never the session ones:
+ * the lock, the CAS and the step writes share the unit of work's transaction, COMMIT or ROLLBACK
+ * releases the lock with no unlock path to forget, and nothing leaks into a pooled session (a
+ * session lock would outlive its transaction and break under PgBouncer transaction pooling). That
+ * only holds inside a transaction block, so the port refuses to run in autocommit mode. Every
+ * value is a bound parameter; no user data is ever interpolated. Needs Postgres 11+ (`sha256`).
  */
 export interface PostgresLockPortOptions<Tx> {
   query: SqlQueryOf<Tx>;
@@ -37,19 +40,26 @@ function keyExpression(namespace: string, key: string): string {
  * `SELECT pg_advisory_xact_lock(${ADVISORY_LOCK_KEY_SQL})` with `[namespace, key]`.
  */
 export const ADVISORY_LOCK_KEY_SQL = keyExpression('$1::text', '$2::text');
+// A transaction-local marker (set_config(..., true) is the parameterized SET LOCAL). It lives until
+// the transaction ends, so the lock statements can tell that one is open: a transaction-scoped
+// lock taken in autocommit mode is released as soon as it is granted and protects nothing.
+const TX_PROBE = 'estela.unit_of_work';
+const TX_PROBE_OPEN = 'open';
 // The key is returned as text so every driver reads it the same way (pg would give a string,
 // Prisma a bigint, and a JS number cannot hold every int8).
 const HASH_SQL =
   `SELECT l.i::int AS i, ${keyExpression('l.n', 'l.k')}::text AS h, ` +
-  "current_setting('transaction_isolation') AS iso " +
+  "current_setting('transaction_isolation') AS iso, " +
+  `set_config('${TX_PROBE}', '${TX_PROBE_OPEN}', true) AS probe ` +
   'FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS l(n, k, i)';
 const SNAPSHOT_ISOLATION = 'repeatable read';
 const READ_TIMEOUT_SQL = "SELECT current_setting('lock_timeout') AS prev";
 // set_config(..., true) is the parameterized form of SET LOCAL, which cannot take bind params.
 const SET_TIMEOUT_SQL = "SELECT set_config('lock_timeout', $1, true) AS lock_timeout";
-// The lock function sits in FROM so no void column is returned (Prisma rejects void columns).
-const LOCK_EXCLUSIVE_SQL = 'SELECT 1 AS ok FROM pg_advisory_xact_lock($1::int8)';
-const LOCK_SHARED_SQL = 'SELECT 1 AS ok FROM pg_advisory_xact_lock_shared($1::int8)';
+// The lock function sits in FROM so no void column is returned (Prisma rejects void columns); the
+// column reads the probe HASH_SQL set, which only an open transaction carries over.
+const LOCK_EXCLUSIVE_SQL = `SELECT current_setting('${TX_PROBE}', true) AS probe FROM pg_advisory_xact_lock($1::int8)`;
+const LOCK_SHARED_SQL = `SELECT current_setting('${TX_PROBE}', true) AS probe FROM pg_advisory_xact_lock_shared($1::int8)`;
 
 const INT8_MIN = -(2n ** 63n);
 const INT8_MAX = 2n ** 63n - 1n;
@@ -133,6 +143,22 @@ async function physicalLocks(
   return canonicalPhysical(locks);
 }
 
+/**
+ * The probe comes back as NULL (never set in this session) or '' (its reset value, once a previous
+ * autocommit statement defined it) when HASH_SQL and the lock statement ran in separate implicit
+ * transactions: the port is being used without BEGIN, and the lock just taken is already gone.
+ */
+function assertInTransaction(raw: unknown): void {
+  const probe = rowsOf(raw)[0]?.probe;
+  if (probe === TX_PROBE_OPEN) return;
+  if (probe === null || probe === undefined || probe === '') {
+    throw new SagaUsageError(
+      'advisory locks need an open transaction: the lock statement ran in autocommit mode, so pg_advisory_xact_lock was released as soon as it was granted. TransactionPort.run must wrap work(tx) in BEGIN ... COMMIT on one connection',
+    );
+  }
+  throw new UnexpectedQueryResultError(probe);
+}
+
 function timeoutSetting(ms: number): string {
   return `${ms}ms`;
 }
@@ -155,7 +181,9 @@ async function lockAll(query: SqlQuery, locks: readonly PhysicalLock[]): Promise
         current = wanted;
       }
     }
-    await query(request.mode === 'shared' ? LOCK_SHARED_SQL : LOCK_EXCLUSIVE_SQL, [key]);
+    assertInTransaction(
+      await query(request.mode === 'shared' ? LOCK_SHARED_SQL : LOCK_EXCLUSIVE_SQL, [key]),
+    );
   }
   // Restore so the lock timeout never leaks into the step's own row locks. Not in a finally: a
   // failed lock aborts the transaction, and its rollback already discards the local setting.
