@@ -6,6 +6,11 @@
   (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
 - The e2e HTTP test (`test/orders.e2e.spec.ts`) binds a loopback socket: run it with network permissions.
+- The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
+  set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
+  Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
+- `test/dist-*.spec.ts` check the built package (`dist/`) and are skipped when it is absent: run
+  `npm run build` first (`npm run verify` already builds before it tests).
 
 ## Non-negotiable runtime invariants (SPEC §17 · PLAN §8)
 
@@ -30,6 +35,10 @@
 - Barrel `src/index.ts`: never imports `amqplib` or `@grpc/grpc-js` (transitively).
 - `src/testing/`: never imports `src/inbound/` or `src/adapters/`.
 - Optional peers (`amqplib`, `@grpc/grpc-js`, `@nestjs/graphql`) live only in `inbound/` and `adapters/`.
+- `src/saga/postgres/` (`saga-postgres-no-npm`): **zero npm imports** — the Postgres saga adapters
+  take a query function from the app, so the main barrel can export them.
+- `src/` (`src-no-pg`): never imports `pg`, `pg-*` or `@types/pg`; `pg` is a devDependency for the
+  `ESTELA_PG_URL`-gated e2e only.
 
 ## Adding features (OCP)
 
@@ -37,11 +46,17 @@
 - New inbound transport → `InboundTransportStrategy` + `HeaderMapper`.
 - New flow step → `FlowStep` class + builder method + `describe()` (graph) + tests.
 - New idempotency backend → `IdempotencyStore` implementation (see README Redis contract).
+- New saga lock backend → `LockPort` implementation (reference: `postgresAdvisoryLockPort`).
+- New saga CAS / state-transition backend → `TransitionPort` implementation (reference:
+  `postgresTransitionPort`).
+- New saga idempotency ledger → `IdempotencyLedger` implementation; declare `transactional`
+  (`false` = the runner releases claims on rollback and rejects it with a retry policy — test-only).
 
 ## Testing rules
 
 - Every invariant gets a test. Use `@estela/nest/testing` helpers:
-  `bindFlow` · `waitFor` · `collect` · `createTestMessage` · `MemoryIdempotencyStore`.
+  `bindFlow` · `waitFor` · `collect` · `createTestMessage` · `MemoryIdempotencyStore` ·
+  `MemoryLockPort` · `MemoryTransitionPort` · `testUnitOfWork` (saga concurrency, no database).
 - Test files: `*.spec.ts` under `src/` or `test/` (jest roots).
 - Handlers subscribed to awaited channels must return their promise (never `void p`) —
   producers of `direct` channels wait for full execution (spec §17.3).

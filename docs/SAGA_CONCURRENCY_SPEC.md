@@ -1,6 +1,6 @@
 # Estela 0.9.0: saga concurrency spec
 
-Status: final, ready to implement. Base: `ec13370` (`chore(release): 0.8.0`), branch `feat/saga-concurrency`.
+Status: final, ready to implement. Base: `ec13370` (`chore(release): 0.8.0`), branch `feat/SPI-188-saga-concurrency`.
 
 This spec merges two candidate designs:
 - **Base: "correctness-first".** It found the latent `RunState` bug, gives a deadlock-freedom argument that holds under hash collisions, treats an unknown CAS outcome as an error, and adds the nested-saga guard.
@@ -509,7 +509,7 @@ export class MemoryTransitionPort<Tx = unknown> implements TransitionPort<Tx> {
 
 **Kept internal:** `unit-of-work`, `segments`, `retry-policy` and `saga-definition`.
 
-**Header comment.** The barrel header is currently Spanish. Translate it to English while touching the file, as AGENTS.md and the comment check require.
+**Header comment.** The barrel header is currently Spanish. Translate it to English while touching the file: `npm run comments:en` (`scripts/check-comments-en.cjs`) flags non-English comments, and AGENTS.md §"Pull requests → Language and attribution" requires English in code and comments.
 
 ## 3. File layout
 
