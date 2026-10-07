@@ -223,6 +223,9 @@ export class SagaRunner<Tx = unknown> {
     for (const [index, segment] of segments.entries()) {
       if (segment.kind === 'outbound') {
         await this.runOutbound(run, segment.step, lastLocks, index);
+        // A replay found by the claim of an outbound-first saga ends the run here: the segments
+        // after it would resolve locks and run steps over a ctx the skipped outbound never filled.
+        if (state.replay !== undefined) return state.replay.response;
         continue;
       }
       const locks = resolveLocks(definition.name, segment.locks, ctx, this.maxLocksPerUnit);

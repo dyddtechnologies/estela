@@ -1954,3 +1954,55 @@ describe('saga concurrency: the checkpoint survives failing effects (U31)', () =
     expect(checkpoint.mock.results[0]?.value).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('saga concurrency: replay of an outbound-first saga with a locked unit after it (U33)', () => {
+  /** The outbound call is what fills `orderId`; the lock after it keys on that value. */
+  function build(calls: string[]) {
+    return saga<Ctx, string[], string>('outbound-then-lock')
+      .idempotent((c) => c.key)
+      .outbound('reserve', (ctx) => {
+        calls.push(ctx.id);
+        ctx.orderId = `order-${ctx.id}`;
+      })
+      .lock('ext', (c) => c.orderId, 'exclusive')
+      .transaction('persist', (ctx, tx) => {
+        tx.push(`${ctx.id}:${ctx.orderId ?? 'none'}`);
+      })
+      .reply((ctx) => `reply:${ctx.id}`);
+  }
+
+  it('returns the replayed reply without resolving the lock of the unit the outbound would have fed', async () => {
+    const db = new FakeDb();
+    const ledger = new TxLedger(db);
+    const calls: string[] = [];
+    const locks = new MemoryLockPort<string[]>();
+    const acquire = jest.spyOn(locks, 'acquire');
+    const runner = runnerFor(db, { ledger, locks });
+    const definition = build(calls);
+
+    await expect(runner.run(definition, { id: 'a', key: 'k', trail: [] })).resolves.toBe('reply:a');
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(db.committed).toContain('a:order-a');
+
+    // Same key, fresh ctx: the claim replays, so the outbound never runs and `orderId` stays unset.
+    await expect(runner.run(definition, { id: 'b', key: 'k', trail: [] })).resolves.toBe('reply:a');
+    expect(calls).toEqual(['a']);
+    expect(acquire).toHaveBeenCalledTimes(1);
+    expect(db.committed.filter((w) => w.startsWith('b:'))).toEqual([]);
+  });
+
+  it('still fails fast when a run that is not a replay resolves no key for the lock', async () => {
+    const db = new FakeDb();
+    const definition = saga<Ctx, string[], string>('outbound-no-key')
+      .outbound('noop', () => undefined)
+      .lock('ext', (c) => c.orderId, 'exclusive')
+      .transaction('persist', () => undefined)
+      .reply((ctx) => ctx.id);
+    await expect(
+      runnerFor(db, { locks: new MemoryLockPort<string[]>() }).run(definition, {
+        id: 'a',
+        trail: [],
+      }),
+    ).rejects.toThrow('lock "ext" in saga "outbound-no-key" resolved no key');
+  });
+});
