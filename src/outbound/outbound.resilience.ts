@@ -22,6 +22,9 @@ import type {
   OutboundBackoffFn,
 } from './outbound.types';
 
+/** One expanded level: a policy, `false` (no policy here and below) or nothing. */
+type PolicyLayer = ResiliencePolicy | false | undefined;
+
 export const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 const STATEFUL = ['circuitBreaker', 'bulkhead', 'rateLimit'] as const;
@@ -43,6 +46,7 @@ export interface OutboundResiliencePlan {
 
 /** 0.9.0 retry plan resolved by `outbound.plan.ts`, used to build the legacy alias mark. */
 export interface LegacyRetrySource {
+  maxAttempts: number;
   backoff: OutboundBackoffFn;
   retryOn: OutboundRetryClassifierFn;
   methods: ReadonlySet<string>;
@@ -69,6 +73,17 @@ function exchangeOf(data: RestAttemptData, attempts: number): OutboundExchangeCo
 export function usesResilience(
   binding: OutboundRestOptions,
   defaults: OutboundRestDefaults | undefined,
+  runtime?: ResilienceRuntime,
+): boolean {
+  return (
+    usesOwnResilience(binding, defaults) ||
+    runtime?.options.defaults?.['outbound-rest'] !== undefined
+  );
+}
+
+function usesOwnResilience(
+  binding: OutboundRestOptions,
+  defaults: OutboundRestDefaults | undefined,
 ): boolean {
   return binding.resilience !== undefined || defaults?.resilience !== undefined;
 }
@@ -84,12 +99,27 @@ function legacyMark(source: LegacyRetrySource): LegacyRetryMark {
  * One layer of the plan: the `resilience` policy plus the legacy `retry` / `timeoutMs` of the same
  * options as aliases. The same primitive in both spellings on one layer is refused (RS-35).
  */
+// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to a policy, false (cut) or nothing
 function layerOf(
   name: string,
   options: OutboundRestOptions,
   input: OutboundResilienceInput,
-): ResiliencePolicy | undefined {
-  const policy = expandPolicyRef(name, options.resilience, input.runtime.options.policies);
+  moduleDefault?: OutboundRestOptions['resilience'],
+): PolicyLayer {
+  if (options.resilience !== undefined && moduleDefault !== undefined) {
+    throw new ResilienceDefinitionError(
+      name,
+      'defaults.outbound-rest',
+      'is set both as resilience.defaults and as outbound.rest.defaults.resilience',
+      'LEGACY_AND_NEW_SAME_LAYER',
+    );
+  }
+  const policy = expandPolicyRef(
+    name,
+    options.resilience ?? moduleDefault,
+    input.runtime.options.policies,
+  );
+  if (policy === false) return false;
   const layer: Record<string, unknown> = { ...policy };
   if (options.retry !== undefined) layer.retry = retryAlias(name, options.retry, policy, input);
   if (options.timeoutMs !== undefined)
@@ -111,6 +141,11 @@ function retryAlias(
     );
   }
   if (retry === false) return false;
+  // The 0.9.0 alias keeps its field-by-field merge across binding and module (section 1).
+  const legacy = input.legacyRetry;
+  if (legacy !== undefined) {
+    return { enabled: true, maxAttempts: legacy.maxAttempts, [LEGACY_ALIAS]: legacyMark(legacy) };
+  }
   const mark =
     input.legacyRetry === undefined ? {} : { [LEGACY_ALIAS]: legacyMark(input.legacyRetry) };
   return { ...retry, ...mark };
@@ -135,12 +170,12 @@ function timeoutAlias(
 /** RS-33: ad-hoc options cannot hold state; module stateful primitives are skipped with a warn. */
 function adHocLayers(
   name: string,
-  own: ResiliencePolicy | undefined,
-  moduleLayer: ResiliencePolicy | undefined,
+  own: PolicyLayer,
+  moduleLayer: PolicyLayer,
   runtime: ResilienceRuntime,
-): (ResiliencePolicy | undefined)[] {
+): PolicyLayer[] {
   for (const primitive of STATEFUL) {
-    const value = own?.[primitive];
+    const value = own === false ? undefined : own?.[primitive];
     if (value !== undefined && value !== false) {
       throw new ResilienceDefinitionError(
         name,
@@ -149,7 +184,7 @@ function adHocLayers(
       );
     }
   }
-  if (moduleLayer === undefined) return [own];
+  if (moduleLayer === undefined || moduleLayer === false || own === false) return [own];
   const stripped: Record<string, unknown> = { ...moduleLayer };
   const skipped = STATEFUL.filter(
     (primitive) => stripped[primitive] !== undefined && stripped[primitive] !== false,
@@ -164,10 +199,11 @@ function adHocLayers(
 }
 
 function methodsOf(
-  layers: readonly (ResiliencePolicy | undefined)[],
+  layers: readonly PolicyLayer[],
   legacy: LegacyRetrySource | undefined,
 ): ReadonlySet<string> {
   for (const layer of layers) {
+    if (layer === false) break;
     const retry = layer?.retry as { methods?: readonly string[] } | false | undefined;
     if (retry !== undefined && retry !== false && retry.methods !== undefined)
       return new Set(retry.methods);
@@ -214,8 +250,12 @@ export function resolveOutboundResilience(
   input: OutboundResilienceInput,
 ): OutboundResiliencePlan {
   const own = layerOf(name, input.binding, input);
-  const moduleLayer =
-    input.defaults === undefined ? undefined : layerOf(name, input.defaults, input);
+  const moduleLayer = layerOf(
+    name,
+    input.defaults ?? {},
+    input,
+    input.runtime.options.defaults?.['outbound-rest'],
+  );
   const layers = input.adHoc
     ? adHocLayers(name, own, moduleLayer, input.runtime)
     : [own, moduleLayer];

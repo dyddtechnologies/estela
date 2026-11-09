@@ -21,7 +21,11 @@ import type { InboundDefaults, InboundSpec } from './inbound.types';
 const shedders = new WeakMap<ResilienceRuntime, WeakMap<InboundSpec, LoadShedder | null>>();
 
 /** The shed key function of an inbound policy receives the shed context, not a call context. */
-function adaptKey(policy: ResiliencePolicy | undefined): ResiliencePolicy | undefined {
+// eslint-disable-next-line sonarjs/function-return-type -- a layer stays to a policy, false (cut) or nothing
+function adaptKey(
+  policy: ResiliencePolicy | false | undefined,
+): ResiliencePolicy | false | undefined {
+  if (policy === false) return false;
   const rateLimit = policy?.rateLimit;
   if (rateLimit === undefined || rateLimit === false || rateLimit.key === undefined) return policy;
   const key = rateLimit.key as unknown as (ctx: InboundShedContext) => string;

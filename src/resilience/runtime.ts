@@ -5,6 +5,7 @@ import { RuntimeResilienceRegistry } from './registry';
 import { ResilienceDefinitionError } from './resilience.errors';
 import {
   resolveResiliencePlan,
+  validateProfiles,
   type ResiliencePlan,
   type ResolvePlanOptions,
 } from './resilience.plan';
@@ -34,6 +35,18 @@ export interface ResilienceRuntimeInit {
   logger?: ResilienceLogger;
 }
 
+/** RS-53, RS-54: profiles and reserved defaults fail the boot before any subject resolves them. */
+function validateModuleOptions(options: ResilienceModuleOptions): void {
+  validateProfiles(options.policies);
+  if (options.defaults?.inbound !== undefined) {
+    throw new ResilienceDefinitionError(
+      'resilience',
+      'defaults.inbound',
+      'is not allowed; inbound load shedding comes from InboundDefaults.resilience',
+    );
+  }
+}
+
 /**
  * Module-wide resilience state: options, named policies, clock, observability and the registry
  * of executors. The module creates one; standalone gateways and saga runners create their own.
@@ -52,6 +65,7 @@ export class ResilienceRuntime {
     init: ResilienceRuntimeInit = {},
   ) {
     this.enabled = init.enabled ?? true;
+    validateModuleOptions(options);
     this.clock = options.clock ?? systemResilienceClock;
     this.random = options.random ?? ((max) => randomInt(max));
     const logger = options.logger ?? init.logger;

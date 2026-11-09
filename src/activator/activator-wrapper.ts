@@ -64,7 +64,7 @@ export function activatorResilience(
   const result: ActivatorResilience = {};
   if (runtime !== undefined && ref !== undefined) {
     const scope = activatorScope(binding);
-    const plan = runtime.plan(scope, [ref], 'activator');
+    const plan = runtime.plan(scope, [ref, runtime.options.defaults?.activator], 'activator');
     if (plan.retry !== undefined && plan.retry.maxAttempts > 1 && !plan.retry.idempotent) {
       runtime.observer.logger.warn(
         `${scope}: resilience.retry.maxAttempts > 1 without idempotent: true; only messages with an idempotencyKey are retried`,

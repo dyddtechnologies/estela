@@ -386,4 +386,47 @@ describe('outbound REST under resilience', () => {
     expect(ResilienceKeyError).toBeDefined();
     expect(createMessage).toBeDefined();
   });
+
+  it('RU-04 keeps the 0.9.0 field merge for legacy aliases and applies resilience.defaults per edge kind', async () => {
+    const { clock, sleeps } = recordingClock();
+    const legacy = setup([answer(503)], {
+      resilience: { clock },
+      deps: { defaults: { retry: { maxAttempts: 5 } } },
+    });
+    legacy.gateway.bind({
+      name: 'l',
+      url: URL_ORDERS,
+      method: 'GET',
+      retry: { backoff: 50 },
+      resilience: {},
+    });
+    await legacy.gateway.request('l', { payload: {} }).catch(() => undefined);
+    expect(legacy.calls).toHaveLength(5);
+    expect(sleeps).toEqual([50, 50, 50, 50]);
+
+    const byKind = setup([answer(503)], {
+      resilience: {
+        clock,
+        defaults: { 'outbound-rest': { retry: { maxAttempts: 5, idempotent: true } } },
+      },
+    });
+    byKind.gateway.bind({
+      name: 'k',
+      url: URL_ORDERS,
+      resilience: { retry: { maxAttempts: 2, idempotent: true } },
+    });
+    byKind.gateway.bind({ name: 'd', url: URL_ORDERS });
+    await byKind.gateway.request('k', { payload: {} }).catch(() => undefined);
+    expect(byKind.calls).toHaveLength(2);
+    await byKind.gateway.request('d', { payload: {} }).catch(() => undefined);
+    expect(byKind.calls).toHaveLength(7);
+
+    const both = setup([], {
+      resilience: { defaults: { 'outbound-rest': {} } },
+      deps: { defaults: { resilience: {} } },
+    });
+    expect(() => both.gateway.bind({ name: 'x', url: URL_ORDERS })).toThrow(
+      ResilienceDefinitionError,
+    );
+  });
 });

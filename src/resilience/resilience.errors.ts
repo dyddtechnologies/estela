@@ -142,15 +142,48 @@ export class ResilienceKeyError extends ResilienceError {
   }
 }
 
+/** One finding of the boot resolver, shared by every concern (RS-67). Names only, never values. */
+export interface FlowParameterFinding {
+  readonly concern: 'flow' | 'resilience' | 'sensitive' | 'idempotency';
+  readonly code: string;
+  readonly severity: 'error' | 'warning' | 'info';
+  /** For example "flow 'loan' step 'credit'". */
+  readonly subject: string;
+  /** Option path, for example "resilience.use". */
+  readonly path: string;
+  readonly message: string;
+}
+
 /** Boot-time misconfiguration; message = `<binding>: resilience.<path> <rule>`. */
 export class ResilienceDefinitionError extends ResilienceError {
   static override readonly errorKind = 'definition';
   readonly kind = 'definition';
   readonly path: string;
+  /** Finding code, for example `UNKNOWN_PROFILE`; `INVALID_OPTION` for a value rule. */
+  readonly code: string;
+  /** Every finding of the boot pass (RS-67); one entry when thrown on its own. */
+  readonly findings: readonly FlowParameterFinding[];
 
-  constructor(binding: string, path: string, rule: string) {
+  constructor(
+    binding: string,
+    path: string,
+    rule: string,
+    code = 'INVALID_OPTION',
+    findings?: readonly FlowParameterFinding[],
+  ) {
     super(`${binding}: resilience.${path} ${rule}`, { binding });
     this.path = path;
+    this.code = code;
+    this.findings = findings ?? [
+      {
+        concern: 'resilience',
+        code,
+        severity: 'error',
+        subject: binding,
+        path: `resilience.${path}`,
+        message: this.message,
+      },
+    ];
   }
 }
 

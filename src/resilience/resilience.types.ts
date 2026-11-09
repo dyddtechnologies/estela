@@ -11,8 +11,9 @@ export type ResilienceEdgeKind =
   | 'activator'
   | 'inbound'
   | 'saga-outbound'
-  | 'flow'
-  | 'channel';
+  | 'flow-handle'
+  | 'flow-jump'
+  | 'flow-send';
 
 export interface Classification {
   class: FailureClass;
@@ -149,8 +150,24 @@ export interface ResiliencePolicy {
   fallback?: false | FallbackPolicy;
 }
 
-/** RS-51: a policy name, an inline policy, or a name with overrides layered over it. */
-export type ResiliencePolicyRef<P = ResiliencePolicy> = string | (P & { use?: string });
+/** Profile names: `^[a-z0-9][a-z0-9._-]{0,63}$` (RS-53). */
+// eslint-disable-next-line sonarjs/redundant-type-aliases -- names the profile grammar in the public API
+export type ProfileName = string;
+
+/** RS-53: a reusable profile; `extends` is single inheritance resolved at boot. */
+export interface NamedResiliencePolicy extends ResiliencePolicy {
+  extends?: ProfileName;
+}
+
+/**
+ * RS-51, RS-52: a profile name, an inline policy, a name with inline fields deep-merged over it
+ * (`{ use, ...inline }`), or `false` (no policy at this level and below).
+ */
+export type ResiliencePolicyRef<P = ResiliencePolicy> =
+  ProfileName | (P & { use?: ProfileName }) | false;
+// eslint-disable-next-line sonarjs/redundant-type-aliases -- shared flow parameter model name
+export type ResilienceRef = ResiliencePolicyRef;
+export type InboundResilienceRef = ResiliencePolicyRef<InboundResiliencePolicy>;
 
 /** Inbound accepts load shedding only (RS-37). */
 export type InboundResiliencePolicy = Pick<ResiliencePolicy, 'bulkhead'> & {
@@ -188,6 +205,8 @@ export interface ResilienceEvent {
   type: ResilienceEventType;
   edge: ResilienceEdgeKind;
   binding: string;
+  /** RS-66: the target channel of a flow send or jump edge; absent elsewhere. */
+  channel?: string;
   /** keyLabel(key) when configured; never the raw key (RS-43). */
   keyLabel?: string;
   class?: FailureClass;
@@ -239,10 +258,10 @@ export interface ResilienceModuleOptions {
    */
   keyHasher?: (key: string) => string;
   retryBudget?: { header?: string; initial?: number };
-  /** RS-51: reusable policies, referenced by name anywhere a policy is accepted. */
-  policies?: Record<string, ResiliencePolicy>;
-  /** RS-53: module layer of the flow dispatching steps (never handle/transform). */
-  flowDefaults?: ResiliencePolicyRef;
+  /** RS-53: named reusable profiles, referenced by name anywhere a policy is accepted. */
+  policies?: Readonly<Record<ProfileName, NamedResiliencePolicy>>;
+  /** RS-54: L1 defaults per edge kind; a profile name or an inline policy. `inbound` is refused. */
+  defaults?: Partial<Record<ResilienceEdgeKind, ResiliencePolicyRef>>;
   /** Default 100 (provisional until SPI-444). */
   stateTimeoutMs?: number;
   /** Default 5000. */

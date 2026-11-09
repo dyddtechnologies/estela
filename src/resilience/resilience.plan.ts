@@ -15,6 +15,7 @@ import type {
   ResiliencePolicyRef,
   ResilienceStatePort,
   RetryPolicyOptions,
+  NamedResiliencePolicy,
   TimeoutPolicy,
 } from './resilience.types';
 
@@ -179,75 +180,158 @@ function defined(options: object): Layerable {
  * Field-by-field merge of one primitive over layers given highest first (RS-04): `enabled` comes
  * from the highest layer that sets the primitive, `false` turns it off.
  */
+/**
+ * RS-04 (amended): across levels (highest first) the highest level that sets a primitive owns it
+ * whole; there is no field merge across levels. `false` turns the primitive off.
+ */
 function layerPrimitive(values: readonly unknown[]): Layered {
-  let options: Layerable = {};
-  let enabled: boolean | undefined;
-  let explicit = false;
-  let top: Layerable | undefined;
-  for (let index = values.length - 1; index >= 0; index -= 1) {
-    const value = values[index];
+  for (const value of values) {
     if (value === undefined) continue;
-    explicit = true;
-    const layer: Layerable = value === false ? { enabled: false } : (value as Layerable);
-    options = { ...options, ...defined(layer) };
-    enabled = layer.enabled ?? true;
-    top = layer;
+    if (value === false) return { options: { enabled: false }, enabled: false, explicit: true };
+    const layer = value as Layerable;
+    return { options: defined(layer), enabled: layer.enabled ?? true, explicit: true, top: layer };
   }
-  const layered: Layered = { options, enabled: enabled ?? true, explicit };
-  if (top !== undefined) layered.top = top;
-  return layered;
+  return { options: {}, enabled: true, explicit: false };
 }
 
-/** Merged policy of `layers` (highest first), still unvalidated; used to expand `use`. */
-export function layerPolicies(
-  layers: readonly (ResiliencePolicy | undefined)[],
-): ResiliencePolicy | undefined {
-  const present = layers.filter((layer): layer is ResiliencePolicy => layer !== undefined);
-  if (present.length === 0) return undefined;
-  const merged: Record<string, unknown> = {};
-  for (const name of PRIMITIVES) {
-    const layered = layerPrimitive(present.map((layer) => layer[name]));
-    if (!layered.explicit) continue;
-    merged[name] = layered.enabled ? { ...layered.options, enabled: true } : false;
+const PROFILE_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const MAX_EXTENDS_HOPS = 8;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+/** Deep merge used once inside a reference (`use`, `extends`): arrays, functions and `false` replace. */
+export function deepMergePolicy<T>(base: T, over: unknown): T {
+  if (!isPlainObject(base) || !isPlainObject(over)) return over as T;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(over)) {
+    if (value !== undefined) out[key] = deepMergePolicy(base[key], value);
   }
-  const classify = present.find((layer) => layer.classify !== undefined)?.classify;
-  if (classify !== undefined) merged.classify = classify;
+  return out as T;
+}
+
+function definitionError(
+  binding: string,
+  path: string,
+  rule: string,
+  code: string,
+): ResilienceDefinitionError {
+  return new ResilienceDefinitionError(binding, path, rule, code);
+}
+
+/** RS-53: a named profile with its `extends` chain applied (parent first, child over it). */
+export function resolveProfile(
+  binding: string,
+  name: unknown,
+  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
+): ResiliencePolicy {
+  const chain: string[] = [];
+  let current: unknown = name;
+  while (current !== undefined) {
+    if (typeof current !== 'string' || !PROFILE_NAME.test(current)) {
+      throw definitionError(binding, 'use', 'must be a profile name', 'UNKNOWN_PROFILE');
+    }
+    if (chain.includes(current)) {
+      throw definitionError(
+        binding,
+        'use',
+        `profiles ${describeChain([...chain, current])} form a cycle`,
+        'PROFILE_CYCLE',
+      );
+    }
+    const policy =
+      policies !== undefined && Object.hasOwn(policies, current) ? policies[current] : undefined;
+    if (policy === undefined) {
+      throw definitionError(
+        binding,
+        'use',
+        `names an unknown policy '${current}'`,
+        'UNKNOWN_PROFILE',
+      );
+    }
+    if (Object.hasOwn(policy, 'use')) {
+      throw definitionError(
+        binding,
+        'use',
+        `policy '${current}' must not itself use another`,
+        'UNKNOWN_PROFILE',
+      );
+    }
+    chain.push(current);
+    if (chain.length - 1 > MAX_EXTENDS_HOPS) {
+      throw definitionError(
+        binding,
+        'use',
+        `profile '${String(name)}' extends more than ${MAX_EXTENDS_HOPS} hops`,
+        'PROFILE_DEPTH',
+      );
+    }
+    current = policy.extends;
+  }
+  let merged: Record<string, unknown> = {};
+  for (const profile of [...chain].reverse()) {
+    const own: Record<string, unknown> = { ...policies?.[profile] };
+    delete own.extends;
+    merged = deepMergePolicy(merged, own);
+  }
   return merged;
 }
 
-/** RS-51: expands a policy reference against the named policies. */
+function describeChain(names: readonly string[]): string {
+  return names.map((name) => `'${name}'`).join(' -> ');
+}
+
+/** RS-51, RS-52: expands one reference; `false` means no policy at this level and below. */
+// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to a policy, false (cut) or nothing
 export function expandPolicyRef<P extends object = ResiliencePolicy>(
   binding: string,
   ref: ResiliencePolicyRef<P> | undefined,
-  policies: Readonly<Record<string, ResiliencePolicy>> | undefined,
-): ResiliencePolicy | undefined {
-  if (ref === undefined) return undefined;
-  const named = (name: unknown): ResiliencePolicy => {
-    if (typeof name !== 'string' || name.length === 0) {
-      throw new ResilienceDefinitionError(binding, 'use', 'must be a policy name');
-    }
-    const policy =
-      policies !== undefined && Object.hasOwn(policies, name) ? policies[name] : undefined;
-    if (policy === undefined) {
-      throw new ResilienceDefinitionError(binding, 'use', `names an unknown policy '${name}'`);
-    }
-    if (Object.hasOwn(policy, 'use')) {
-      throw new ResilienceDefinitionError(
-        binding,
-        'use',
-        `policy '${name}' must not itself use another`,
-      );
-    }
-    return policy;
-  };
-  if (typeof ref === 'string') return named(ref);
+  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
+): ResiliencePolicy | false | undefined {
+  if (ref === undefined || ref === false) return ref;
+  if (typeof ref === 'string') return resolveProfile(binding, ref, policies);
   const raw: unknown = ref;
   if (typeof raw !== 'object' || raw === null) {
     throw new ResilienceDefinitionError(binding, 'use', 'must be a policy name or a policy object');
   }
   if (!Object.hasOwn(ref, 'use')) return ref;
-  const { use, ...overrides } = ref as P & { use?: string };
-  return layerPolicies([overrides, named(use)]);
+  const { use, ...inline } = ref as P & { use?: string };
+  return deepMergePolicy(resolveProfile(binding, use, policies), inline);
+}
+
+/** Expanded layers, cut at the first `false` (highest first). */
+export function expandLayers(
+  binding: string,
+  layers: readonly (ResiliencePolicyRef | undefined)[],
+  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
+): ResiliencePolicy[] {
+  const out: ResiliencePolicy[] = [];
+  for (const layer of layers) {
+    const expanded = expandPolicyRef(binding, layer, policies);
+    if (expanded === false) break;
+    if (expanded !== undefined) out.push(expanded);
+  }
+  return out;
+}
+
+/** RS-53: validates every profile name, `extends` chain and the reserved `defaults.inbound`. */
+export function validateProfiles(
+  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
+): void {
+  for (const name of Object.keys(policies ?? {})) {
+    if (!PROFILE_NAME.test(name)) {
+      throw definitionError(
+        'resilience',
+        `policies.${name}`,
+        'is not a valid profile name',
+        'UNKNOWN_PROFILE',
+      );
+    }
+    resolveProfile(`policy '${name}'`, name, policies);
+  }
 }
 
 // ---------- Validation helpers ----------
@@ -588,9 +672,7 @@ export function resolveResiliencePlan(
   options: ResolvePlanOptions = {},
 ): ResiliencePlan {
   const checker = new Checker(binding);
-  const expanded = layers
-    .map((layer) => expandPolicyRef(binding, layer, options.policies))
-    .filter((layer): layer is ResiliencePolicy => layer !== undefined);
+  const expanded = expandLayers(binding, layers, options.policies);
   assertAllowed(checker, expanded, options.allowed ?? PRIMITIVES);
   const of = (name: PrimitiveName): Layered => layerPrimitive(expanded.map((layer) => layer[name]));
   const base = {

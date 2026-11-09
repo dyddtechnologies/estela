@@ -353,7 +353,7 @@ export function resolveOutboundRestPlan(
     ...resolveFeatures(binding, deps),
     ...resolveHooks(binding, merged, deps.resolver),
   };
-  if (usesResilience(binding, deps.defaults) && deps.resilience !== undefined) {
+  if (deps.resilience !== undefined && usesResilience(binding, deps.defaults, deps.resilience())) {
     plan.resilience = resolveOutboundResilience(identity.name, {
       binding,
       defaults: deps.defaults,
