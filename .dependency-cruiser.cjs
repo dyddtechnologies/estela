@@ -80,10 +80,10 @@ module.exports = {
     {
       name: 'resilience-is-leaf',
       comment:
-        'Resilience spec sec.4: src/resilience never imports outbound, inbound, activator or saga; they depend on it.',
+        'Resilience spec sec.4 (amended): src/resilience never imports outbound, inbound, activator, saga or flow; they depend on it.',
       severity: 'error',
       from: { path: '^src/resilience/', pathNot: '\\.spec\\.ts$' },
-      to: { path: '^src/(outbound|inbound|activator|saga)/' },
+      to: { path: '^src/(outbound|inbound|activator|saga|flow)/' },
     },
   ],
   options: {
