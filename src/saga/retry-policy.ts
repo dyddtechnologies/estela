@@ -1,6 +1,8 @@
 import { SagaUsageError, type ConcurrencyErrorKind } from './concurrency-errors';
 
-export type JitterMode = 'full' | 'equal' | 'none';
+import { MAX_BACKOFF_MS, MAX_RETRY_ATTEMPTS, delayFor, type JitterMode } from '../resilience/backoff';
+
+export { MAX_BACKOFF_MS, MAX_RETRY_ATTEMPTS, delayFor, type JitterMode };
 
 /**
  * Saga-level retry policy. Only a failed unit of work is re-run: it is atomic, so re-running it
@@ -20,32 +22,6 @@ export interface RetryPolicy<Ctx> {
   /** 'clone' (default) or a function that snapshots ctx and returns a restore thunk.
    *  The thunk MUST mutate ctx in place: ctx identity is kept across attempts. */
   checkpoint?: 'clone' | ((ctx: Ctx) => () => void);
-}
-
-export const MAX_RETRY_ATTEMPTS = 20;
-/** setTimeout fires immediately above int32, so no single backoff may exceed it. */
-export const MAX_BACKOFF_MS = 2_147_483_647;
-const DEFAULT_MAX_BACKOFF_FACTOR = 32;
-
-/** Backoff before attempt `attempt + 1`, after `attempt` failed (attempt is 1-based). */
-export function delayFor(
-  policy: Pick<RetryPolicy<unknown>, 'backoffMs' | 'maxBackoffMs' | 'jitter'>,
-  attempt: number,
-  random: (maxExclusive: number) => number,
-): number {
-  const cap = Math.min(
-    policy.maxBackoffMs ?? policy.backoffMs * DEFAULT_MAX_BACKOFF_FACTOR,
-    MAX_BACKOFF_MS,
-  );
-  const d = Math.min(cap, policy.backoffMs * 2 ** (attempt - 1));
-  switch (policy.jitter ?? 'full') {
-    case 'full':
-      return random(d + 1);
-    case 'equal':
-      return Math.floor(d / 2) + random(Math.ceil(d / 2) + 1);
-    default:
-      return d;
-  }
 }
 
 /** Root-realm prototype check, so objects restored by structuredClone (another realm under
