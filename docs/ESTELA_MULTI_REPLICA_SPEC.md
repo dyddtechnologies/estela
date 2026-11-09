@@ -1,10 +1,14 @@
 # Estela 0.10: multi-replica correctness spec
 
-Status: draft, revised after the SDD review of 2026-11-09; not implemented. Base: `20ae298` (`chore(release): 0.9.0`), branch
+Status: draft, revised after the SDD review of 2026-11-09 and extended with the flow parameter model (section 16, MR-39 to MR-53); not implemented. Base: `20ae298` (`chore(release): 0.9.0`), branch
+
+Shared flow parameter model: [`ESTELA_FLOW_PARAMETERS.md`](./ESTELA_FLOW_PARAMETERS.md) (proposed location; see the open location question).
 `docs/SPI-428-koletz-readiness-specs`. Ticket: **SPI-429** (epic SPI-428). Requirement prefix: `MR-`.
+Cross-spec consistency pass (2026-11-09, with SPI-433, SPI-445 and the KA- spec): MR-47 and MR-49 are
+marked "(amended)" (class rule of RS-67, `id` rule of RS-66); OQ-14 takes SD-67 for the resolver.
 Supersedes section 3 of the combined Koletz readiness draft (`2026-11-09-estela-koletz-readiness.md`
 in the voice-plat repo). Resilience (timeouts, breakers, retry budgets: `ESTELA_RESILIENCE_SPEC.md`,
-ticket placeholder SPI-445, prefix `RS-`) and sensitive-data redaction (`ESTELA_SENSITIVE_DATA_SPEC.md`,
+ticket SPI-445, prefix `RS-`) and sensitive-data redaction (`ESTELA_SENSITIVE_DATA_SPEC.md`,
 SPI-433, prefix `SD-`) are separate specs and are referenced, never redefined, here. This spec is
 generic library behaviour: every adopter rule (which services enable the guard, which store, which
 keys are digested) lives in the Koletz adoption spec (`2026-11-09-estela-adoption-koletz.md`, prefix
@@ -93,7 +97,11 @@ store, behaves byte-for-byte as in 0.9.0:
 - same claims, same repeat answers, same errors, same hop log lines;
 - no new boot log line (MR-27);
 - `MemoryIdempotencyStore`, `NoopIdempotencyStore`, `MemoryLockPort` and `MemoryIdempotencyLedger`
-  keep their behaviour; they only gain a read-only `visibility` property;
+  keep their behaviour; they only gain a read-only `visibility` property (and, for the two stores, a
+  read-only `kind` label, MR-40) (amended);
+- flows written as in 0.9.0 (no `FlowOptions`, no step options, no channel `idempotency`) claim the
+  same scopes with the same TTL on the same store, and `GET /integration/graph` returns the same JSON
+  (MR-50);
 - every existing test passes unmodified.
 
 ### 1.2 Additive changes only (release type: `feat`, minor 0.10.0)
@@ -109,6 +117,19 @@ store, behaves byte-for-byte as in 0.9.0:
 | `InboundIdempotencyOptions` | `onStoreUnavailable?` | Optional. |
 | `LockPort`, `IdempotencyLedger` | `readonly visibility?: StateVisibility` | Optional. |
 | `SagaRunnerOptions` | `replicas?` | Optional. |
+| `IdempotencyStore` (section 16) | `readonly kind?: string` | Optional display label. |
+| `IntegrationIdempotencyOptions` (section 16) | `stores?`; `store` also accepts a store name | Optional; a store object is still accepted. |
+| `ChannelSpec` (section 16) | `idempotency?: { store?, ttlMs?, onStoreUnavailable? }` | Optional field. |
+| `IntegrationFlow.from` (section 16) | optional second argument `FlowOptions` | Optional trailing parameter. |
+| `IntegrationFlow.handle` (section 16) | optional second argument with `id?` and `idempotency?` | Optional trailing parameter. |
+| `ActivatorOptions` (section 16) | `idempotency?: { store?, ttlMs?, onStoreUnavailable? }` | Optional field. |
+| `InboundIdempotencyOptions.store` (section 16) | also accepts a store name (a bare string) | A bare string was a type error in 0.9.0. |
+| `ReplicaConfigError` (section 16) | `readonly findings?: readonly ReplicaFinding[]` | Optional member. |
+| `ReplicaSafetyInput` (section 16) | `contributed?` | Optional. |
+| Graph JSON types (section 16) | `GraphSnapshot.module?`, `GraphNode.delivery?/sideEffects?/store?`, `GraphFlowEntry.options?`, step `idempotency?` | Optional fields, omitted when not configured (MR-50). |
+| `IdempotencyService` (section 16) | `forStore(store, policy)` returning a port bound to one resolved store and policy (section 3.8, amended) | New member; existing members keep using the module store. |
+| `FlowIdempotencyPort` (section 16) | `get?(...)`, `release?(...)` | Optional; needed only by step claims (MR-45) and degraded runs (MR-51). |
+| New exports (section 16) | `StoreRef`, `FlowOptions`, `StepIdempotencyOptions`, `ProfileName` | New names; nothing existing is renamed. |
 
 No existing export is renamed, removed or narrowed, and no header or reply-channel contract changes.
 The internal `InboundClaim` union (not exported, `src/index.ts:65` exports only `encodeInboundKey`)
@@ -132,6 +153,17 @@ gains an optional `at` on its `skipped` variant (section 3.11).
   model belongs to the resilience spec. Nothing in this spec changes how many times an outbound call
   is attempted.
 - The emitted `.d.ts` stays parseable by TypeScript 4.9 (`test/dist-typescript4.spec.ts`).
+- Flow parameters (section 16) change behaviour only where a flow, step, channel or activator sets
+  them. An unknown store name fails boot with `ReplicaConfigError` (MR-47); the names are new, so no
+  0.9.0 configuration uses them.
+- The flow parameter resolver calls each `FlowDefinition.build()` once in `onModuleInit` before
+  activators subscribe (section 4.5 step 2), where 0.9.0 calls it after activators, the inbound log
+  and outbounds; step 3 reuses that built flow, so `build()` still runs exactly once per flow and
+  flows are recorded in the graph and attached in the same order. Only a `build()` whose result
+  depends on side effects of activator subscription or outbound binding could observe the change.
+- A JavaScript caller that passes a stray `replicas` key on a `ChannelSpec`, `FlowOptions`, step
+  options or `ActivatorOptions` now fails boot with `TypeError` (MR-53); 0.9.0 ignored unknown keys
+  there.
 
 ### 1.4 Migration
 
@@ -153,6 +185,14 @@ same release; strict mode can be turned on once the non-strict boot logs show no
 **Outbound REST `retry` and `timeoutMs`.** Nothing to migrate in this ticket. They keep 0.9.0
 semantics; the resilience spec makes them aliases of its policy model (RS-34) and owns any
 migration guidance.
+
+**Moving a claim to another store, scope or step id (section 16).** A claim's records are found by
+`(store, scope, key)`. Changing the store of a flow, step or activator, setting a custom `scope`, or
+changing a step's id (including the default positional id `<kind>#<index>` when a step is inserted
+before it) makes the records written before the change invisible: for one TTL, a repeat of a key
+that was claimed before the deploy runs again. This is the same window as the snippet switch above.
+A step with a claim should therefore set an explicit `id` (OQ-11). Changing `ttlMs` affects only
+claims made after the change.
 
 ## 2. Requirements
 
@@ -184,22 +224,22 @@ Test ids are defined in section 8. Ticket for all rows: SPI-429, unless marked.
 | ID | Level | Statement | Acceptance (Given / When / Then) | Test |
 |---|---|---|---|---|
 | MR-12 | MUST | Default policy is fail-closed: when `begin` rejects with `IdempotencyStoreUnavailableError`, nothing is dispatched. Inbound rethrows the error, so the client gets a retryable answer; flows and activators do not run their steps and rethrow it. On a `queue`, `pubsub` or `fanout` source the rethrow reaches the channel's error hook, so the message goes to the error channel and is not redelivered (there is no broker); the 0.9.0 contract for handler errors on those channels. | Given a store whose `begin` is unavailable; when an inbound request, a flow message and an activator message with a key arrive; then no handler or step runs and each caller receives `IdempotencyStoreUnavailableError`. | SU1, SU2, SU3, E4 |
-| MR-13 | MUST | A scope bound to a channel with `sideEffects: true` is always fail-closed. An explicit `onStoreUnavailable: 'fail-open'` on such an inbound endpoint is a `ReplicaConfigError` at boot; a module default of `'fail-open'` is overridden to fail-closed for such scopes and logged once at boot. | Given channel `pay` with `sideEffects: true` and `@InboundRest({ channel: 'pay', idempotency: { onStoreUnavailable: 'fail-open' } })`; when the app boots; then boot fails with `ReplicaConfigError` naming `pay`. | GU8, SU4 |
+| MR-13 | MUST | A scope bound to a channel with `sideEffects: true` is always fail-closed. An explicit `onStoreUnavailable: 'fail-open'` on such an inbound endpoint is a `ReplicaConfigError` at boot; a module default of `'fail-open'` is overridden to fail-closed for such scopes and logged once at boot. | Given channel `pay` with `sideEffects: true` and `@InboundRest({ channel: 'pay', idempotency: { onStoreUnavailable: 'fail-open' } })`; when the app boots; then boot fails with `ReplicaConfigError` naming `pay`. (amended: the floor applies at every level, flow, step, activator and channel, MR-43.) | GU8, SU4, FP5 |
 | MR-14 | MUST | `onStoreUnavailable: 'fail-open'` (module or endpoint) lets a scope that is not side-effecting run without a claim: no `complete`/`fail`/`release` is called for that run and a `fail-open` event is emitted. An inbound bypass forwards the idempotency key downstream exactly as an acquired claim would (`forward: 'resolved'` included), so a downstream side-effecting scope still claims it and fails closed. | Given fail-open on a plain channel and an unavailable store; when a request with a key arrives; then the handler runs once, no settle call reaches the store, and one `fail-open` event is emitted. Given `forward: 'resolved'`; then the dispatched message carries the resolved key. | SU5 |
 | MR-15 | MUST | A store failure after a successful `begin` never re-runs work and never releases the key. A failing `complete` keeps 0.9.0 semantics: inbound tries `fail` and rethrows (`inbound.idempotency.ts:231-240`); a flow or activator tries `fail`, reports to the error channel and rethrows (`flow-executor.ts:78-84`, `activator-wrapper.ts:107-113`). The key ends `failed` when that `fail` succeeds and stays `in-flight` when it fails too; either way a repeat within the TTL is not run. | Given `begin` succeeds and `complete` is unavailable; when the request finishes; then the caller gets the error, `release` was not called, and a retry with the same key within the TTL is not dispatched (answered as in flight or as a failed duplicate). | SU6 |
-| MR-16 | MUST | Store health is observable without leaking data. Each shipped store tracks its own availability and emits `unavailable` on the first transient failure after a success (or after construction) and `recovered` on the first success after that; it emits `claim-lost` and `record-corrupt` as they occur, and delivers every event to each listener registered with `observe` (section 3.7). At `onApplicationBootstrap` the module observes every distinct store it uses (module and endpoint stores); it logs one warn line per `unavailable`/`recovered`, one error line per `claim-lost`/`record-corrupt`/`purge-failed`, and forwards every event to `idempotency.onEvent`. No log line or event carries a key, a result, an error message or driver text. A listener that throws is caught; its first throw is logged once and the call outcome is unchanged. | Given 100 failing `begin` calls followed by one success; when the logs are read; then there is one `unavailable` line and one `recovered` line, and no line contains the key. Given a listener that throws; when an event fires; then the store call resolves as without the listener. | RU12, PU11, SU7 |
-| MR-17 | MUST | `PostgresIdempotencyStore.purgeExpired()` deletes at most `purgeBatchSize` expired rows per call using `SKIP LOCKED` and returns the count. `idempotency.purgeIntervalMs` runs `purgeExpired()` of every distinct store with `requiresPurge: true` (module and endpoint stores) on one unref'd timer started at `onApplicationBootstrap`, stops it on shutdown, and turns a purge error into a `purge-failed` event, never a crash. Every pod runs the timer; `SKIP LOCKED` keeps concurrent purgers from deleting a row twice. | Given 2 500 expired rows and `purgeBatchSize: 1000`; when `purgeExpired` runs three times; then it returns 1000, 1000, 500. Given a purge that throws; when the timer fires; then the app keeps running and one `purge-failed` event is emitted. | PE5, SU8 |
+| MR-16 | MUST | Store health is observable without leaking data. Each shipped store tracks its own availability and emits `unavailable` on the first transient failure after a success (or after construction) and `recovered` on the first success after that; it emits `claim-lost` and `record-corrupt` as they occur, and delivers every event to each listener registered with `observe` (section 3.7). At `onApplicationBootstrap` the module observes every distinct store it uses (module and endpoint stores); it logs one warn line per `unavailable`/`recovered`, one error line per `claim-lost`/`record-corrupt`/`purge-failed`, and forwards every event to `idempotency.onEvent`. No log line or event carries a key, a result, an error message or driver text. A listener that throws is caught; its first throw is logged once and the call outcome is unchanged. | Given 100 failing `begin` calls followed by one success; when the logs are read; then there is one `unavailable` line and one `recovered` line, and no line contains the key. Given a listener that throws; when an event fires; then the store call resolves as without the listener. (amended: "every distinct store it uses" includes named, channel, flow, step and activator stores, MR-48.) | RU12, PU11, SU7, FP11 |
+| MR-17 | MUST | `PostgresIdempotencyStore.purgeExpired()` deletes at most `purgeBatchSize` expired rows per call using `SKIP LOCKED` and returns the count. `idempotency.purgeIntervalMs` runs `purgeExpired()` of every distinct store with `requiresPurge: true` (module and endpoint stores) on one unref'd timer started at `onApplicationBootstrap`, stops it on shutdown, and turns a purge error into a `purge-failed` event, never a crash. Every pod runs the timer; `SKIP LOCKED` keeps concurrent purgers from deleting a row twice. | Given 2 500 expired rows and `purgeBatchSize: 1000`; when `purgeExpired` runs three times; then it returns 1000, 1000, 500. Given a purge that throws; when the timer fires; then the app keeps running and one `purge-failed` event is emitted. (amended: the distinct stores include every level of section 16, MR-48.) | PE5, SU8, FP11 |
 
 ### 2.3 Boot guard
 
 | ID | Level | Statement | Acceptance (Given / When / Then) | Test |
 |---|---|---|---|---|
 | MR-22 | MUST | The replica mode comes from `forRoot({ replicas })` and from `ESTELA_REPLICAS` (`single` or `multi`) and `ESTELA_REPLICAS_STRICT` (`true` or `false`). The effective mode is `multi` when either source says `multi`; strict is on when either source turns it on. Values are compared after trimming whitespace and are case-sensitive; an unset variable and an empty string (a common rendering of an empty ConfigMap key) both mean "not set". Any other value of either variable, or an invalid `replicas` option, throws `ReplicaConfigError` from `forRoot`, strict or not. | Given `ESTELA_REPLICAS=multiple`; when `forRoot` runs; then it throws `ReplicaConfigError` naming the variable and the accepted values. Given option `'single'` and env `multi`; then the effective mode is `multi`. Given `ESTELA_REPLICAS=''`; then the option decides. | GU2 |
-| MR-23 | MUST | In `multi`, an enabled idempotency store (module store, or an endpoint store, including a `{ useExisting }` ref resolved at bootstrap) whose `visibility` is not `'shared'` is an error finding (`PROCESS_LOCAL_IDEMPOTENCY_STORE`, or `UNKNOWN_STORE_VISIBILITY` when undeclared). A ref that cannot be resolved is an error finding (`STORE_REF_UNRESOLVED`). | Given `multi` and the default memory store; when the app boots; then one error finding `PROCESS_LOCAL_IDEMPOTENCY_STORE` names the module store. | GU3, E6 |
+| MR-23 | MUST | In `multi`, an enabled idempotency store (module store, or an endpoint store, including a `{ useExisting }` ref resolved at bootstrap) whose `visibility` is not `'shared'` is an error finding (`PROCESS_LOCAL_IDEMPOTENCY_STORE`, or `UNKNOWN_STORE_VISIBILITY` when undeclared). A ref that cannot be resolved is an error finding (`STORE_REF_UNRESOLVED`). | Given `multi` and the default memory store; when the app boots; then one error finding `PROCESS_LOCAL_IDEMPOTENCY_STORE` names the module store. (amended: named, channel, flow, step and activator stores are subjects too, MR-48.) | GU3, E6, FP11 |
 | MR-24 | MUST | A channel of any of the four in-memory kinds with `delivery: 'must-not-lose'` is an error finding in `multi` and a warning in `single` (`IN_MEMORY_MUST_NOT_LOSE`); a `queue` channel without `delivery` is a warning in `multi` (`UNDECLARED_QUEUE_DELIVERY`); `delivery: 'best-effort'` is silent. | Given `multi`, queues `a` (must-not-lose), `b` (undeclared), `c` (best-effort) and direct `d` (must-not-lose); when the app boots; then findings are error for `a` and `d`, warning for `b`, none for `c`. | GU4 |
 | MR-25 | MUST | `SagaRunner` resolves the replica mode from `SagaRunnerOptions.replicas` and the same variables; in `multi`, a `locks` port or a `ledger` whose `visibility` is `'process'` is an error finding, logged at construction through the saga tracer's Nest `Logger` (`EstelaSaga`, `src/saga/saga-tracer.ts:7`); in strict mode the constructor throws `ReplicaSafetyError`. | Given `ESTELA_REPLICAS=multi`, `ESTELA_REPLICAS_STRICT=true` and `new SagaRunner({ locks: new MemoryLockPort(), ... })`; when it is constructed; then it throws `ReplicaSafetyError` with code `PROCESS_LOCAL_LOCK_PORT`. | GU5 |
 | MR-26 | MUST | Strict mode fails boot with one `ReplicaSafetyError` that lists every error finding; non-strict mode logs each finding and boots. Warnings and infos never fail boot. | Given strict `multi` with two error findings and one warning; when the app boots; then `init()` rejects with `ReplicaSafetyError` whose `findings` has the two errors, and the warning is logged. | GU6, E6 |
-| MR-27 | MUST | In `single` mode with no `delivery` declared anywhere and no `requiresPurge` store, the guard logs nothing and changes nothing. | Given the 0.9.0 example app; when it boots; then the boot log lines are identical to 0.9.0. | GU7 |
+| MR-27 | MUST | In `single` mode with no `delivery` declared anywhere and no `requiresPurge` store, the guard logs nothing and changes nothing. | Given the 0.9.0 example app; when it boots; then the boot log lines are identical to 0.9.0. (amended: the premise also requires that no section 16 idempotency option is set; with `enabled: false` plus an L2..L4 option, MR-42 logs one `IDEMPOTENCY_DISABLED` info line in `single`, and MR-43 logs an overridden module fail-open.) | GU7, FP4 |
 | MR-28 | SHOULD | The checks are a pure exported function, `assessReplicaSafety(input): ReplicaFinding[]`, used by the module and by `SagaRunner`. | Given a hand-built input; when it is called; then it returns findings without touching Nest or the environment. | GU1-GU5 |
 | MR-29 | SHOULD | A store with `requiresPurge: true` and no `purgeIntervalMs` is a warning in both modes (`PURGE_NOT_CONFIGURED`). | Given the Postgres store without `purgeIntervalMs`; when the app boots; then one warning names the store. | GU9 |
 
@@ -215,18 +255,38 @@ Test ids are defined in section 8. Ticket for all rows: SPI-429, unless marked.
 | ID | Level | Statement | Acceptance (Given / When / Then) | Test |
 |---|---|---|---|---|
 | MR-32 | SHOULD | `@estela/nest/testing` exports `idempotencyStoreContract(options)`: a runner-agnostic list of named cases (`{ name, run(factory) }`) that any store can execute. Cases that need a capability the memory store does not have (cross-instance fencing, `ttlMs` validation, the `serializeError` floor) run only when the option enables them. | Given the memory store with every capability off, and both shipped stores with every capability on; when the contract runs; then every enabled case passes and the disabled ones are reported as skipped. | CT1-CT8 |
-| MR-33 | MUST | A two-instance e2e suite runs two Nest apps against one shared store: always with a shared in-process fake, and against Redis and Postgres when `ESTELA_REDIS_URL` / `ESTELA_PG_URL` are set. | Given the suite; when it runs in CI without those variables; then the fake-backed cases run and pass, and the backend cases are skipped, not failed. | E1-E7 |
+| MR-33 | MUST | A two-instance e2e suite runs two Nest apps against one shared store: always with a shared in-process fake, and against Redis and Postgres when `ESTELA_REDIS_URL` / `ESTELA_PG_URL` are set. | Given the suite; when it runs in CI without those variables; then the fake-backed cases run and pass, and the backend cases are skipped, not failed. (amended: the suite gains E8, a step claim across two apps, MR-45.) | E1-E8 |
 
 ### 2.6 Edges
 
 | ID | Level | Statement | Acceptance (Given / When / Then) | Test |
 |---|---|---|---|---|
 | MR-35 | MUST | An `IdempotencyStoreError` (either class) that reaches the inbound failure policy from a downstream hop is settled as `keep`, whatever `onFailure` says: the inbound cannot tell whether work already ran downstream. | Given an inbound with an `onFailure` classifier that releases every error, and a downstream activator whose `complete` is unavailable; when the request fails; then `release` is not called on the inbound key. | SU9 |
-| MR-36 | MUST | `forRoot` validates the new options and throws one `TypeError` naming the option and the accepted values: `onStoreUnavailable` (`fail-closed` or `fail-open`, module and endpoint), `purgeIntervalMs` (integer 1000..2147483647), `ChannelSpec.delivery` (`best-effort` or `must-not-lose`), `ChannelSpec.sideEffects` (boolean). Store constructors validate their own options the same way (`operationTimeoutMs` and `purgeBatchSize` integers in range, `keyPrefix` a string, identifiers through `quoteIdentifier`). | Given `purgeIntervalMs: 10`; when `forRoot` runs; then it throws `TypeError` naming `idempotency.purgeIntervalMs`. Given `operationTimeoutMs: 0`; when the Redis store is constructed; then it throws `TypeError`. | GU10, RU13, PU1 |
+| MR-36 | MUST | `forRoot` validates the new options and throws one `TypeError` naming the option and the accepted values: `onStoreUnavailable` (`fail-closed` or `fail-open`, module and endpoint), `purgeIntervalMs` (integer 1000..2147483647), `ChannelSpec.delivery` (`best-effort` or `must-not-lose`), `ChannelSpec.sideEffects` (boolean). Store constructors validate their own options the same way (`operationTimeoutMs` and `purgeBatchSize` integers in range, `keyPrefix` a string, identifiers through `quoteIdentifier`). | Given `purgeIntervalMs: 10`; when `forRoot` runs; then it throws `TypeError` naming `idempotency.purgeIntervalMs`. Given `operationTimeoutMs: 0`; when the Redis store is constructed; then it throws `TypeError`. (amended: the same validation covers `idempotency.stores` names, `ChannelSpec.idempotency`, `FlowOptions.idempotency`, step and `ActivatorOptions.idempotency` values: `ttlMs` integer 1..2147483647, `onStoreUnavailable` as above, `store` a name or a store; and user scopes and step ids, MR-46. `forRoot` validates what it can see synchronously: `idempotency.stores`, the module `store` and `ChannelSpec.idempotency`. Flow, step and activator options exist only after `build()` runs and the activators are discovered, so the flow parameter resolver validates them in `onModuleInit`, before it resolves any name, and throws the same `TypeError` for the first invalid value.) | GU10, RU13, PU1, FP9 |
 | MR-37 | MUST | A repeat lookup that fails is never treated as free: when `get` after a refused `begin` rejects with any `IdempotencyStoreError`, inbound answers as for an in-flight record (`onInFlight`), and the activator duplicate path sends no cached reply and returns. A non-store error from `get` propagates as in 0.9.0. | Given `begin` resolves `false` and `get` rejects with `IdempotencyStoreUnavailableError`; when an inbound with `onInFlight: 'reject'` handles the repeat; then it throws `InboundIdempotencyInFlightError` and nothing is dispatched; when an activator handles it; then the method is not invoked and no reply is sent. | SU10 |
 | MR-38 | SHOULD | `IdempotencyStoreError` and `IdempotencyStoreUnavailableError` carry a `Symbol.for` brand with a `Symbol.hasInstance` fallback, like `ConcurrencyError` (`src/saga/concurrency-errors.ts:22,45`), so `instanceof` holds across the ESM and CJS bundles. | Given an error built by the testing bundle; when checked with `instanceof` against the main bundle class; then it is true. | DI1 |
 
-Requirement count: 37 (MR-01 to MR-38; MR-20 is retired, D17).
+### 2.7 Flow DSL and channel integration (design: section 16)
+
+| ID | Level | Statement | Acceptance (Given / When / Then) | Test |
+|---|---|---|---|---|
+| MR-39 | MUST | `idempotency.stores` maps store names (grammar `^[a-z0-9][a-z0-9._-]{0,63}$`, the `ProfileName` of the shared model) to an `IdempotencyStore` or an `InboundProviderRef<IdempotencyStore>`; `idempotency.store` may be one of those names. A name that breaks the grammar, or a value that is neither an object with the five required port methods nor `{ useExisting }`, throws `TypeError` from `forRoot` naming `idempotency.stores.<name>`. One store instance registered under two names is one distinct store for observation, purge and the guard. | Given `stores: { shared: s, alias: s }` and `store: 'shared'`; when the app boots and a keyed flow message runs; then the flow claim goes to `s`, the module registers one listener on `s`, and one purge tick calls `s.purgeExpired()` at most once. Given `stores: { 'Bad Name': s }`; when `forRoot` runs; then it throws `TypeError` naming `idempotency.stores.Bad Name`. | FP1 |
+| MR-40 | MUST | `IdempotencyStore` gains `readonly kind?: string`, a display label never used for behaviour. `MemoryIdempotencyStore` sets `'memory'`, `NoopIdempotencyStore` `'noop'`, `RedisIdempotencyStore` `'redis'`, `PostgresIdempotencyStore` `'postgres'`. A store without it is shown as `'custom'`. | Given each shipped class; when `kind` is read; then it has the listed value. Given a custom store without `kind` named `x`; when the graph is read; then `module.stores` has `{ name: 'x', kind: 'custom' }`. | GU1, GR1 |
+| MR-41 | MUST | For the flow claim, a step claim and an activator claim, `store`, `ttlMs` and `onStoreUnavailable` are resolved per key, highest level wins: L4 (step `idempotency`, `ActivatorOptions.idempotency`) > L3 (`FlowOptions.idempotency`; flow and step claims only) > L2 (`ChannelSpec.idempotency` of the claim channel: the flow source for flow and step claims, the activator's own channel) > L1 (module) > L0 (memory store, 3 600 000 ms, `'fail-closed'`; `idempotency.service.ts:22-28`). `scope` belongs to one claim and is never inherited: L3 sets the flow scope, L4 the step scope. Inbound endpoints keep their 0.9.0 chain (endpoint spec, `InboundDefaults`, module) and never read `ChannelSpec.idempotency` (D19); they gain only store names (MR-39) and the floor (MR-43). | Given `stores: { ledger: s }`, module TTL 3 600 000, channel `orders` with `idempotency: { ttlMs: 60000 }`, flow `f` from `orders` with `idempotency: { store: 'ledger' }` and step `charge` with `idempotency: { ttlMs: 5000 }`; when a keyed message runs; then `s` sees `begin('flow:f', k, 60000)` and `begin('flow:f#charge', k, 5000)`. Given an inbound endpoint on `orders` with no store; then it claims on the module store with the module TTL. | FP2, FP3 |
+| MR-42 | MUST | `idempotency: false` turns off its own level's claim only: on a flow it removes the `flow:<name>` claim; on a step it means no step claim (the same as absent; step claims exist only when a `handle` step passes an object). It never removes an outer claim (a step `false` keeps the flow claim) and never an inner one (flow `false` keeps a step's declared claim, whose `store`, `ttlMs` and `onStoreUnavailable` then inherit from L2 and L1, because a `false` L3 supplies no values; D22). Module `enabled: false` keeps its 0.9.0 meaning (`NoopIdempotencyStore`, no claim anywhere); every L2..L4 idempotency option is then ignored and named once in an info finding `IDEMPOTENCY_DISABLED`, in both modes. Store names are still resolved and validated, so an unknown name still fails boot (MR-47) and switching `enabled` back on cannot reveal a latent configuration error. | Given flow `f` with `idempotency: false` and step `s` with `idempotency: {}`; when a keyed message runs; then no `flow:f` begin is sent and one `flow:f#s` begin is sent. Given `enabled: false` and the same step; then no `begin` reaches any configured store (the module uses `NoopIdempotencyStore`) and one info line names `flow 'f' step 's'`. | FP4 |
+| MR-43 | MUST | The `sideEffects` floor (MR-13) holds at every level. An explicit `onStoreUnavailable: 'fail-open'` written at L2, L3 or L4 for a claim whose claim channel has `sideEffects: true` (on that `ChannelSpec.idempotency`, a flow, a step or an activator) is an error finding of `ReplicaConfigError` at boot, in every mode. A fail-open inherited from L1 is overridden to fail-closed for that scope and logged once at boot. | Given channel `pay` with `sideEffects: true` and flow `f` from `pay` with `idempotency: { onStoreUnavailable: 'fail-open' }`; when the app boots; then `init()` rejects with `ReplicaConfigError` whose message names `flow 'f'` and `pay`. Given the fail-open only at module level; then boot succeeds, one info line names `flow:f`, and an unavailable `begin` on that flow fails closed. | FP5, GU8 |
+| MR-44 | MUST | A `handle` step with an `idempotency` object claims once per execution of the step through `IdempotencyService.claim` (policy of section 4.4) with `at.channel` = the flow source. Key: `idempotency.key(payload, msg)` when set, else `headers.idempotencyKey`. An `undefined` or empty-string key means no claim for that run (unlike the 0.9.0 flow and activator claims, which keep claiming an empty-string header and are not changed); a resolver that throws fails the step with that error and makes no claim. On success the step settles `complete` with `{ cachedResult: output }`, or `{ completed: true }` when the handler returns `undefined` (the activator's shape, `activator-wrapper.ts:99-104`; an `undefined` return keeps the message unchanged, `handle.step.ts:16`); on error it settles `fail`, swallowing a settle error as the flow does (`flow-executor.ts:78-80`), and the error takes the flow's 0.9.0 failure path. Attempts added by SPI-445 run between the claim and the settle, so they never claim twice. | Given step `s` with `idempotency: {}` and a keyed message; when the handler returns `{ ok: 1 }`; then the store sees exactly one `begin('flow:f#s', k, ttl)` and one `complete` with `{ cachedResult: { ok: 1 } }`. Given a resolver returning `''`; then no `begin` is sent and the handler runs once. Given a resolver that throws `E`; then the handler does not run, no `begin` is sent and the flow rejects with `E`. | FP6, FP7 |
+| MR-45 | MUST | A step claim that is not acquired never runs the handler. When the record is `completed` and its result has an own `cachedResult` property (including `null`), the step output is that value (after the store's JSON round trip, R13) and the flow continues; when it is `completed` with `{ completed: true }` (the handler returned `undefined`), the flow continues with the incoming message unchanged, as the first run did (D21). In every other case (in flight, failed, or a repeat `get` that fails, MR-37) the flow stops with result status `duplicate`, runs no later step and raises no error, as the flow claim does today (`flow-executor.ts:64-66`). A `bypassed` claim (fail-open, MR-14) runs the handler and settles nothing. A failing settle follows MR-15. | Given a completed record `{ cachedResult: { ok: 1 } }` for `flow:f#s` and the flow claim off; when the same key arrives; then the handler is not invoked and the next step receives payload `{ ok: 1 }`. Given a completed record `{ completed: true }`; then the handler is not invoked and the next step receives the incoming payload. Given an in-flight record; then `execute` resolves `{ status: 'duplicate' }` and the next step does not run. | FP8, E8 |
+| MR-46 | MUST | A user-supplied `scope` (flow or step) is a non-empty string that does not contain `::`, the separator of `idempotencyStorageKey` (`idempotency-store.ts:20-22`), because such a scope could share storage keys with another scope; otherwise boot throws `TypeError` naming the option path. A user step `id` of a step with a claim may not contain `::` or `#`, and the resolver refuses (`TypeError`) a step claim whose default scope `flow:<flow>#<stepId>` equals another claim's default scope (for example flow `a#b`'s flow claim and step `b` of flow `a`); two custom scopes that are equal are deliberate sharing (OQ-13). Default scopes (`flow:<name>`, `flow:<flow>#<stepId>`, `activator:<Class>.<method>`, `activator-wrapper.ts:59`) are not validated, so 0.9.0 names keep working. | Given flow `f` with `idempotency: { scope: 'a::b' }`; when the app boots; then it throws `TypeError` naming `flow 'f' idempotency.scope`. Given flow `a#b` and flow `a` with a claiming step `b`; when the app boots; then it throws `TypeError` naming both subjects. | FP9 |
+| MR-47 (amended) | MUST | The flow parameter resolver resolves every store reference in `onModuleInit`, after channels are created and before activators subscribe and flows attach (section 4.5 step 2). It checks every reference and collects all findings before throwing: a store name not in `idempotency.stores` (module `store`, channel, flow, step, activator or inbound) is an `UNKNOWN_PROFILE` error, and the resolver throws one `ReplicaConfigError` whose `findings` lists every finding and whose message names each subject and option path (for example `flow 'loan' step 'credit': idempotency.store unknown store 'ledgr'`). A name bound to `{ useExisting }` is resolved through `ModuleRef` on its first use and at the latest at `onApplicationBootstrap`, where a failure is `STORE_REF_UNRESOLVED` (MR-23). (amended, cross-spec) The resolver is the one shared with SPI-433 and SPI-445, and RS-67 owns its class rule: `ReplicaConfigError` is thrown when every error finding is an idempotency finding; when the same boot also has error findings of another concern, exactly one `FlowDefinitionError` is thrown and these findings are carried in it as `FlowParameterFinding` with `concern: 'idempotency'`. | Given two unknown names, one on a channel and one on a step; when the app boots; then `init()` rejects once with `ReplicaConfigError` whose `findings` has two `UNKNOWN_PROFILE` entries, and no flow was attached and no activator subscribed. Given the same two names plus an unknown sensitive profile on a step; then `init()` rejects once with `FlowDefinitionError` whose `findings` hold the two idempotency findings and the sensitive one. | FP10 |
+| MR-48 | MUST | Observation (MR-16), the purge timer (MR-17) and the replica guard (MR-23) cover every distinct store referenced at any level: module, named, channel, flow, step, activator and inbound. Each flow and step store is a guard subject (`flow 'f' idempotency store`, `flow 'f' step 's' idempotency store`), and so is each activator store (`activator <Class>.<method> idempotency store`). | Given `multi`, a shared module store, and step `s` whose `idempotency.store` is a memory store; when the app boots; then one `PROCESS_LOCAL_IDEMPOTENCY_STORE` error names `flow 'f' step 's' idempotency store`. Given a Postgres store used only by an activator and `purgeIntervalMs` set; when the timer fires; then that store is purged. | FP11, SU8 |
+| MR-49 (amended) | MUST | `GET /integration/graph` shows store wiring by name only. `GraphSnapshot.module` gains `replicas` and `stores: { name; kind; visibility }[]`; `GraphNode` gains `delivery?`, `sideEffects?` and `store?`; a `GraphFlowEntry` gains `options.idempotency`; a `handle` step with a claim gains `idempotency: { scope, store, storeKind, visibility }` (`store` omitted for an unnamed store, `visibility` omitted when the store does not declare it). The graph never contains keys, key resolvers, store connection data or record contents. (amended, cross-spec) A step that carries an `idempotency` annotation also shows its `id`, by the rule of RS-66 shared by the three specs (SD Q17); an unconfigured step shows neither. | Given an app with `stores: { shared: redisStore }`, channel `pay` with `sideEffects: true`, and a step claim on `shared`; when the graph is fetched; then `module.stores` is `[{ name: 'shared', kind: 'redis', visibility: 'shared' }]`, node `pay` has `sideEffects: true`, the step has `idempotency.scope = 'flow:f#s'`, and a scan of the JSON finds no option value of the Redis store and no key. | GR1, GR2 |
+| MR-50 | MUST | With no option of section 16 set (no `stores`, no `FlowOptions`, no step options, no `ChannelSpec.idempotency`, no `ActivatorOptions.idempotency`, no `delivery`/`sideEffects`, no `replicas`/`ESTELA_REPLICAS`), every claim, scope, TTL, store, log line and the `GET /integration/graph` JSON are identical to 0.9.0: new graph fields are omitted, never present as empty values. | Given the 0.9.0 example app; when it boots, runs a keyed flow message and an activator message, and serves the graph; then the recorded store calls and the graph JSON equal the 0.9.0 snapshots. | FP12, GU7 |
+| MR-51 | MUST | When SPI-445's `ResilienceScope` marks a run degraded (a `fallback` fired; shared model rule 4.3), every claim of that run (step, flow, activator) settles with `release` when the store implements it, else `fail`, never `complete`; an activator writes no `cachedResult` (`activator-wrapper.ts:99-104`). `fallback.cacheable: true` is the only opt-out. Until SPI-445 merges, no run is degraded and this requirement has no effect. | Given step `s` whose fallback fires; when the run ends; then the store saw `release` (or `fail`) for `flow:f#s` and `flow:f` and no `complete`, and a redelivery with the same key runs the handler again. | FP13 (needs SPI-445) |
+| MR-52 | SHOULD | The guard accepts findings from other modules, which RS-50 (SPI-445) needs and the 0.9.0-based design of section 3.12 does not allow: `ReplicaSafetyInput.contributed?: readonly ReplicaFinding[]` are returned with their level unchanged, logged in the format of section 4.5, and counted by strict mode like the guard's own. The type of a contributed `code` is OQ-12. | Given a contributed warning `PROCESS_LOCAL_RATE_LIMIT`; when `assessReplicaSafety` runs in `multi`; then the result contains it and the boot log has one line for it. Given a contributed error under strict; then `ReplicaSafetyError.findings` contains it. | GU11 |
+| MR-53 | MUST | `replicas` is a module-only setting (`forRoot`, `SagaRunnerOptions`, or the variables of MR-22). A `replicas` key on a `ChannelSpec`, `FlowOptions`, step options or `ActivatorOptions` (reachable from JavaScript) throws `TypeError` at boot naming the path, so it never looks as if it took effect. | Given `channels: [{ name: 'a', type: 'queue', replicas: 'multi' }]`; when `forRoot` runs; then it throws `TypeError` naming `channels[0].replicas`. | FP14 |
+
+Requirement count: 52 (MR-01 to MR-53; MR-20 is retired, D17). (Before section 16: 37.)
 
 ## 3. Public API by file
 
@@ -445,7 +505,17 @@ export class IdempotencyService implements FlowIdempotencyPort {
 
 `begin` keeps its 0.9.0 signature and behaviour (no policy), so direct callers see no change.
 The policy for a scope is: fail-closed when `at.channel` is in `sideEffectChannels`, else the
-endpoint value (inbound only), else the module value, else `'fail-closed'`.
+endpoint value (inbound only), else the module value, else `'fail-closed'`. (amended: for flow, step
+and activator claims the chain is the per-key resolution of MR-41, step or activator, then flow, then
+the claim channel's `ChannelSpec.idempotency`, then the module; the `sideEffects` floor still comes
+first, MR-43. `IdempotencyService` does not resolve levels itself. The 0.9.0 members are bound to the
+one module store and have no store or policy argument, so the service gains
+`forStore(store: IdempotencyStore, policy: StoreUnavailablePolicy): FlowIdempotencyPort & { get; release? }`,
+which returns a port bound to one resolved store and policy (with `enabled: false` it is bound to the
+`NoopIdempotencyStore`). The frozen plan of each flow, step and activator claim holds one such port;
+`claim` on it applies the bound policy after the `sideEffects` floor. With no section 16 option set,
+every plan holds a port on the module store with the module policy, so the calls reach the same store
+instance as in 0.9.0.)
 
 ### 3.9 `src/flow/flow-executor.ts` (one optional member)
 
@@ -461,6 +531,13 @@ export interface FlowIdempotencyPort {
 
 The activator wrapper (`src/activator/activator-wrapper.ts:84-113`) uses `IdempotencyService.claim`
 the same way, with `at.channel` = the activator's channel; a flow uses its source channel.
+
+(amended by section 16) `FlowIdempotencyPort` also gains optional `get?(scope, key)` and
+`release?(scope, key)`: a step claim reads the record of a refused claim (MR-45) and a degraded run
+releases (MR-51). The executor receives one port per claim plan (section 3.8, `forStore`), not the
+module service. `ActivatorOptions.idempotency` is new decorator metadata: `defineActivator`
+(`src/decorators.ts:19-30`) copies only `group` and `routingKey` today, so it must copy
+`idempotency` too.
 
 ### 3.10 `src/channel-factory.ts` (extended)
 
@@ -531,6 +608,10 @@ export const ESTELA_REPLICAS_STRICT_ENV = 'ESTELA_REPLICAS_STRICT';
 ```
 
 `env` is a plain record, so the declaration needs no `@types/node` and the file has no imports.
+
+(amended by section 16) `ReplicaFindingCode` gains `'UNKNOWN_PROFILE'`; `ReplicaConfigError` gains
+`readonly findings?: readonly ReplicaFinding[]` (set when the flow parameter resolver throws it,
+MR-47); `ReplicaSafetyInput` gains `contributed?: readonly ReplicaFinding[]` (MR-52).
 `ReplicaConfigError` has `code = 'REPLICA_CONFIG_INVALID'`; `ReplicaSafetyError` has
 `code = 'REPLICA_SAFETY'`.
 
@@ -556,7 +637,8 @@ export interface IntegrationModuleOptions {
 `forRoot` validates the new options synchronously (MR-36) and resolves the replica setting (MR-22).
 `IntegrationRuntime` gains `onApplicationBootstrap()`: it collects the module store and every
 discovered endpoint store (resolving `{ useExisting }` refs through `ModuleRef`, which only works
-once every provider exists), observes each distinct store once (MR-16), runs the guard, and starts
+once every provider exists) and, amended by section 16, every store of the frozen claim plans
+(MR-48), observes each distinct store once (MR-16), runs the guard, and starts
 the purge timer (MR-17). `onApplicationShutdown()` stops the timer and removes the listeners before
 draining queues.
 
@@ -713,7 +795,9 @@ claim(scope, key, ttl, { channel }):
   same key, once the store is back, finds no record and runs again: fail-open trades duplicates for
   availability, which is why side-effecting channels can never choose it.
 - `get` after a `false` begin that fails with a store error is treated as in flight (MR-37): inbound
-  answers per `onInFlight`, the activator sends no cached reply. Flows never call `get`. Nothing runs.
+  answers per `onInFlight`, the activator sends no cached reply. The flow claim never calls `get`
+(amended: a step claim does, MR-45, and a failing `get` there stops the flow as `duplicate`). Nothing
+runs.
 - Settle failures follow MR-15: nothing is released, nothing re-runs.
 - A store error that a downstream hop raises reaches the inbound failure policy as `keep` (MR-35).
 - **Which layer retries.** None defined here. The store sends one command (MR-11), the policy never
@@ -730,9 +814,17 @@ Order:
    `purgeIntervalMs`, channel `delivery` and `sideEffects`) are validated here and an invalid one
    throws `TypeError` (MR-36). Endpoint `onStoreUnavailable` values are validated when the inbound plan
    is built, with the same `TypeError`.
-2. `onModuleInit`: unchanged (channels, activators, flows, explorer).
+2. `onModuleInit` (amended): channels are created as in 0.9.0; then the flow parameter resolver
+   resolves every store name and idempotency option of section 16 and freezes the plans, throwing
+   one `ReplicaConfigError` with all findings on error, or `FlowDefinitionError` when findings of
+   another concern are present (amended MR-47, RS-67); then activators, the inbound log,
+   outbounds, flows and the explorer run in their 0.9.0 order (`integration.module.ts:245-286`).
+   The resolver calls each `definition.build()` once and the flow step reuses the built flow
+   (section 1.3). With no section 16 option set, the resolver has nothing to resolve and logs
+   nothing.
 3. `onApplicationBootstrap`: collect the module store, every discovered inbound endpoint's store
-   (resolving `{ useExisting }` through `ModuleRef`), the channel specs and side-effect bindings;
+   (resolving `{ useExisting }` through `ModuleRef`), every store of the frozen claim plans (amended,
+   MR-48), the channel specs and side-effect bindings;
    observe each distinct store once (MR-16); run `assessReplicaSafety`; check MR-13 (explicit
    fail-open on a side-effecting inbound is a `ReplicaConfigError` in every mode); log findings; in
    strict mode with errors, throw `ReplicaSafetyError`; otherwise start the purge timer when
@@ -743,7 +835,7 @@ Findings table:
 
 | Code | single | multi | Subject |
 |---|---|---|---|
-| `PROCESS_LOCAL_IDEMPOTENCY_STORE` | - | error | module store / endpoint store with `visibility: 'process'` |
+| `PROCESS_LOCAL_IDEMPOTENCY_STORE` | - | error | module store / endpoint store with `visibility: 'process'` (amended: also named, channel, flow, step and activator stores, MR-48) |
 | `UNKNOWN_STORE_VISIBILITY` | - | error | store without `visibility` |
 | `STORE_REF_UNRESOLVED` | - | error | `{ useExisting }` that ModuleRef cannot resolve |
 | `IN_MEMORY_MUST_NOT_LOSE` | warning | error | in-memory channel with `delivery: 'must-not-lose'` |
@@ -751,7 +843,8 @@ Findings table:
 | `PROCESS_LOCAL_LOCK_PORT` | - | error | `SagaRunner.locks` with `visibility: 'process'` |
 | `PROCESS_LOCAL_LEDGER` | - | error | `SagaRunner.ledger` with `visibility: 'process'` |
 | `PURGE_NOT_CONFIGURED` | warning | warning | store with `requiresPurge` and no `purgeIntervalMs` |
-| `IDEMPOTENCY_DISABLED` | - | info | `idempotency.enabled: false` |
+| `IDEMPOTENCY_DISABLED` | - (amended: info when an L2..L4 idempotency option is set, MR-42) | info | `idempotency.enabled: false` |
+| `UNKNOWN_PROFILE` | error | error | a store name not in `idempotency.stores` (raised by the resolver in `onModuleInit`, MR-47, not by `assessReplicaSafety`) |
 
 Log format, one line each: `estela replicas (<mode>): <level> <code> <subject>: <message>`, then one
 summary line `estela replicas (<mode>): <e> error(s), <w> warning(s)` only when there are findings.
@@ -1043,6 +1136,59 @@ Cases:
   returns a value. B's activator runs once, no reply reaches A, and A answers with the reply timeout;
   a repeat with the same key is answered as in flight (the timeout is kept). Documents MR-31 as
   executable behaviour.
+- **E8. Step claim across pods (section 16).** Both apps share `stores: { shared: <backend> }` and a
+  flow `f` from a `direct` channel `work8` (no inbound endpoint and no activator on it, so neither the
+  inbound claim nor the activator claim of E1-E7 dedupes first) with `idempotency: false`, a step
+  `.handle(fn, { id: 's', idempotency: { store: 'shared' } })` that increments the counter, can wait
+  on the latch and returns `{ n }`, and a recording next step. The test sends to `work8` through each
+  app's `ChannelRegistry` with header `idempotencyKey`. Key `k8` to A, then to B -> counter 1; B's
+  recording step receives A's `{ n }` (MR-45). With the latch, `k8b` to A and B at once -> counter 1
+  and only one recording step runs (the loser's flow ends as `duplicate`).
+
+### 8.3 Flow parameter tests (section 16)
+
+Unit tests in `src/flow/flow-parameter-resolver.spec.ts` (new), `src/flow/flow-executor.spec.ts`,
+`src/activator/activator.spec.ts` and `src/graph/channel-graph.spec.ts` (extended), with a recording
+store stub.
+- **FP1.** Named stores: alias names share one instance (one listener, one purge per tick); bad name
+  and bad value -> `TypeError` naming the path (MR-39).
+- **FP2.** Per-key precedence table: each of `store`, `ttlMs`, `onStoreUnavailable` set at exactly one
+  of L1..L4 for flow, step and activator claims; the recorded `begin` arguments and the policy used on
+  an unavailable store match MR-41; `scope` is never inherited from the flow to a step.
+- **FP3.** Inbound endpoint on a channel with `ChannelSpec.idempotency` keeps the 0.9.0 chain; a bare
+  store name on `InboundIdempotencyOptions.store` resolves to the named store.
+- **FP4.** `false` matrix: flow `false` + step claim, step `false` + flow claim, module
+  `enabled: false` + step claim (no begin on any configured store, one info line in `single` and in
+  `multi`; an unknown store name still fails boot) (MR-42, amended MR-27).
+- **FP5.** Floor: explicit fail-open at L2, L3 and L4 on a `sideEffects` channel -> `ReplicaConfigError`
+  in single and multi; L1 fail-open -> overridden and logged once (MR-43).
+- **FP6.** Step claim lifecycle: one `begin`, one `complete` with `cachedResult`; `{ completed: true }`
+  when the handler returns `undefined`; `fail` on error with a failing `fail` swallowed (MR-44).
+- **FP7.** Key resolution: header, resolver, resolver returning `undefined` or `''` (no claim),
+  resolver throwing (no claim, flow rejects with that error) (MR-44).
+- **FP8.** Duplicate step: completed with `cachedResult` (including `null`) continues with the cached
+  payload; completed with `{ completed: true }` continues with the incoming message; in flight,
+  failed and failing `get` stop with `duplicate`; bypassed runs and does not settle (MR-45).
+- **FP9.** Scope validation: `''` and `'a::b'` -> `TypeError`; a 0.9.0 flow named `x::y` still boots
+  (MR-46); a claiming step id with `::` or `#`, and flow `a#b` next to step `b` of flow `a` ->
+  `TypeError`; option values outside MR-36 ranges at module and channel level -> `TypeError` from
+  `forRoot`, at flow, step and activator level -> `TypeError` from `init()` before any name is
+  resolved.
+- **FP10.** Unknown names at channel and step -> one `ReplicaConfigError` with two `UNKNOWN_PROFILE`
+  findings; plus an unknown sensitive profile -> one `FlowDefinitionError` with all three (RS-67); no flow attached, no activator subscribed; a `{ useExisting }` name that never resolves
+  -> `STORE_REF_UNRESOLVED` at bootstrap (MR-47).
+- **FP11.** Coverage: a step memory store in multi is an error finding with the step subject; an
+  activator-only Postgres store is purged; an endpoint-only store is observed (MR-48, amended MR-16,
+  MR-17, MR-23).
+- **FP12.** Backward compatibility: the example app's store calls and graph JSON equal committed
+  0.9.0 snapshots (MR-50).
+- **FP13.** Degraded run (enabled when SPI-445 is merged, otherwise skipped with a reason): fallback
+  fired -> `release`/`fail` on step and flow claims, no `complete`, no `cachedResult` (MR-51).
+- **FP14.** `replicas` on a channel, flow, step or activator option -> `TypeError` naming the path
+  (MR-53).
+- **GR1.** Graph fields of MR-49 for named, unnamed and custom-kind stores; `module.replicas`.
+- **GR2.** Graph leak scan: the JSON contains no store option value, no key, no resolver source.
+- **GU11.** Contributed findings: returned, logged, counted by strict (MR-52).
 
 ## 9. Documentation to update (same PR)
 
@@ -1075,7 +1221,13 @@ Cases:
     side-effecting channels marked `sideEffects: true`; no fail-open on money or messaging paths; no
     fail-open endpoint with `forward: 'none'` in front of side effects; TTL longer than the longest
     run; Redis `noeviction`.
-  - `estela-flows`: `delivery` and `sideEffects` on channel specs.
+  - `estela-flows`: `delivery` and `sideEffects` on channel specs; `FlowOptions.idempotency`,
+    `handle(fn, { id, idempotency })`, `ChannelSpec.idempotency`, `ActivatorOptions.idempotency`,
+    named stores, and "give every step with a claim an explicit `id`" (section 1.4).
+- **README, "Flow parameters" (section 16).** The idempotency rows of the shared flow parameter
+  model: levels, per-key precedence, `false`, the `sideEffects` floor, step claims and duplicates,
+  store names in the graph. It links the shared model instead of restating the resilience and
+  sensitive rows.
 - **CHANGELOG.** Produced by semantic-release from the `feat` commit; `package.json` is not edited.
 
 ## 10. Dependencies on other tickets
@@ -1092,6 +1244,12 @@ SPI-429         -- overheads, operationTimeoutMs ---->  SPI-444 benchmarks (sets
 SPI-429         -- a shared store, optional --------->  SPI-441 scheduler single-run (may reuse it)
 SPI-429         -- guard + stores ------------------->  Koletz adoption (KA-01..KA-10): adopters
                                                           enable the guard before scaling
+SPI-429         -- named stores, store kind, flow/ --->  shared flow parameter model (section 16);
+                   step/activator idempotency            KA references stores by name only
+SPI-445         -- ResilienceScope.markDegraded ----->  SPI-429 MR-51 (inert until SPI-445 merges)
+SPI-429         -- ReplicaSafetyInput.contributed --->  SPI-445 RS-50 (MR-52)
+SPI-445, SPI-433 -- FlowParameterResolver ----------->  one resolver shared by the three specs;
+                                                          SPI-433 creates it (SD-67, OQ-14)
 ```
 
 SPI-429 has no blocking dependency; its place in the release plan is the agreed order below. The
@@ -1174,6 +1332,10 @@ order above is the release plan, not a code dependency.
 | D16 | Postgres classes 08, 57014 vs `classifyPostgresError` | Unavailable (retryable) in the store, still unclassified for sagas | No layer here retries; a client retry meets the fenced, possibly committed claim and is answered as in flight. A saga retry could re-apply work, hence the saga classifier stays as it is. |
 | D17 | Record codec hook (previous draft MR-20) | Dropped; MR-20 retired | SPI-433 seals records above the store and keeps the store contract unchanged (SD-35); a second hook would be speculative and would clash with SPI-433's own `RecordCodec` name. |
 | D18 | Store errors reaching the inbound failure policy | Always `keep` (MR-35) | The inbound cannot know whether downstream work ran; same reasoning as the existing `ReplyTimeoutError` rule (`inbound.failure.ts:152`). |
+| D19 | Does an inbound endpoint read `ChannelSpec.idempotency` | No; inbound keeps its 0.9.0 chain (MR-41) | Inbound already has endpoint and `InboundDefaults` levels; a channel default would change endpoints that set nothing. Mirrors the shared model's rule that channel resilience never applies to inbound endpoints. This deviates from the shared model section 1.1, which names an inbound endpoint's own channel as its L2; OQ-16. |
+| D20 | Error class for an unknown store name | `ReplicaConfigError` with `findings` (MR-47) | The shared model throws "the error class of its concern"; stores belong to this spec, whose config error is `ReplicaConfigError`. (amended) Mixed concerns: `FlowDefinitionError` (RS-67). |
+| D21 | What a duplicate step claim does | Completed with `cachedResult`: continue with the cached output; completed with `{ completed: true }`: continue with the message unchanged, as the first run did; otherwise stop with `duplicate` (MR-45) | Replaying the stored output is the only way a step claim can let the rest of a redelivered flow finish without re-running the side effect; stopping silently matches the flow claim (`flow-executor.ts:64-66`). Owner may override (OQ-10). |
+| D22 | Does flow `idempotency: false` disable step claims | No (MR-42) | The shared model: `false` turns off this level's claim only. A step claim is an explicit, inner decision. |
 
 ## 13. Open questions
 
@@ -1188,6 +1350,13 @@ order above is the release plan, not a code dependency.
 | OQ-7 | Default for `retainCompletedMs` | Undefined (keep remaining TTL) | ESTELA maintainer |
 | OQ-8 | Update SPI-429 in Jira: priority P0 to P1 (premise, section 0.2) and title "cross-replica idempotency stores + request/reply" to "... + boot guard; request/reply stays local" (cross-pod reply moved to SPI-434) | Update both | Platform owner |
 | OQ-9 | Should endpoint stores built outside `forRoot` (and a `SagaRunner`'s stores) be registrable with the guard? | No (R6) | ESTELA maintainer |
+| OQ-10 | D21: should a duplicate step claim replay its cached output and continue, or always stop the flow with `duplicate`? | Replay and continue | ESTELA maintainer |
+| OQ-11 | A step with a claim but no explicit `id` gets the positional default `<kind>#<index>`, which shifts when a step is inserted (section 1.4). Refuse it at boot, warn, or only document? | Only document (README, review skill); no new boot code | ESTELA maintainer |
+| OQ-12 | Type of a contributed finding `code` (MR-52): widen `ReplicaFinding.code` to `ReplicaFindingCode \| (string & {})`, or add each sibling code (`PROCESS_LOCAL_RATE_LIMIT`, `PROCESS_LOCAL_BREAKER`, `REPLICAS_HINT_DEFAULT`) to the union? | Widen; exhaustive switches on the union in apps keep compiling | ESTELA maintainer |
+| OQ-13 | Two flows that set the same custom `scope` share claims. Refuse at boot, or allow as deliberate sharing? | Allow and document | ESTELA maintainer |
+| OQ-14 | Which ticket ships `FlowParameterResolver` and `IntegrationFlow.from(source, options)` (SPI-433, SPI-429 or SPI-445 is first to merge), and where the shared flow parameter model file is committed in this repo | (amended) Resolver: SPI-433, the first ticket of the agreed delivery order, ships the resolver skeleton and the shared types (SD-67); SPI-429 adds its idempotency members. Location: open, the same question as SD Q12 and RS OQ-16; default: committed next to the specs in `docs/` | ESTELA maintainer |
+| OQ-15 | Step claims on `transform` (the shared model refuses `idempotency` there, steering side effects to `handle`). Keep the refusal? | Keep | ESTELA maintainer |
+| OQ-16 | D19 deviates from the shared model (section 1.1: an inbound endpoint's L2 is its own channel). Amend the model to exclude inbound endpoints from the idempotency L2, or make inbound read `ChannelSpec.idempotency` between `InboundDefaults` and the endpoint spec? | Amend the model (keep D19) | ESTELA maintainer, with the owners of SPI-433 and SPI-445 |
 
 ## 14. Definition of done
 
@@ -1207,6 +1376,9 @@ order above is the release plan, not a code dependency.
 - SD-35's contract test (SPI-433, when merged) passes against both shipped stores, or the PR states
   that SPI-433 has not merged yet.
 - No adopter rule in this spec: enabling the guard before scaling is tracked by KA-01 to KA-03.
+- Section 16: FP1-FP12, FP14, GR1, GR2, GU11 and E8 pass; FP13 passes or is skipped with "SPI-445
+  not merged" recorded in the PR; the 0.9.0 snapshots used by FP12 are committed before the
+  implementation commit.
 
 ## 15. Traceability
 
@@ -1224,29 +1396,239 @@ order above is the release plan, not a code dependency.
 | MR-10 | MUST | RU8, RU9, PU8 | SPI-429 |
 | MR-11 | MUST | RU10, PU9 | SPI-429 |
 | MR-12 | MUST | SU1, SU2, SU3, E4 | SPI-429 |
-| MR-13 | MUST | SU4, GU8 | SPI-429 |
+| MR-13 (amended) | MUST | SU4, GU8, FP5 | SPI-429 |
 | MR-14 | MUST | SU5 | SPI-429 |
 | MR-15 | MUST | SU6 | SPI-429 |
-| MR-16 | MUST | RU12, PU11, SU7 | SPI-429 |
-| MR-17 | MUST | PE5, SU8 | SPI-429 |
+| MR-16 (amended) | MUST | RU12, PU11, SU7, FP11 | SPI-429 |
+| MR-17 (amended) | MUST | PE5, SU8, FP11 | SPI-429 |
 | MR-18 | SHOULD | RU1 | SPI-429 |
 | MR-19 | MAY | RU11, PU10 | SPI-429 |
 | MR-20 | retired | none (D17) | n/a |
 | MR-21 | MAY | RE3, PE4 | SPI-429 |
 | MR-22 | MUST | GU2 | SPI-429 |
-| MR-23 | MUST | GU3, E6 | SPI-429 |
+| MR-23 (amended) | MUST | GU3, E6, FP11 | SPI-429 |
 | MR-24 | MUST | GU4 | SPI-429 |
 | MR-25 | MUST | GU5 | SPI-429 |
 | MR-26 | MUST | GU6, E6 | SPI-429 |
-| MR-27 | MUST | GU7 | SPI-429 |
+| MR-27 (amended) | MUST | GU7, FP4 | SPI-429 |
 | MR-28 | SHOULD | GU1-GU5 | SPI-429 |
 | MR-29 | SHOULD | GU9 | SPI-429 |
 | MR-30 | MUST | HU1 | SPI-429 |
 | MR-31 | MUST | DOC1, E7 | SPI-429 (cross-pod reply: SPI-434) |
 | MR-32 | SHOULD | CT1-CT8 | SPI-429 |
-| MR-33 | MUST | E1-E7 | SPI-429 |
+| MR-33 (amended) | MUST | E1-E8 | SPI-429 |
 | MR-34 | MUST | GU1 | SPI-429 |
 | MR-35 | MUST | SU9 | SPI-429 |
-| MR-36 | MUST | GU10, RU13, PU1 | SPI-429 |
+| MR-36 (amended) | MUST | GU10, RU13, PU1, FP9 | SPI-429 |
 | MR-37 | MUST | SU10 | SPI-429 |
 | MR-38 | SHOULD | DI1 | SPI-429 |
+| MR-39 | MUST | FP1 | SPI-429 |
+| MR-40 | MUST | GU1, GR1 | SPI-429 |
+| MR-41 | MUST | FP2, FP3 | SPI-429 |
+| MR-42 | MUST | FP4 | SPI-429 |
+| MR-43 | MUST | FP5, GU8 | SPI-429 |
+| MR-44 | MUST | FP6, FP7 | SPI-429 |
+| MR-45 | MUST | FP8, E8 | SPI-429 |
+| MR-46 | MUST | FP9 | SPI-429 |
+| MR-47 (amended) | MUST | FP10 | SPI-429 (resolver shared with SPI-433, SPI-445; skeleton shipped by SPI-433, SD-67; class rule RS-67) |
+| MR-48 | MUST | FP11, SU8 | SPI-429 |
+| MR-49 (amended) | MUST | GR1, GR2 | SPI-429 (graph fields of SPI-433/SPI-445 are theirs; `id` rule RS-66) |
+| MR-50 | MUST | FP12, GU7 | SPI-429 |
+| MR-51 | MUST | FP13 | SPI-429 (needs SPI-445) |
+| MR-52 | SHOULD | GU11 | SPI-429 (consumer: SPI-445 RS-50) |
+| MR-53 | MUST | FP14 | SPI-429 |
+
+## 16. Flow DSL and channel integration
+
+This section applies the shared ESTELA flow parameter model (proposal shared by SPI-433, SPI-429,
+SPI-445 and the KA- adoption spec; file location OQ-14) to the concern of this spec: idempotency
+claims, the stores behind them, the `sideEffects` and `delivery` floors, and the replica mode. It
+uses the model's names and shapes and does not restate its resilience or sensitive rules. The
+requirements are MR-39 to MR-53 (section 2.7). With none of these options set, Estela behaves as
+0.9.0 (MR-50).
+
+### 16.1 What exists today (verified at `9deda71`, code unchanged since `20ae298`)
+
+| Surface | Today | File:line |
+|---|---|---|
+| Flow builder | `IntegrationFlow.from(source)`, no options; `handle(fn)` has no options | `src/flow/integration-flow.ts:41,55` |
+| Flow claim | scope `flow:<name>`, key `headers.idempotencyKey`, `begin`/`complete`/`fail`; a refused `begin` returns `{ status: 'duplicate' }` | `src/flow/flow-executor.ts:58-85` |
+| Flow and activator TTL and store | module `idempotency.ttlMs` and the one module `IdempotencyService` | `src/integration.module.ts:150,268-277,378-382` |
+| L0 defaults | memory store, TTL 3 600 000 ms | `src/idempotency/idempotency.service.ts:22-28` |
+| Activator claim | scope `activator:<Class>.<method>`; options are only `group`, `routingKey` | `src/activator/activator-wrapper.ts:59,84-113`, `src/decorators.ts:8-11` |
+| Inbound store | `store?: IdempotencyStore \| InboundProviderRef<IdempotencyStore>`, resolved on first use | `src/inbound/inbound.types.ts:118-120,251`, `src/inbound/inbound.plan.ts:211-213` |
+| Key propagation | `nextHop` keeps `idempotencyKey` on every hop | `src/message.ts:154-160` |
+| Storage key | `${scope}::${key}` | `src/idempotency/idempotency-store.ts:20-22` |
+| Step description in the graph | `handle` describes only `{ kind }`; `recordFlow` stores each `describe()` | `src/flow/steps/handle.step.ts:10-12`, `src/graph/channel-graph.ts:125-128` |
+| Boot order | error channel and channels, activators, inbound log, outbounds, flows, explorer | `src/integration.module.ts:245-286` |
+| Steps with claims | none: only the flow, activators and inbound endpoints claim | as above |
+
+### 16.2 Levels for this concern
+
+| Level | Where | What it sets here |
+|---|---|---|
+| L5 call | none | No claim is made per call. |
+| L4 step / endpoint | `handle(fn, { id, idempotency })`; `@ServiceActivator(channel, { idempotency })`; `@InboundRest`/`@InboundGrpc` `idempotency` (existing) | step claim (new), activator claim settings, inbound claim settings |
+| L3 flow | `IntegrationFlow.from(source, { idempotency })` | the `flow:<name>` claim (scope, store, TTL, policy, or `false`); default store/TTL/policy for step claims |
+| L2 channel | `ChannelSpec.idempotency`, `delivery`, `sideEffects` | default store/TTL/policy for flow, step and activator claims on that channel; floors |
+| L1 module | `forRoot({ idempotency: { stores, store, ttlMs, onStoreUnavailable, ... }, replicas })` | defaults and the store registry; replica mode |
+| L0 built-in | memory store, 3 600 000 ms, `'fail-closed'`, `'single'` | |
+
+Claim channel (which channel is L2): the flow source for the flow claim and for step claims; the
+activator's own channel for an activator claim. Send steps (`to`, `publish`, `route`, `fanoutTo`,
+`jumpTo`, `jump`, `wireTap`) make no claim; they carry the key downstream (`message.ts:154-160`), and
+the destination's activator or flow claims it under its own channel. Inbound endpoints do not read
+L2 (D19).
+
+Merge rule: per-key replace across levels for `store`, `ttlMs` and `onStoreUnavailable` (MR-41);
+`scope` and `key` belong to one claim. `false` turns off that level's claim only (MR-42). Floors no
+level lifts: `sideEffects: true` keeps the scope fail-closed (MR-13, MR-43); `delivery:
+'must-not-lose'` on an in-memory kind is an error in `multi` (MR-24); `replicas` is module-only
+(MR-53).
+
+### 16.3 Option shapes (idempotency rows of the shared model)
+
+```ts
+// src/integration.module.ts
+export interface IntegrationIdempotencyOptions {
+  /* existing fields and those of section 3.13 */
+  stores?: Readonly<Record<ProfileName, IdempotencyStore | InboundProviderRef<IdempotencyStore>>>;
+  store?: IdempotencyStore | ProfileName;
+}
+export type StoreRef = ProfileName | IdempotencyStore | InboundProviderRef<IdempotencyStore>;
+
+// src/idempotency/idempotency-store.ts
+export interface IdempotencyStore { /* section 3.2 */ readonly kind?: string }
+
+// src/channel-factory.ts (section 3.10 plus)
+export interface ChannelSpec {
+  /* name, type, capacity, bindings, delivery, sideEffects */
+  idempotency?: { store?: StoreRef; ttlMs?: number; onStoreUnavailable?: StoreUnavailablePolicy };
+}
+
+// src/flow/integration-flow.ts
+export interface FlowOptions {
+  idempotency?: false | { ttlMs?: number; store?: StoreRef; onStoreUnavailable?: StoreUnavailablePolicy; scope?: string };
+  /* resilience (SPI-445) and sensitive (SPI-433) members are defined by the shared model */
+}
+static from(source: string, options?: FlowOptions): IntegrationFlow;
+
+export interface StepIdempotencyOptions {
+  /** Default: headers.idempotencyKey. undefined (or '') means no claim for this run. */
+  key?: (payload: unknown, msg: IntegrationMessage) => string | undefined;
+  scope?: string;                    // default `flow:<flow>#<stepId>`
+  ttlMs?: number;
+  store?: StoreRef;
+  onStoreUnavailable?: StoreUnavailablePolicy;
+}
+handle(fn: MapFn, opts?: StepCommonOptions & { resilience?: ResilienceRef; idempotency?: false | StepIdempotencyOptions }): this;
+
+// src/decorators.ts
+export interface ActivatorOptions {
+  group?: string; routingKey?: string;
+  idempotency?: { store?: StoreRef; ttlMs?: number; onStoreUnavailable?: StoreUnavailablePolicy };
+  /* resilience, sensitive: shared model */
+}
+
+// src/inbound/inbound.types.ts
+export interface InboundIdempotencyOptions { /* existing */ store?: StoreRef; onStoreUnavailable?: StoreUnavailablePolicy }
+```
+
+`StepCommonOptions.id` (default `<kind>#<index>`, zero-based position in the flow; unique per flow,
+`DUPLICATE_STEP_ID` is the shared model's `FlowDefinitionError`) names the step in scopes and the
+graph. A step scope is built from the flow name, never from the flow's custom `scope`. A user `id`
+on a claiming step may not contain `::` or `#` (MR-46); the default id contains `#` by construction
+and is accepted. Only `handle` accepts `idempotency` (OQ-15); every other step type has no such field, and the
+shared model rejects it.
+
+### 16.4 Step claim semantics
+
+```
+handle step with idempotency object:
+  key = opts.key ? opts.key(payload, msg) : headers.idempotencyKey     // throw -> step fails, no claim
+  if key is undefined or '': run fn as in 0.9.0                        // MR-44
+  port = plan.port                                                    // forStore(store, policy), section 3.8
+  outcome = port.claim(scope, key, ttl, { channel: flow.source })       // policy per section 4.4, floor MR-43
+  'duplicate': rec = get(scope, key)                                   // get error -> treated as in flight (MR-37)
+               rec completed, own cachedResult -> continue with payload = cachedResult // MR-45, D21
+               rec completed, { completed: true } -> continue with msg unchanged
+               otherwise -> flow result { status: 'duplicate' }
+  'bypassed':  run fn (with SPI-445 attempts); no settle               // MR-14
+  'acquired':  run fn (with SPI-445 attempts, never re-claiming)
+               ok   -> port.complete(scope, key, out === undefined ? { completed: true } : { cachedResult: out })
+               err  -> port.fail(scope, key, err).catch(ignore); rethrow into the flow's failure path
+               degraded (SPI-445) -> port.release ?? port.fail; never complete   // MR-51
+```
+
+- The flow claim is outer, the step claim inner. A duplicate flow claim returns before any step
+  runs, as today. A step claim matters when the flow claim is off, released, or expired before a
+  redelivery.
+- The result is stored as JSON (MR-07): a step output that `JSON.stringify` rejects makes `complete`
+  reject with `IdempotencyStoreError`, and MR-15 applies (the step's `fail` runs, the flow rejects).
+- Retry gating by key (shared model rule 4.2) uses the same key this section resolves: a step whose
+  key is `undefined` makes no claim and, unless its policy declares `retry.idempotent: true`, gets
+  one attempt. The gate itself is SPI-445's.
+
+### 16.5 Boot resolution and the guard
+
+1. `forRoot` validates value shapes and ranges synchronously (amended MR-36, MR-39, MR-53).
+2. `onModuleInit`, after channels: the resolver walks the module, channel specs, every built flow and
+   step, and every discovered activator and inbound spec; resolves names against `stores`; resolves
+   per-key values (MR-41); applies the floor (MR-43); freezes one claim plan per subject. Value
+   errors (ranges, user scopes, step ids, scope collisions, stray `replicas`: amended MR-36, MR-46,
+   MR-53) are checked first and throw `TypeError` for the first one. Name and floor findings are then
+   all collected, and one `ReplicaConfigError` is thrown with `findings` (MR-43, MR-47). (amended, cross-spec) When the same boot also has error findings of another concern, the class rule of RS-67 applies: one `FlowDefinitionError` carries every finding (MR-47).
+3. `onApplicationBootstrap`: `{ useExisting }` names are resolved; every distinct store of every plan
+   is observed, purged and passed to the guard as a subject (MR-48).
+
+### 16.6 Graph (names only)
+
+```ts
+// GraphSnapshot (present only when a section 16 option, replicas or ESTELA_REPLICAS is set, MR-50)
+module?: { replicas: 'single' | 'multi'; stores: { name: string; kind: string; visibility?: 'process' | 'shared' }[] }
+// GraphNode; store = the name in ChannelSpec.idempotency.store (omitted when unset or not a name)
+delivery?: 'best-effort' | 'must-not-lose'; sideEffects?: boolean; store?: string
+// GraphFlowEntry
+options?: { idempotency?: false | { scope: string; store?: string; storeKind: string; visibility?: 'process' | 'shared' } }
+// a handle step with a claim (describe())
+idempotency?: { scope: string; store?: string; storeKind: string; visibility?: 'process' | 'shared' }
+```
+
+`module.stores` lists the entries of `idempotency.stores` only; a claim on an unnamed store (an
+object passed directly) shows `storeKind` and `visibility` without `store`. `policies` and `profiles`
+lists and the `policy`/`sensitive` annotations are owned by SPI-445 and SPI-433. The graph has no key field at all: neither keys nor key resolvers (nor whether a step uses
+one) are shown.
+
+### 16.7 Example
+
+```ts
+IntegrationModule.forRoot({
+  idempotency: { stores: { shared: redisStore, ledger: pgStore }, store: 'shared', ttlMs: 3_600_000,
+                 purgeIntervalMs: 60_000 },
+  replicas: 'multi',
+  channels: [
+    { name: 'payments.charge', type: 'direct', sideEffects: true, idempotency: { store: 'ledger' } },
+    { name: 'notify', type: 'queue', delivery: 'best-effort' },
+  ],
+}, [{
+  name: 'charge',
+  build: () => IntegrationFlow.from('payments.charge', { idempotency: { ttlMs: 86_400_000 } })
+    .handle(capture, { id: 'capture', idempotency: { key: (p) => (p as Charge).paymentId } })
+    .to('notify'),
+}]);
+// flow claim: flow:charge on 'ledger', TTL 1 day, fail-closed (floor)
+// step claim: flow:charge#capture on 'ledger', TTL 1 day, key = paymentId, fail-closed (floor)
+```
+
+### 16.8 Edge cases
+
+| Case | Behaviour |
+|---|---|
+| Step `store` is a memory store, module store is shared, `multi` | `PROCESS_LOCAL_IDEMPOTENCY_STORE` naming the step (MR-48) |
+| Step claim and flow claim on the same key and store | Different scopes (`flow:f` vs `flow:f#s`): no conflict |
+| Two flows with the same custom `scope` | They share claims (OQ-13) |
+| Step inserted before a claiming step without explicit `id` | Its scope changes; old records invisible for one TTL (section 1.4, OQ-11) |
+| `jump`/`jumpTo` target flow with a step claim | Runs in the same pod (section 4.6); the key travels in the hop |
+| Step claim with a `queue` source and an unavailable store (fail-closed) | The step error fails the flow; the message goes to the error channel, not redelivered (R10) |
+| Module `enabled: false` and step claims | No claim anywhere; one info line (MR-42) |
+| `ChannelSpec.idempotency` on a channel only an inbound endpoint uses | No effect (D19); not a finding |
