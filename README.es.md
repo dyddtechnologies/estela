@@ -516,8 +516,18 @@ query string (`error.url` conserva la completa).
 Advertencias: las estrategias resuelven solo providers singleton; `{ useExisting }` y la configuración
 se validan en el arranque para los bindings declarados y en la primera llamada para opciones ad-hoc
 (guárdalas en una constante para reutilizar el plan); un response mapper que lanza no pasa por
-`mapError`; el timeout aplica a cada intento, no a toda la secuencia de reintentos; el backoff por
-defecto no respeta `Retry-After` (usa una función de backoff).
+`mapError`; el timeout aplica a cada intento, no a toda la secuencia de reintentos (un
+`resilience.timeout.deadlineMs` acota la llamada entera); para `Retry-After`, breakers, bulkheads,
+rate limits y fallbacks ver [Resiliencia](#resiliencia).
+
+## Resiliencia
+
+Timeouts, deadline, reintentos, circuit breaker, bulkhead, rate limit, fallback, presupuesto de
+reintentos (`x-retry-budget`), estado compartido en Redis, shedding inbound con 429 y políticas en
+flows, pasos de saga y canales: la referencia autoritativa es la sección
+[Resilience](./README.md#resilience) del README en inglés (y
+[Flow resilience](./README.md#flow-resilience)). En el outbound REST, `timeoutMs` y `retry` son alias
+de `resilience` con la semántica de 0.9.0.
 
 ## Observabilidad
 

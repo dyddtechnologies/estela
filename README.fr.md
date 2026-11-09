@@ -178,6 +178,15 @@ Un message envoyé à un canal lié (`forRoot({ outbound: { rest: { defaults, bi
 par défaut. `bindRestOut` ne change pas. Détails et exemple :
 [README (EN)](./README.md#outbound-rest-requestreply-with-your-own-contract).
 
+## Résilience
+
+Timeouts, deadline, nouvelles tentatives, circuit breaker, bulkhead, rate limit, fallback, budget de
+tentatives (`x-retry-budget`), état partagé dans Redis, délestage inbound en 429 et politiques sur
+les flows, les étapes de saga et les canaux : la référence qui fait foi est la section
+[Resilience](./README.md#resilience) du README anglais (et
+[Flow resilience](./README.md#flow-resilience)). En outbound REST, `timeoutMs` et `retry` sont des
+alias de `resilience` avec la sémantique de 0.9.0.
+
 ## Observabilité
 
 ```bash

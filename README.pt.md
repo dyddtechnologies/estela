@@ -177,6 +177,15 @@ erros tipados (`OutboundHttpError`, `OutboundNetworkError`, `OutboundTimeoutErro
 chave de idempotência estável (nunca gerada), retry desligado por padrão. `bindRestOut` não muda.
 Detalhes e exemplo: [README (EN)](./README.md#outbound-rest-requestreply-with-your-own-contract).
 
+## Resiliência
+
+Timeouts, deadline, retentativas, circuit breaker, bulkhead, rate limit, fallback, orçamento de
+retentativas (`x-retry-budget`), estado compartilhado no Redis, shedding inbound com 429 e políticas
+em flows, passos de saga e canais: a referência autoritativa é a seção
+[Resilience](./README.md#resilience) do README em inglês (e
+[Flow resilience](./README.md#flow-resilience)). No outbound REST, `timeoutMs` e `retry` são aliases
+de `resilience` com a semântica da 0.9.0.
+
 ## Observabilidade
 
 ```bash

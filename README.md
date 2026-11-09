@@ -472,9 +472,10 @@ const complete = saga<CompleteCtx, EntityManager, CompleteReply>('complete')
 | `traceHeaders` | `true` | `x-trace-id`, `x-span-id`, `x-parent-span-id`, `x-correlation-id`, `x-causation-id` |
 | `serializer` | `'json'` | `'text'`, `'form'` (`x-www-form-urlencoded`), or a function / instance / ref returning `{ body, contentType }` or a string |
 | `response` | `'full'` | `'body'`, or a mapper receiving `{ response, request, payload, message, target, attempts, durationMs }` |
-| `timeoutMs` | `30000` | per attempt; `0` disables; call > target > binding > module |
+| `timeoutMs` | `30000` | per attempt; `0` disables; call > target > binding > module; alias of `resilience.timeout.perAttemptMs` |
 | `idempotency` | forward the message key | see below; `false` sends no key |
-| `retry` | off | see below |
+| `retry` | off | see below; alias of `resilience.retry` with the 0.9.0 semantics |
+| `resilience` | — | a policy reference: timeout, deadline, retry, breaker, bulkhead, rate limit, fallback (see [Resilience](#resilience)) |
 | `mapError` | — | receives `OutboundHttpError` / `OutboundNetworkError` / `OutboundTimeoutError`; what it returns is thrown |
 | `fetchFn` | `globalThis.fetch` | injectable; no HTTP client dependency |
 
@@ -493,7 +494,9 @@ retried only when it is classified retryable (default: network errors, timeouts,
 5xx) **and** the method is safe to repeat: GET, HEAD or OPTIONS, any method while an idempotency key
 is being sent, or a method listed in `methods`. The request is built once, so every attempt carries
 the same key. `backoff` is a fixed delay, `{ initialMs = 200, factor = 2, maxMs = 10000 }` or a
-function; the error mapper runs once, after the last attempt.
+function; the error mapper runs once, after the last attempt. `timeoutMs` and `retry` are aliases of
+`resilience.timeout.perAttemptMs` and `resilience.retry` that keep these 0.9.0 semantics; see
+[Migrating `timeoutMs` and `retry`](#migrating-timeoutms-and-retry).
 
 **Errors.** All three extend `OutboundRestError` (`kind`, `binding`, `url`, `method`, `attempts`):
 `OutboundHttpError` adds `status`, `statusText`, `headers` and the parsed `body`;
@@ -510,8 +513,9 @@ query string (`error.url` keeps the full one).
 Caveats: strategies resolve singleton providers only; `{ useExisting }` and the configuration are
 validated at boot for declared bindings and on the first call for ad-hoc options (keep those in a
 constant so the plan is reused); a response mapper that throws is not passed to `mapError`; the
-timeout applies to each attempt, not to the whole retry sequence; `Retry-After` is not honoured by
-the default backoff (use a backoff function).
+timeout applies to each attempt, not to the whole retry sequence (a `resilience.timeout.deadlineMs`
+bounds the whole call); for `Retry-After`, breakers, bulkheads, rate limits and fallbacks see
+[Resilience](#resilience).
 
 ## Sagas: units of work and idempotency
 
@@ -676,6 +680,352 @@ state with CAS before an outbound call); transaction steps only touch the databa
 re-runs them; never swallow a database error inside a step (Postgres turns the COMMIT into a silent
 ROLLBACK); `TransactionPort.run` must open a new top-level transaction, never join an ambient one.
 
+## Resilience
+
+Every edge that calls something can carry a **resilience policy**: per-attempt
+timeout, deadline, retry, circuit breaker, bulkhead, rate limit and fallback, composed by one
+engine (`src/resilience`, zero npm imports). Nothing changes for code that sets no `resilience`
+option: the same requests, attempts, errors, hop lines and graph JSON as 0.9.0.
+
+```ts
+IntegrationModule.forRoot({
+  channels: [{ name: 'payments.charge', type: 'direct' }],
+  resilience: {
+    policies: {
+      'http-std': {
+        timeout: { perAttemptMs: 2_000, deadlineMs: 8_000 },
+        retry: { maxAttempts: 3, requireIdempotencyKey: true },
+        circuitBreaker: { failureRateThreshold: 50, minimumCalls: 10, openMs: 30_000 },
+      },
+    },
+    defaults: { activator: { bulkhead: { maxConcurrent: 20 } } },
+    metrics: prometheusPort,                          // optional ResilienceMetricsPort
+  },
+  outbound: {
+    rest: { bindings: [{ name: 'payments.http', url: 'https://pay.example/charges', resilience: 'http-std' }] },
+  },
+});
+```
+
+`forRoot({ resilience })` turns on the module-wide parts: the retry budget, the events channel and
+the injectable `ResilienceRegistry`. Without it, a `resilience` option on a binding, activator,
+inbound endpoint, saga step, flow step or channel still runs, but no retry budget is read or sent.
+
+| Where | Option | Edge kind |
+|---|---|---|
+| Outbound REST | binding, `outbound.rest.defaults`, `@OutboundRest`, ad-hoc `request()` options | `outbound-rest` |
+| Activator | `@ServiceActivator(channel, { resilience })` | `activator` |
+| Inbound REST / gRPC / GraphQL | `@InboundRest({ resilience })`, `InboundDefaults.resilience`: `bulkhead` and `rateLimit` only | `inbound` |
+| Saga | `.outbound(name, run, { resilience })`: everything but `fallback` | `saga-outbound` |
+| Flow steps | `from(source, { resilience })`, step and target options (see [Flow resilience](#flow-resilience)) | `flow-handle` · `flow-jump` · `flow-send` |
+| Channel | `ChannelSpec.resilience`: default of sends and jumps into the channel and of its activator | as the subject |
+
+### Model and order
+
+A policy (`ResiliencePolicy`) holds any of `timeout`, `retry`, `circuitBreaker`, `bulkhead`,
+`rateLimit`, `fallback`, plus a policy-wide `classify` hook. A policy with no primitive runs the call
+once, directly, with no timer. The engine composes the primitives in one fixed order, outermost
+first, for every edge:
+
+```text
+fallback > deadline > bulkhead > retry > circuitBreaker > rateLimit > per-attempt timeout > call
+```
+
+So the bulkhead slot is taken once per call, every attempt passes the breaker and takes a token,
+and the deadline (`timeout.deadlineMs`) covers queue waits, attempts and backoff. Retry backoff
+defaults to `{ initialMs: 200, factor: 2, maxMs: 10000, jitter: 'full' }`; `maxAttempts` counts
+the first attempt (1..20, default 3). The attempt's `AbortSignal` is available to activator
+methods, flow functions and saga steps through `currentResilienceSignal()`.
+
+Errors the engine raises extend `ResilienceError` (`instanceof` works across the `.` and
+`./testing` bundles): `CircuitOpenError` (`retryAfterMs`, `forcedBy`), `BulkheadFullError`,
+`RateLimitedError` (`retryAfterMs`), `DeadlineExceededError`, `FallbackFailedError`,
+`ResilienceKeyError` and, at boot, `ResilienceDefinitionError` (`code`, `path`, `findings`).
+In-process edges time out with `AttemptTimeoutError`; REST keeps `OutboundTimeoutError`.
+
+### Classification
+
+Every failure gets a class: `transient`, `throttled`, `rejected`, `quota` or `unknown`. Your
+`classify` hooks run first (the first defined answer wins), then the edge default.
+
+| REST failure (`defaultRestClassifier`) | Class | `retryAfterMs` |
+|---|---|---|
+| `OutboundNetworkError`, `OutboundTimeoutError` | transient | n/a |
+| HTTP 408, 425, 503 | transient | from `Retry-After` |
+| HTTP 429 | throttled | from `Retry-After` |
+| HTTP 500, 502, 504 and other 5xx | transient | n/a |
+| HTTP 501, 505, 511, 4xx, 3xx | rejected | n/a |
+
+Activators, saga steps and flow edges use `defaultInProcessClassifier`: a REST-shaped error by the
+table above, `retryable: true` → transient, `retryable: false` → rejected, anything else unknown
+(not retried). Flow edges also classify `JumpTimeoutError` as transient, `CapacityExceededError`
+as throttled and `NoSubscriberError` / `ChannelNotFoundError` / `FanoutCycleError` as rejected.
+`'quota'` only comes from your own classifier.
+
+| Class / rejection | Retried | Recorded by the breaker | Fallback by default | Event |
+|---|---|---|---|---|
+| transient | yes | yes (failure) | yes | `retry` |
+| throttled (429) | yes, honouring `Retry-After` | **no** | yes | `retry` |
+| rejected | no | no | no | none |
+| quota | **no** | forces it open (`quotaOpenMs` or `'manual'`) | **no** | `quota.exhausted`, `breaker.forced-open` |
+| unknown | no | no | no | none |
+| circuit-open (not quota) | no | n/a | yes | `breaker.*` on transitions |
+| bulkhead-full / rate-limited | no | no | yes | `bulkhead.rejected` / `ratelimit.rejected` |
+| deadline | no | no | yes | `deadline.exceeded` |
+
+A 429 does not open the breaker: the callee is healthy and asks the caller to slow down. List
+`'throttled'` in `circuitBreaker.recordOn` only with a reason. A `Retry-After` longer than
+`retry.maxRetryAfterMs` (default `backoff.maxMs`) makes the failure final.
+
+A retry happens only when the failure's class is in `retry.retryOn`, attempts and budget are left,
+the deadline leaves room for the delay, and the operation is repeatable: a safe REST method, an
+idempotency key on the call, or `retry.idempotent: true`. With `retry.requireIdempotencyKey: true` a
+non-safe call without a key fails with `ResilienceKeyError` before any attempt; set it on every
+binding that has side effects.
+
+### Retry budget
+
+Along one call path, the **outermost** layer that may retry owns the retries; every layer inside
+it makes single attempts. The budget carries that rule: the message header `retryBudget`, the wire
+header `x-retry-budget` (HTTP and gRPC metadata), and an `AsyncLocalStorage` scope in between. A
+layer that retries (`min(maxAttempts - 1, budget)` > 0) **claims** the budget and sends `0`
+downstream; a layer that does not retry forwards what it received. `retry.propagate: 'forward'`
+forwards instead of claiming (this allows amplification). Invalid values are ignored and counted
+(`estela_resilience_budget_invalid_total`), values above 20 are capped, and
+`retryBudget: { initial, header }` sets a budget for requests that arrive without one. The header
+can only lower retries, never raise them. A policy that loses its retries to the budget emits
+`retry.suppressed`.
+
+The inbound interceptor reads `x-retry-budget`; activators, flows and outbound channel bindings
+rebuild the scope from `msg.headers.retryBudget` at every dispatch; `OutboundRestGateway.request`
+and `ChannelRegistry.send` copy the scope's budget onto the messages they create. With two Estela
+services chained over HTTP, each with `maxAttempts: 3`, a failing leaf gets 3 calls, not 9.
+
+> **Guidance.** Put retries on the edge closest to the dependency (the outbound binding, the saga
+> step), and give activators only a bulkhead and timeouts. Legacy `retry` bindings (the 0.9.0 alias)
+> do not take part in the budget: they neither read nor send `x-retry-budget`, so migrate them to
+> `resilience.retry` before you rely on it.
+
+### Shared state across replicas
+
+Rate limiters and breakers keep state per pod unless `state` is a `ResilienceStatePort`.
+`redisResilienceStatePort(evalScript, { prefix? })` is the reference adapter: it imports no Redis
+client, you pass a function that evaluates a Lua script. Buckets refill on Redis server time
+(`TIME`), so clock skew between pods does not matter; the shared breaker is an open marker with a
+TTL plus a half-open probe lease, so one pod probes at a time; failures are still counted per pod.
+
+```ts
+// ioredis
+const state = redisResilienceStatePort((script, keys, args) => redis.eval(script, keys.length, ...keys, ...args));
+// node-redis v4
+const state = redisResilienceStatePort((script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }));
+
+resilience: {
+  rateLimit: { limitPerSec: 50, burst: 50, state, replicasHint: 4 },
+  circuitBreaker: { state, syncMs: 1_000 },
+}
+```
+
+**When Redis is down (D-REDIS-DOWN).** A state call waits at most `stateTimeoutMs` (default 100).
+When it throws or times out, that binding switches to **degraded local state** (one
+`state.degraded` event and one warn line): the limiter uses a local bucket of
+`degradedLimitPerSec` (default `limitPerSec / replicasHint`, never unlimited) and the breaker its
+per-pod window. The port is probed at most once per `stateProbeMs` (default 5000), lazily on a
+call; on success the binding switches back and emits `state.recovered`. Each call is decided by
+exactly one source, local or shared.
+
+### Events, metrics and keys
+
+Events (`retry`, `retry.suppressed`, `breaker.open|half-open|closed|forced-open|capacity`,
+`bulkhead.rejected`, `ratelimit.rejected`, `deadline.exceeded`, `fallback.used|failed`,
+`quota.exhausted`, `state.degraded|recovered`) are published on the pubsub channel
+`estela.resilience.events` (`events: { channel: 'name' | false, onEvent }`). They carry edge,
+binding, class or reason, attempt, delay and trace ids, never a payload, header, URL or raw key.
+Breaker events fire on transitions only.
+
+| Metric (`ResilienceMetricsPort`) | Type | Labels |
+|---|---|---|
+| `estela_resilience_calls_total` | counter | edge, binding, outcome |
+| `estela_resilience_call_seconds` | histogram | edge, binding, outcome |
+| `estela_resilience_attempts_total` | counter | edge, binding, class |
+| `estela_resilience_retries_total` | counter | edge, binding |
+| `estela_resilience_rejected_total` | counter | edge, binding, reason |
+| `estela_resilience_breakers_open` | gauge | edge, binding |
+| `estela_resilience_state_degraded` | gauge | edge, binding |
+| `estela_resilience_budget_invalid_total` | counter | edge |
+
+`circuitBreaker.key` and `rateLimit.key` split state per key (tenant, phone number, account). Raw
+keys never reach logs, events, metrics, errors or state keys:
+
+- `keyHasher` (module option) builds the state-port key. It is **required** with a custom key and a
+  shared state, and it **must be an HMAC** with a secret of at least 32 bytes, never a plain digest
+  (a phone number's SHA-256 is reversible by enumeration).
+- `keyLabel(key, ctx)` is what events show; omit it, or return a hashed label, when keys may be
+  personal data.
+- Both must return `^[A-Za-z0-9:_.-]{1,128}$`, else the call fails with `ResilienceKeyError`.
+
+```ts
+const secret = process.env.RESILIENCE_KEY_SECRET!;   // >= 32 random bytes
+resilience: {
+  keyHasher: (key) => createHmac('sha256', secret).update(key).digest('hex'),
+  keyLabel: (key) => createHmac('sha256', secret).update(key).digest('hex').slice(0, 12),
+}
+```
+
+### Quota, manual openings and `ResilienceRegistry`
+
+A `quota` failure forces the breaker open for `circuitBreaker.quotaOpenMs` (default `openMs`).
+`quotaOpenMs: 'manual'` keeps it open until an operator closes it. `ResilienceRegistry` is
+injectable under `forRoot({ resilience })`:
+
+```ts
+constructor(private readonly resilience: ResilienceRegistry) {}
+
+this.resilience.breakerState('payments.http');           // { state: 'open', forcedBy: 'quota' } | undefined
+await this.resilience.resetBreaker('payments.http', key); // closes it and clears the shared markers
+```
+
+Bindings are named as in the boot log: the outbound binding name, `activator:Class.method`,
+`<saga>:<step>`, and `flow:<flow>#<step id>[:<channel>]` for flow edges.
+
+### Fallback and the degraded mark
+
+`fallback: { value: (error, ctx) => … }` or `fallback: { channel }` (request/reply with the same
+message) answers when the call fails with a class in `fallback.on` (default transient, throttled,
+circuit-open, bulkhead-full, rate-limited, deadline). A fallback answer is **degraded**: it is never
+stored as the completed result of an idempotency claim. The activator settles its claim without
+storing and replies with header `degraded: true`; the inbound interceptor does the same, so a
+duplicate request with `onDuplicate: 'replay'` runs again instead of replaying the fallback.
+`fallback.cacheable: true` opts out. Never use a fallback to hide the failure of a side effect.
+
+### Inbound load shedding: 429
+
+`@InboundRest`, `@InboundGrpc`, `@InboundGraphQL` and `InboundDefaults` accept `resilience` with
+`bulkhead` and `rateLimit` only (anything else, or any inbound resilience on `@InboundRabbit`, fails
+boot). Slots and tokens are taken after guards and before pipes and the handler, so a shed request
+never takes an idempotency claim. It throws `InboundOverloadedError`: HTTP **429** with
+`Retry-After` (seconds, rounded up) when known, and `grpcCode = 8` (`RESOURCE_EXHAUSTED`). The
+`rateLimit.key(ctx)` of an inbound policy reads `ctx.rawHeaders`, which a custom
+`InboundTransportStrategy` provides through its optional `rawHeaders(context)` method (`{}` without
+it). Until the gRPC status mapper ships, map the status with an exception filter:
+
+```ts
+@Catch(InboundOverloadedError)
+export class OverloadedGrpcFilter implements RpcExceptionFilter<InboundOverloadedError> {
+  catch(error: InboundOverloadedError): Observable<never> {
+    return throwError(() => ({ code: error.grpcCode, message: 'RESOURCE_EXHAUSTED' }));
+  }
+}
+```
+
+### Saga outbound steps
+
+```ts
+saga<Ctx, EntityManager, Reply>('complete')
+  .transaction('claim', claimStep)
+  .outbound('charge', chargeCard, {
+    compensate: releaseClaim,
+    resilience: { retry: { maxAttempts: 3, idempotent: true }, timeout: { perAttemptMs: 5_000 } },
+  })
+  .reply((ctx) => ctx.reply);
+
+new SagaRunner({ transactions, resilience: { policies, defaults } });   // or a ResilienceRuntime
+```
+
+The whole policy is one `outbound:<name>` hop, and `compensate` runs once, after the policy gives
+up; then the last error is rethrown. A `fallback` is refused (`SagaDefinitionError`): it would hide
+the failure and skip the compensation. `maxAttempts > 1` needs `retry.idempotent: true`. A profile
+name resolves against `SagaRunnerOptions.resilience` on the first `run()`, before any transaction;
+a fallback inherited from `defaults['saga-outbound']` is dropped with one warning. Retries take no
+`ctx` checkpoint: what a failed attempt wrote to `ctx` is visible to the next attempt and to the
+compensation. Breakers persist across runs of the same runner. The unit-of-work `retry()` policy is
+unrelated and unchanged.
+
+### Named profiles and `defaults`
+
+Anywhere a policy is accepted you can pass a **reference** (`ResilienceRef`):
+
+- a profile name: `resilience: 'http-std'`;
+- an inline policy: `resilience: { retry: { maxAttempts: 2 } }`;
+- a profile with inline overrides, deep-merged once: `resilience: { use: 'http-std', retry: { maxAttempts: 5 } }`;
+- `false`: no policy at this level and below.
+
+Profiles live in `resilience.policies` (names `^[a-z0-9][a-z0-9._-]{0,63}$`) and may `extends`
+another profile (single inheritance). `resilience.defaults` gives a default per edge kind
+(`outbound-rest`, `activator`, `saga-outbound`, `flow-handle`, `flow-jump`, `flow-send`, …;
+`inbound` is refused, use `InboundDefaults.resilience`). References are validated at boot (saga
+steps: on the first run). Flow, step, channel, profile and `defaults` references are resolved in one
+pass that collects every finding (unknown profile, invalid value, primitive not allowed) into one
+`ResilienceDefinitionError` whose `findings` lists them all.
+
+### Migrating `timeoutMs` and `retry`
+
+`timeoutMs` and `retry` on outbound REST options stay, as aliases with their 0.9.0 semantics; no
+deprecation warning is logged.
+
+| 0.9.0 option | Equivalent `resilience` | Kept identical |
+|---|---|---|
+| `timeoutMs: N` | `timeout: { perAttemptMs: N }` | call > target > binding > module precedence; `0` = no timeout; `OutboundTimeoutError` |
+| `retry: { maxAttempts, backoff, retryOn, methods }` | `retry: { maxAttempts, backoff, methods }` + a boolean classifier | same backoff, **no jitter**, field-by-field layering, 429 and every 5xx retried |
+| (implicit) | `honorRetryAfter: false`, no budget, no breaker, bulkhead, rate limit or fallback | no `x-retry-budget` read or sent |
+| `retry: false` | `retry: false` | turns a module default off |
+
+Under `resilience` the defaults differ: full jitter, `Retry-After` honoured, the classification
+table above and the retry budget. Setting the same primitive in both spellings on one layer is a
+`ResilienceDefinitionError`.
+
+## Flow resilience
+
+A flow, a step, a target and a channel can carry resilience, with the same references as above
+(model: [`docs/ESTELA_FLOW_PARAMETERS.md`](./docs/ESTELA_FLOW_PARAMETERS.md), rules:
+[`docs/ESTELA_RESILIENCE_SPEC.md`](./docs/ESTELA_RESILIENCE_SPEC.md) section 2.13).
+
+| Level (highest wins) | Written in |
+|---|---|
+| L4 step | a step option, one `fanoutTo`/`jumpTo` target, `jump(channel, { resilience })`, `@ServiceActivator`, an outbound binding |
+| L3 flow | `IntegrationFlow.from(source, { resilience: { handle?, jump?, send? } })` |
+| L2 channel | `ChannelSpec.resilience` of the **destination** channel (sends, jumps) or of the activator's own channel |
+| L1 module | `resilience.defaults[edgeKind]`, `outbound.rest.defaults` |
+| L0 built-in | no primitive: one direct attempt |
+
+**Merge rule.** Each primitive (`timeout`, `retry`, `circuitBreaker`, …) is taken **whole** from
+the highest level that sets it; levels are not merged field by field. A `{ use, …inline }`
+reference is deep-merged once, inside its own level. `false` at a level drops everything below it.
+The incoming retry budget and the remaining deadline only narrow a resolved value.
+
+| DSL method | Edge kind | Allowed |
+|---|---|---|
+| `handle(fn, opts?)` | `flow-handle` | all; fallback `value` or `channel` |
+| `jump(channel, opts?)`, `jumpTo(dests, opts?)` | `flow-jump` | all, per target; `fallback` only on awaited targets |
+| `to(channel, opts?)` | `flow-send` | all but `fallback`, except `fallback: { channel }` (a plain send of the same hop) |
+| `publish`, `fanoutTo`, `route` | `flow-send` | all but `fallback`, per target |
+| `filter`, `transform`, `reply`, `wireTap` | none | refused at build (`wireTap` never) |
+
+```ts
+IntegrationFlow.from('orders.place', { resilience: { send: 'send-std', jump: { timeout: { perAttemptMs: 3_000 } } } })
+  .handle(enrich, { id: 'enrich', resilience: { timeout: { perAttemptMs: 500 } } })
+  .jumpTo([{ channel: 'inventory.reserve', resilience: { retry: { maxAttempts: 2 } } }])
+  .to('orders.persist', { resilience: { fallback: { channel: 'orders.persist.dlq' } } });
+
+channels: [{ name: 'inventory.reserve', type: 'direct', resilience: 'activator-std' }]
+```
+
+- A step retries only under an idempotency key: the message's `idempotencyKey`, a step key, or
+  `retry.idempotent: true` (shown as `retryGate: 'declared'` in the graph). Otherwise the step makes
+  one attempt and emits `retry.suppressed`; boot warns `RETRY_WITHOUT_KEY_GATE`.
+- A channel policy whose activator also retries logs `RETRY_STACKED` at boot; the retry budget bounds
+  the product at run time. Never retry toward a `pubsub` destination unless every subscriber is
+  idempotent: a retry delivers to all of them again.
+- `jump` and jump targets keep their 0.9.0 wait: a target `timeoutMs` is the legacy spelling of
+  `timeout.perAttemptMs` (setting both on one target fails boot), and without either the wait is
+  10 s. Each attempt waits on its own ephemeral reply channel, unregistered when the attempt ends,
+  so a late reply from an earlier attempt is dropped. A jump retry toward a keyed activator needs a
+  `perAttemptMs` longer than the activator's work.
+- A jump whose reply carries `degraded: true`, or a step that fell back, marks the flow degraded,
+  and the flow's claim is settled without storing the result.
+- Flow steps get an `id` (default `<kind>#<index>`); configured steps show `id`, `policy` and
+  `retryGate` in the graph.
+
 ## Observability
 
 ```bash
@@ -719,6 +1069,15 @@ inbound grpc: WorkflowLifecycleService/Start -> wf.start (request-reply)
 inbound graphql: mutation placeOrder -> orders.place
 outbound rest: payments.http -> POST https://pay.example/charges
 outbound rest: partner.call -> dynamic
+```
+
+An outbound binding or inbound endpoint with a resilience policy gets a summary suffix in its boot
+line, and the same summary is the `policy` field of its graph ref; activators show it in their graph
+label (`InventoryActivator.reserve [timeout 2s · bulkhead]`), and configured flow steps and channels
+carry it as `policy`. The summary lists primitives, timeouts and attempts only:
+
+```
+outbound rest: payments.http -> POST https://pay.example/charges [retry x3 · breaker]
 ```
 
 Only transport, route or pattern, channel and the request-reply flag are printed. When route
@@ -769,6 +1128,11 @@ bindFlow(PlaceOrderFlow, registry, { idempotency: new IdempotencyService({ store
 await registry.send('orders.place', { qty: 2, sku: 'A' });
 const reply = await waitFor(registry, 'reply.http-1', 2_000);
 ```
+
+Resilience helpers: `manualResilienceClock()` (deterministic clock, `advance(ms)`),
+`MemoryResilienceStatePort` (shared state with fault injection: `down()`, `slow(ms)`, `hang()`,
+`failNext(n)`), `collectResilienceEvents(moduleRef)`, and `bindFlow(flow, registry, { resilience })`
+to resolve flow policies without Nest.
 
 Saga helpers: `MemoryLockPort` (in-process, NOT cross-process), `MemoryTransitionPort`, and
 `testUnitOfWork()` to call a transaction step directly. The published type declarations stay
