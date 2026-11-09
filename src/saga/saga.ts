@@ -2,6 +2,8 @@ import { SagaDefinitionError } from './concurrency-errors';
 import type { LockMode } from './lock-port';
 import type { RetryPolicy } from './retry-policy';
 import { validateLockDeclaration, validateRetryPolicy } from './saga-definition';
+import { validateOutboundResilience } from './saga-resilience';
+import type { ResilienceRef } from '../resilience/resilience.types';
 
 export type { JitterMode, RetryPolicy } from './retry-policy';
 
@@ -69,6 +71,15 @@ export interface OutboundOptions<Ctx, Tx> {
   /** 'inherit' (default): the compensation re-acquires the exact LockRequests resolved for the
    *  transaction segment right before this outbound step. 'none': no locks. */
   compensateLocks?: 'inherit' | 'none';
+  /**
+   * Resilience policy of the step (RS-38): a profile name resolved against
+   * `SagaRunnerOptions.resilience`, an inline policy, or both (`{ use, ... }`). The whole policy is
+   * one `outbound:<name>` hop, and `compensate` runs once after it gives up. `fallback` is refused
+   * (`SagaDefinitionError`), and a retry with `maxAttempts > 1` needs `retry.idempotent: true`.
+   * Retries take no ctx checkpoint: a change a failed attempt made to ctx stays visible to the next
+   * attempt and to the compensation.
+   */
+  resilience?: ResilienceRef;
 }
 
 export type SagaStep<Ctx, Tx> =
@@ -84,6 +95,7 @@ export type SagaStep<Ctx, Tx> =
       run: OutboundStep<Ctx>;
       compensate?: TransactionStep<Ctx, Tx>;
       compensateLocks?: 'inherit' | 'none';
+      resilience?: ResilienceRef;
     };
 
 export interface SagaDefinition<Ctx, Tx, Reply> {
@@ -123,9 +135,11 @@ export class SagaBuilder<Ctx, Tx, Reply> {
 
   outbound(name: string, run: OutboundStep<Ctx>, options: OutboundOptions<Ctx, Tx> = {}): this {
     this.assertNoPendingLocks();
+    validateOutboundResilience(this.name, name, options.resilience);
     const step: OutboundSagaStep<Ctx, Tx> = { kind: 'outbound', name, run };
     if (options.compensate !== undefined) step.compensate = options.compensate;
     if (options.compensateLocks !== undefined) step.compensateLocks = options.compensateLocks;
+    if (options.resilience !== undefined) step.resilience = options.resilience;
     this.steps.push(step);
     return this;
   }

@@ -1,6 +1,8 @@
 import { randomInt } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createMessage, type MessageHeaders } from '../message';
+import type { ResilienceModuleOptions } from '../resilience/resilience.types';
+import type { ResilienceRuntime } from '../resilience/runtime';
 import type { HopLogger } from '../trace/hop-logger';
 import { SagaUsageError, type ErrorClassifier } from './concurrency-errors';
 import {
@@ -12,6 +14,7 @@ import type { LockPort, LockRequest } from './lock-port';
 import type { RetryPolicy } from './retry-policy';
 import type { SagaDefinition, SagaStep, TransactionStep } from './saga';
 import { validateLockDeclaration, validateRetryPolicy } from './saga-definition';
+import { SagaResilience } from './saga-resilience';
 import { SagaTracer } from './saga-tracer';
 import {
   declaresLocks,
@@ -47,6 +50,12 @@ export interface SagaRunnerOptions<Tx> {
    *  fails with SagaUsageError before the transaction: every Postgres advisory lock takes a slot
    *  in the server-wide shared lock table. */
   maxLocksPerUnit?: number;
+  /**
+   * Resilience of outbound steps (RS-38): the module options that resolve step profiles and
+   * `defaults['saga-outbound']` (the runner builds its own runtime, retry budget off), or a
+   * runtime to share. Without it, an inline step policy still runs on a default runtime.
+   */
+  resilience?: ResilienceModuleOptions | ResilienceRuntime;
   /** Test seam; default node:timers/promises setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam; default node:crypto randomInt. */
@@ -87,6 +96,7 @@ const DATABASE_KINDS = ['lock-timeout', 'deadlock', 'serialization'];
 export class SagaRunner<Tx = unknown> {
   private readonly tracer: SagaTracer;
   private readonly units: UnitOfWorkExecutor<Tx>;
+  private readonly resilience: SagaResilience;
 
   private readonly maxLocksPerUnit: number;
 
@@ -97,6 +107,7 @@ export class SagaRunner<Tx = unknown> {
     }
     this.maxLocksPerUnit = max;
     this.tracer = new SagaTracer(options.logger);
+    this.resilience = new SagaResilience(options.resilience);
     this.units = new UnitOfWorkExecutor<Tx>({
       transactions: options.transactions,
       tracer: this.tracer,
@@ -161,6 +172,9 @@ export class SagaRunner<Tx = unknown> {
       );
     }
     if (retry !== undefined) this.assertRetryable(definition, retry);
+    for (const step of definition.steps) {
+      if (step.kind === 'outbound') this.resilience.executorFor(definition.name, step);
+    }
     return retry;
   }
 
@@ -307,10 +321,18 @@ export class SagaRunner<Tx = unknown> {
       );
       if (state.replay !== undefined) return;
     }
+    const executor = this.resilience.executorFor(definition.name, step);
+    const call =
+      executor === undefined
+        ? () => step.run(ctx)
+        : async () => {
+            const context = { edge: 'saga-outbound' as const, binding: executor.binding };
+            await executor.execute(context, async () => {
+              await step.run(ctx);
+            });
+          };
     try {
-      await this.tracer.traced(definition.name, `outbound:${step.name}`, headers, () =>
-        step.run(ctx),
-      );
+      await this.tracer.traced(definition.name, `outbound:${step.name}`, headers, call);
     } catch (error) {
       const locks = step.compensateLocks === 'none' ? [] : lastLocks;
       await this.compensate(run, step.compensate, locks, `compensate#${index}`);
