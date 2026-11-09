@@ -6,6 +6,12 @@ import { serializeError } from '../flow/flow-step';
 import type { IdempotencyService } from '../idempotency/idempotency.service';
 import type { TraceContext } from '../trace/trace-context';
 import type { HopLogger } from '../trace/hop-logger';
+import { defaultInProcessClassifier } from '../resilience/classifiers';
+import type { ResilienceEdgeAdapter, ResilienceExecutor } from '../resilience/executor';
+import { describePolicy } from '../resilience/resilience.plan';
+import { DEGRADED_HEADER, parseRetryBudget, ResilienceScope } from '../resilience/retry-budget';
+import type { ResilienceRuntime } from '../resilience/runtime';
+import { AttemptTimeoutError } from '../resilience/timeout';
 
 export interface ActivatorDeps {
   registry: ChannelRegistry;
@@ -14,6 +20,68 @@ export interface ActivatorDeps {
   idempotency?: IdempotencyService;
   idempotencyTtlMs?: number;
   logger?: HopLogger;
+  /** Resilience runtime: message scopes, the degraded mark and `@ServiceActivator({ resilience })`. */
+  resilience?: ResilienceRuntime;
+}
+
+interface ActivatorResilience {
+  executor?: ResilienceExecutor<unknown>;
+  summary?: string;
+}
+
+/** Per runtime, then per decorated method: two modules never share an executor. */
+const resolved = new WeakMap<object, WeakMap<ActivatorMetadata, ActivatorResilience>>();
+const NO_RUNTIME = {};
+
+function activatorAdapter(scope: string): ResilienceEdgeAdapter {
+  const keyOf = (msg: IntegrationMessage | undefined): string | undefined =>
+    typeof msg?.headers.idempotencyKey === 'string' ? msg.headers.idempotencyKey : undefined;
+  return {
+    kind: 'activator',
+    classify: (error) => defaultInProcessClassifier(error),
+    repeatable: (ctx) => keyOf(ctx.message) !== undefined,
+    safe: () => false,
+    idempotencyKey: (ctx) => keyOf(ctx.message),
+    timeoutError: (_ctx, timeoutMs) => new AttemptTimeoutError(scope, timeoutMs),
+  };
+}
+
+/**
+ * Resolves (once per decorated method) the policy of `@ServiceActivator({ resilience })`. Invalid
+ * or unknown policies throw `ResilienceDefinitionError` when the activator is subscribed (RS-03).
+ */
+export function activatorResilience(
+  binding: ActivatorBinding,
+  deps: ActivatorDeps,
+): ActivatorResilience {
+  const runtime = deps.resilience;
+  const perRuntime =
+    resolved.get(runtime ?? NO_RUNTIME) ?? new WeakMap<ActivatorMetadata, ActivatorResilience>();
+  resolved.set(runtime ?? NO_RUNTIME, perRuntime);
+  const cached = perRuntime.get(binding.metadata);
+  if (cached !== undefined) return cached;
+  const ref = binding.metadata.resilience;
+  const result: ActivatorResilience = {};
+  if (runtime !== undefined && ref !== undefined) {
+    const scope = activatorScope(binding);
+    const plan = runtime.plan(scope, [ref], 'activator');
+    if (plan.retry !== undefined && plan.retry.maxAttempts > 1 && !plan.retry.idempotent) {
+      runtime.observer.logger.warn(
+        `${scope}: resilience.retry.maxAttempts > 1 without idempotent: true; only messages with an idempotencyKey are retried`,
+      );
+    }
+    result.executor = runtime.executor(plan, activatorAdapter(scope), {
+      fallbackChannel: runtime.channelFallback(),
+    });
+    const summary = describePolicy(plan);
+    if (summary !== undefined) result.summary = summary;
+  }
+  perRuntime.set(binding.metadata, result);
+  return result;
+}
+
+function activatorScope(binding: ActivatorBinding): string {
+  return `activator:${binding.instance.constructor.name}.${binding.methodName}`;
 }
 
 export interface ActivatorBinding {
@@ -55,8 +123,8 @@ export function subscribeActivators(
 /** Subscribes un binding: el channel define group/routingKey (spec sec.7.1). */
 export function subscribeActivator(binding: ActivatorBinding, deps: ActivatorDeps): Unsubscribe {
   const channel = deps.registry.get(binding.metadata.channel);
-  const className = binding.instance.constructor.name;
-  const scope = `activator:${className}.${binding.methodName}`;
+  const scope = activatorScope(binding);
+  activatorResilience(binding, deps);
   const options: SubscribeOptions = {};
   if (binding.metadata.group !== undefined) options.group = binding.metadata.group;
   if (binding.metadata.routingKey !== undefined) options.routingKey = binding.metadata.routingKey;
@@ -78,6 +146,27 @@ export async function invokeActivator(
   msg: IntegrationMessage,
   deps: ActivatorDeps,
 ): Promise<void> {
+  const runtime = deps.resilience;
+  if (runtime === undefined) return invokeInScope(binding, scope, msg, deps, undefined);
+  // RS-27, RS-29: one message scope per dispatch, rebuilt from the headers (invariant 7).
+  const budget = runtime.enabled ? parseRetryBudget(msg.headers.retryBudget) : undefined;
+  const value = {
+    traceId: msg.headers.traceId,
+    fromEventsChannel: binding.metadata.channel === runtime.eventsChannel,
+    ...(budget === undefined ? {} : { budget }),
+  };
+  return ResilienceScope.runMessage(value, (frame) =>
+    invokeInScope(binding, scope, msg, deps, frame),
+  );
+}
+
+async function invokeInScope(
+  binding: ActivatorBinding,
+  scope: string,
+  msg: IntegrationMessage,
+  deps: ActivatorDeps,
+  frame: { degraded(): boolean } | undefined,
+): Promise<void> {
   const { registry } = deps;
   const idem = deps.idempotency;
   const key =
@@ -97,14 +186,10 @@ export async function invokeActivator(
   }
   try {
     const result = await runActivatorMethod(binding, scope, msg, deps, method);
-    if (idem !== undefined && key !== undefined) {
-      await idem.complete(
-        scope,
-        key,
-        result !== undefined ? { cachedResult: result } : { completed: true },
-      );
-    }
-    await replyToCaller(result, msg, registry);
+    const degraded = frame?.degraded() === true;
+    if (idem !== undefined && key !== undefined)
+      await settleClaim(idem, scope, key, result, degraded);
+    await replyToCaller(result, msg, registry, degraded);
   } catch (error) {
     if (idem !== undefined && key !== undefined) {
       await idem.fail(scope, key, error).catch(() => undefined);
@@ -122,7 +207,21 @@ async function runActivatorMethod(
   deps: ActivatorDeps,
   method: (...args: unknown[]) => unknown,
 ): Promise<unknown> {
-  const call = (): unknown => method.call(binding.instance, msg.payload, msg);
+  const executor =
+    deps.resilience === undefined ? undefined : activatorResilience(binding, deps).executor;
+  const direct = (): unknown => method.call(binding.instance, msg.payload, msg);
+  const call =
+    executor === undefined
+      ? direct
+      : async (): Promise<unknown> => {
+          const context = {
+            edge: 'activator' as const,
+            binding: scope,
+            channel: binding.metadata.channel,
+            message: msg,
+          };
+          return (await executor.execute(context, () => Promise.resolve(direct()))).value;
+        };
   const log = deps.logger;
   if (log === undefined) return deps.trace.runWithMessage(msg, call);
   const channel = binding.metadata.channel;
@@ -146,6 +245,7 @@ async function replyToCaller(
   result: unknown,
   msg: IntegrationMessage,
   registry: ChannelRegistry,
+  degraded = false,
 ): Promise<void> {
   const replyChannel = msg.headers.replyChannel;
   if (result === undefined || typeof replyChannel !== 'string' || replyChannel.length === 0) return;
@@ -154,7 +254,36 @@ async function replyToCaller(
     traceId: msg.headers.traceId,
     causationId: msg.headers.id,
     parentSpanId: msg.headers.spanId,
+    ...(degraded ? { [DEGRADED_HEADER]: true } : {}),
   });
+}
+
+async function settleClaim(
+  idem: IdempotencyService,
+  scope: string,
+  key: string,
+  result: unknown,
+  degraded: boolean,
+): Promise<void> {
+  if (degraded) {
+    await settleWithoutStoring(idem, scope, key);
+    return;
+  }
+  await idem.complete(
+    scope,
+    key,
+    result !== undefined ? { cachedResult: result } : { completed: true },
+  );
+}
+
+/** RS-27: a degraded result is never stored; the claim is released, else marked failed. */
+async function settleWithoutStoring(
+  idem: IdempotencyService,
+  scope: string,
+  key: string,
+): Promise<void> {
+  if (idem.supportsRelease) await idem.release(scope, key);
+  else await idem.fail(scope, key, new Error('degraded result not stored'));
 }
 
 async function resendCachedResult(

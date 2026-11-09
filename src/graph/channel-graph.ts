@@ -6,6 +6,8 @@ export interface GraphInboundRef {
   transport: InboundTransport;
   requestReply: boolean;
   operation?: GraphqlOperation;
+  /** Load-shedding summary (RS-42); absent without a policy. */
+  policy?: string;
 }
 
 /** Outbound transports a channel can be bound to. */
@@ -15,6 +17,8 @@ export interface GraphOutboundRef {
   transport: OutboundTransport;
   /** `POST https://host/path` or `dynamic`; never a query string or credentials. */
   target: string;
+  /** Resilience summary (RS-42); absent without a policy. */
+  policy?: string;
 }
 
 export interface GraphNode {
@@ -83,6 +87,11 @@ function destChannels(step: Record<string, unknown>): { channel: string; wait?: 
   return out;
 }
 
+/** ` [policy]` for Mermaid labels, empty without a policy. */
+function policySuffix(policy: string | undefined): string {
+  return policy === undefined ? '' : ` [${policy}]`;
+}
+
 function sanitizeId(value: string): string {
   return value.replace(/\W/g, '_');
 }
@@ -118,7 +127,11 @@ export class ChannelGraph {
   /** Records an outbound adapter bound to `channel` (declared bindings and `@OutboundRest`). */
   recordOutbound(channel: string, ref: GraphOutboundRef): void {
     const refs = this.outbounds.get(channel) ?? [];
-    refs.push({ transport: ref.transport, target: ref.target });
+    refs.push(
+      ref.policy === undefined
+        ? { transport: ref.transport, target: ref.target }
+        : { transport: ref.transport, target: ref.target, policy: ref.policy },
+    );
     this.outbounds.set(channel, refs);
   }
 
@@ -218,7 +231,7 @@ export class ChannelGraph {
       for (const ref of node.outbounds) {
         outboundIndex += 1;
         lines.push(
-          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}"]`,
+          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}${policySuffix(ref.policy)}"]`,
         );
       }
       for (const label of node.activators) {

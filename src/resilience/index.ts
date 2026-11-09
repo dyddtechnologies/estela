@@ -1,6 +1,7 @@
 export * from './resilience.types';
 export * from './resilience.errors';
 export { ResilienceExecutor, currentResilienceSignal } from './executor';
+export { AttemptTimeoutError } from './timeout';
 export type {
   ExecuteOptions,
   ResilienceAttempt,

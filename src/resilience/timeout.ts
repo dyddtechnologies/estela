@@ -1,5 +1,21 @@
 import { performance } from 'node:perf_hooks';
+import { ChannelError } from '../channel';
 import type { ResilienceClock, ResilienceTimer } from './resilience.types';
+
+/**
+ * Per-attempt timeout of an in-process edge (activator, saga step, flow function). It is
+ * `retryable`, so `defaultInProcessClassifier` treats it as transient.
+ */
+export class AttemptTimeoutError extends ChannelError {
+  readonly retryable = true;
+
+  constructor(
+    readonly binding: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`attempt of '${binding}' timed out after ${timeoutMs}ms`);
+  }
+}
 
 /** Default clock: `performance.now()` for decisions, `Date.now()` for events and markers. */
 export const systemResilienceClock: ResilienceClock = {

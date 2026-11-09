@@ -27,7 +27,11 @@ import { ReplyGateway } from './gateway/reply-gateway';
 import { ChannelGraph } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
-import { subscribeActivator, type ActivatorDeps } from './activator/activator-wrapper';
+import {
+  activatorResilience,
+  subscribeActivator,
+  type ActivatorDeps,
+} from './activator/activator-wrapper';
 import { HopLogger, type IntegrationLoggingOptions } from './trace/hop-logger';
 import { printEstelaBanner } from './trace/banner';
 import { OutboundRestGateway } from './outbound/outbound-rest.gateway';
@@ -37,8 +41,23 @@ import {
   type OutboundRestSpec,
 } from './outbound/outbound.decorators';
 import type { OutboundModuleOptions } from './outbound/outbound.types';
+import { ResilienceRegistry } from './resilience/registry';
+import type { ResilienceLogger, ResilienceModuleOptions } from './resilience/resilience.types';
+import { ResilienceRuntime } from './resilience/runtime';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
+/** DI token of the module's `ResilienceRuntime` (always present; enabled by forRoot({ resilience })). */
+export const RESILIENCE_RUNTIME = 'INTEGRATION_RESILIENCE_RUNTIME';
+
+function nestResilienceLogger(): ResilienceLogger {
+  const logger = new Logger('EstelaResilience');
+  return {
+    log: (message) => logger.log(message),
+    warn: (message) => logger.warn(message),
+    error: (message) => logger.error(message),
+    debug: (message) => logger.debug(message),
+  };
+}
 
 export interface IntegrationIdempotencyOptions {
   enabled?: boolean;
@@ -60,6 +79,11 @@ export interface IntegrationModuleOptions {
   inbound?: InboundDefaults;
   /** Outbound adapters: module-wide defaults and declared bindings (REST request/reply). */
   outbound?: OutboundModuleOptions;
+  /**
+   * Resilience (SPI-445): named policies, retry budget, events channel, metrics and key handling.
+   * Without it, bindings that use `resilience` still run, but no retry budget is read or sent.
+   */
+  resilience?: ResilienceModuleOptions;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
@@ -112,19 +136,49 @@ function outboundRestProvider(): Provider {
       trace: TraceContext,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
+      resilience: ResilienceRuntime,
     ): OutboundRestGateway => {
       const defaults = opts.outbound?.rest?.defaults;
       const logger = hopLoggerOf(opts);
       return new OutboundRestGateway({
         registry,
         trace,
+        resilience,
         ...(defaults === undefined ? {} : { defaults }),
         ...(logger === undefined ? {} : { logger }),
         resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
       });
     },
-    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef],
+    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef, RESILIENCE_RUNTIME],
   };
+}
+
+/** The resilience runtime, its request/reply for channel fallbacks and, when enabled, the registry. */
+function resilienceProviders(options: IntegrationModuleOptions): Provider[] {
+  const providers: Provider[] = [
+    {
+      provide: RESILIENCE_RUNTIME,
+      useFactory: (gateway: ReplyGateway): ResilienceRuntime => {
+        const runtime = new ResilienceRuntime(options.resilience ?? {}, {
+          enabled: options.resilience !== undefined,
+          logger: nestResilienceLogger(),
+        });
+        runtime.setRequestReply((channel, payload, headers) =>
+          gateway.sendAndReceive(channel, payload, headers),
+        );
+        return runtime;
+      },
+      inject: [ReplyGateway],
+    },
+  ];
+  if (options.resilience !== undefined) {
+    providers.push({
+      provide: ResilienceRegistry,
+      useFactory: (runtime: ResilienceRuntime) => runtime.registry,
+      inject: [RESILIENCE_RUNTIME],
+    });
+  }
+  return providers;
 }
 
 @Module({})
@@ -182,6 +236,7 @@ export class IntegrationModule {
           new ReplyGateway({ registry, trace }),
         inject: [ChannelRegistry, TraceContext],
       },
+      ...resilienceProviders(options),
       inboundDepsProvider(),
       outboundRestProvider(),
       {
@@ -219,6 +274,8 @@ export class IntegrationModule {
         INBOUND_DEPS,
         InboundExplorer,
         OutboundRestGateway,
+        RESILIENCE_RUNTIME,
+        ...(options.resilience === undefined ? [] : [ResilienceRegistry]),
       ],
     };
   }
@@ -239,6 +296,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     @Inject(INTEGRATION_OPTIONS)
     private readonly options: ResolvedIntegrationOptions,
     private readonly outbound: OutboundRestGateway,
+    @Inject(RESILIENCE_RUNTIME)
+    private readonly resilience: ResilienceRuntime,
   ) {}
 
   /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
@@ -256,6 +315,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     for (const spec of this.options.channels) {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
     }
+    this.openResilienceEvents();
 
     // 2. activators (DiscoveryModule)
     this.subscribeDiscoveredActivators();
@@ -283,6 +343,15 @@ export class IntegrationRuntime implements OnApplicationShutdown {
 
     // 4. explorer (rabbit) — ultimo
     await this.explorer.onModuleInit();
+  }
+
+  /** RS-40: pubsub events channel, published fire-and-forget. */
+  private openResilienceEvents(): void {
+    const channel = this.resilience.eventsChannel;
+    if (channel === undefined) return;
+    if (this.registry.tryGet(channel) === undefined)
+      this.registry.create({ name: channel, type: 'pubsub' });
+    this.resilience.setPublisher((event) => this.registry.send(channel, event));
   }
 
   /** Shutdown: drain de queues (plan sec.8.6/sec.9.10). */
@@ -315,8 +384,15 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   private subscribeDiscoveredActivators(): void {
     const found = this.annotatedMethods<ActivatorMetadata>(ACTIVATOR_METADATA);
     for (const { instance, methodName, metadata } of found) {
-      subscribeActivator({ instance, methodName, metadata }, this.activatorDeps());
-      this.graph.recordActivator(metadata.channel, `${instance.constructor.name}.${methodName}`);
+      const binding = { instance, methodName, metadata };
+      const deps = this.activatorDeps();
+      subscribeActivator(binding, deps);
+      const summary = activatorResilience(binding, deps).summary;
+      const label = `${instance.constructor.name}.${methodName}`;
+      this.graph.recordActivator(
+        metadata.channel,
+        summary === undefined ? label : `${label} [${summary}]`,
+      );
       this.logger.log(
         `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
       );
@@ -337,7 +413,11 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
     for (const info of this.outbound.bindings()) {
       if (info.channel !== undefined) {
-        this.graph.recordOutbound(info.channel, { transport: 'rest', target: info.target });
+        const ref = { transport: 'rest' as const, target: info.target };
+        this.graph.recordOutbound(
+          info.channel,
+          info.policy === undefined ? ref : { ...ref, policy: info.policy },
+        );
       }
       this.logger.log(info.line);
     }
@@ -376,6 +456,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       trace: this.trace,
       errorChannel: this.options.errorChannel,
       idempotency: this.idempotency,
+      resilience: this.resilience,
     };
     if (this.options.idempotency?.ttlMs !== undefined) {
       deps.idempotencyTtlMs = this.options.idempotency.ttlMs;

@@ -1,6 +1,11 @@
 import { SagaUsageError, type ConcurrencyErrorKind } from './concurrency-errors';
 
-import { MAX_BACKOFF_MS, MAX_RETRY_ATTEMPTS, delayFor, type JitterMode } from '../resilience/backoff';
+import {
+  MAX_BACKOFF_MS,
+  MAX_RETRY_ATTEMPTS,
+  delayFor,
+  type JitterMode,
+} from '../resilience/backoff';
 
 export { MAX_BACKOFF_MS, MAX_RETRY_ATTEMPTS, delayFor, type JitterMode };
 
