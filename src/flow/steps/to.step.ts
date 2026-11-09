@@ -1,4 +1,5 @@
 import { nextHop } from '../../message';
+import { sendHop } from '../flow-resilience';
 import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 /** `nextHop(..., { reply: 'inherit' })` + send, then TERMINATES the pipeline (spec sec.6.2). */
@@ -22,7 +23,7 @@ export class ToStep implements FlowStep {
         reply: 'inherit',
       },
     );
-    await ctx.registry.sendMessage(this.channel, hop);
+    await sendHop(ctx, this.channel, hop);
     return { action: 'stop', reason: 'terminated' };
   }
 }

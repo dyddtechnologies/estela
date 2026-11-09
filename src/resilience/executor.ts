@@ -87,6 +87,11 @@ export interface ResilienceDeps {
   fallbackChannel?: (channel: string, ctx: ResilienceContext) => Promise<unknown>;
   /** Static default key (registry lookups); default the binding name. */
   defaultKey?: string;
+  /**
+   * Shutdown of a background caller (flow forget targets, RS-62): once aborted, a pending backoff
+   * sleep ends and the call fails with its last error instead of starting another attempt.
+   */
+  shutdown?: AbortSignal;
 }
 
 export interface ExecuteOptions {
@@ -433,7 +438,10 @@ export class ResilienceExecutor<T = unknown> {
     this.emit({ type: 'retry', class: verdict.class, attempt: ctx.attempt, delayMs: delay }, ctx);
     this.observer.counter('estela_resilience_retries_total', this.labels);
     this.observer.logger.debug(`retry ${ctx.attempt} of ${this.where()} in ${delay}ms`);
-    await this.clock.sleep(delay);
+    const shutdown = this.deps.shutdown;
+    if (aborted(shutdown)) throw error;
+    await this.clock.sleep(delay, shutdown);
+    if (aborted(shutdown)) throw error;
   }
 
   /** RS-30: effective retries `min(maxAttempts - 1, budget)` and the budget sent downstream. */
@@ -679,6 +687,13 @@ export class ResilienceExecutor<T = unknown> {
       edge: this.plan.edge,
       binding: this.plan.binding,
     };
+    // RS-66: the target channel of a flow send or jump edge; absent on every other edge.
+    if (
+      ctx?.channel !== undefined &&
+      (this.plan.edge === 'flow-send' || this.plan.edge === 'flow-jump')
+    ) {
+      full.channel = ctx.channel;
+    }
     const headers = ctx?.message?.headers;
     if (headers !== undefined) {
       full.traceId = headers.traceId;
@@ -712,6 +727,10 @@ export class ResilienceExecutor<T = unknown> {
     if (this.observer.allowed(`capacity:${this.plan.binding}`))
       this.emit({ type: 'breaker.capacity' });
   }
+}
+
+function aborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 function normalizeClassification(result: unknown): Classification | undefined {

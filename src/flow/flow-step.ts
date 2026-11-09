@@ -62,7 +62,7 @@ export interface StepPolicyPort {
   /** Policy of one target channel, or undefined when the target has no effective policy. */
   target(channel: string): TargetPolicyPort | undefined;
   /** Policy of a `handle` step, or undefined. */
-  readonly handle?: TargetPolicyPort;
+  readonly handle?: TargetPolicyPort | undefined;
 }
 
 export type StepOutcome =

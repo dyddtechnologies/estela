@@ -1,4 +1,5 @@
 import { nextHop } from '../../message';
+import { sendHop } from '../flow-resilience';
 import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 /** `nextHop` + routingKey; does not terminate; awaits the send (spec sec.6.2). */
@@ -22,7 +23,7 @@ export class PublishStep implements FlowStep {
       { reply: 'none' },
     );
     if (this.routingKey !== undefined) hop.headers.routingKey = this.routingKey;
-    await ctx.registry.sendMessage(this.channel, hop);
+    await sendHop(ctx, this.channel, hop);
     return { action: 'continue', msg: ctx.msg };
   }
 }

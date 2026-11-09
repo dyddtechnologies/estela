@@ -1,6 +1,7 @@
 import { nextHop } from '../../message';
 import type { FlowDest, FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 import { describeDest, normalizeDests } from '../flow-step';
+import { sendHop } from '../flow-resilience';
 import { reportFireAndForget } from './forget';
 
 /**
@@ -27,7 +28,7 @@ export class FanoutStep implements FlowStep {
         { channel: target.channel, component: `fanout:${ctx.flowName}` },
         { reply: 'none' },
       );
-      const send = ctx.registry.sendMessage(target.channel, hop);
+      const send = sendHop(ctx, target.channel, hop);
       if (target.wait === false) reportFireAndForget(ctx, target.channel, send, ctx.msg);
       else awaited.push(send);
     }

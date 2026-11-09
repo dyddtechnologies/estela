@@ -15,8 +15,22 @@ export class HandleStep implements FlowStep {
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
-    const out = await this.fn(ctx.msg.payload, ctx.msg);
+    const policy = ctx.policy?.handle;
+    // RS-61: one attempt is one call of fn with the same input message; a fallback value
+    // becomes the payload (RS-64).
+    const out =
+      policy === undefined
+        ? await this.fn(ctx.msg.payload, ctx.msg)
+        : (await policy.run(ctx.msg, () => this.call(ctx))).value;
     if (out === undefined) return { action: 'continue', msg: ctx.msg };
     return { action: 'continue', msg: { payload: out, headers: ctx.msg.headers } };
+  }
+
+  private call(ctx: FlowStepContext): Promise<unknown> {
+    try {
+      return Promise.resolve(this.fn(ctx.msg.payload, ctx.msg));
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 }

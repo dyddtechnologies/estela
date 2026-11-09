@@ -1,3 +1,4 @@
+import { DEGRADED_HEADER } from '../../resilience/retry-budget';
 import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 export interface ReplyOptions {
@@ -32,6 +33,8 @@ export class ReplyStep implements FlowStep {
       traceId: ctx.msg.headers.traceId,
       causationId: ctx.msg.headers.id,
       parentSpanId: ctx.msg.headers.spanId,
+      // RS-64: only a degraded run adds the mark; any other reply keeps the 0.9.0 headers.
+      ...(ctx.degraded?.() === true ? { [DEGRADED_HEADER]: true } : {}),
     });
     return { action: 'continue', msg: ctx.msg };
   }

@@ -59,6 +59,8 @@ export class ResilienceRuntime {
   readonly registry = new RuntimeResilienceRegistry();
   private publisher: ((event: ResilienceEvent) => Promise<void>) | undefined;
   private requestReply: RequestReplyFn | undefined;
+  private readonly channelPolicies = new Map<string, ResiliencePolicyRef>();
+  private readonly stopping = new AbortController();
 
   constructor(
     readonly options: ResilienceModuleOptions = {},
@@ -115,6 +117,32 @@ export class ResilienceRuntime {
     };
   }
 
+  /** RS-56: records the L2 references of the declared channels (`ChannelSpec.resilience`). */
+  declareChannels(specs: readonly { name: string; resilience?: ResiliencePolicyRef }[]): void {
+    for (const spec of specs) {
+      if (spec.resilience !== undefined) this.channelPolicies.set(spec.name, spec.resilience);
+    }
+  }
+
+  /** L2 reference of a channel, or undefined when its spec sets none. */
+  channelPolicy(channel: string): ResiliencePolicyRef | undefined {
+    return this.channelPolicies.get(channel);
+  }
+
+  /** Channels declared with a resilience reference, in declaration order. */
+  get channelsWithPolicy(): readonly string[] {
+    return [...this.channelPolicies.keys()];
+  }
+
+  /** Aborted when the application shuts down; background flow attempts stop (RS-62). */
+  get shutdownSignal(): AbortSignal {
+    return this.stopping.signal;
+  }
+
+  shutdown(): void {
+    this.stopping.abort();
+  }
+
   /** Header carrying the retry budget on the wire (RS-29). */
   get budgetHeader(): string {
     return this.options.retryBudget?.header ?? RETRY_BUDGET_HEADER;
@@ -140,7 +168,7 @@ export class ResilienceRuntime {
   executor<T>(
     plan: ResiliencePlan,
     adapter: ResilienceEdgeAdapter,
-    extra: Pick<ResilienceDeps, 'fallbackChannel' | 'defaultKey'> = {},
+    extra: Pick<ResilienceDeps, 'fallbackChannel' | 'defaultKey' | 'shutdown'> = {},
   ): ResilienceExecutor<T> {
     const executor = new ResilienceExecutor<T>(plan, adapter, { ...this.deps(), ...extra });
     this.registry.track(executor);

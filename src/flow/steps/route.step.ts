@@ -1,4 +1,5 @@
 import { nextHop, type IntegrationMessage } from '../../message';
+import { sendHop } from '../flow-resilience';
 import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 /** fn -> `string | string[]`; `nextHop(..., { reply: 'inherit' })` to each one; terminates. */
@@ -27,7 +28,7 @@ export class RouteStep implements FlowStep {
           { channel, component: `route:${ctx.flowName}` },
           { reply: 'inherit' },
         );
-        await ctx.registry.sendMessage(channel, hop);
+        await sendHop(ctx, channel, hop);
       }),
     );
     return { action: 'stop', reason: 'terminated' };
