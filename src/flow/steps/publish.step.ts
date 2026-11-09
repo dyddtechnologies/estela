@@ -1,13 +1,14 @@
 import { nextHop } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** `nextHop` + routingKey; no corta; await del send (spec sec.6.2). */
+/** `nextHop` + routingKey; does not terminate; awaits the send (spec sec.6.2). */
 export class PublishStep implements FlowStep {
   readonly kind = 'publish' as const;
 
   constructor(
     private readonly channel: string,
     private readonly routingKey?: string,
+    readonly params?: StepParams,
   ) {}
 
   describe(): Record<string, unknown> {

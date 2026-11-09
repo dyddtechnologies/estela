@@ -1,7 +1,7 @@
 import { nextHop, type IntegrationMessage } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** fn -> `string | string[]`; `nextHop(..., { reply: 'inherit' })` a cada uno; termina. */
+/** fn -> `string | string[]`; `nextHop(..., { reply: 'inherit' })` to each one; terminates. */
 export class RouteStep implements FlowStep {
   readonly kind = 'route' as const;
 
@@ -10,6 +10,7 @@ export class RouteStep implements FlowStep {
       payload: unknown,
       msg: IntegrationMessage,
     ) => string | string[] | Promise<string | string[]>,
+    readonly params?: StepParams,
   ) {}
 
   describe(): Record<string, unknown> {

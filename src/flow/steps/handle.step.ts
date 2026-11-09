@@ -1,11 +1,14 @@
 import type { IntegrationMessage } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** Si `return !== undefined` pisa payload. Never dispara reply (spec sec.6.1). */
+/** A result other than `undefined` replaces the payload. It never replies (spec sec.6.1). */
 export class HandleStep implements FlowStep {
   readonly kind = 'handle' as const;
 
-  constructor(private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown) {}
+  constructor(
+    private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown,
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind };

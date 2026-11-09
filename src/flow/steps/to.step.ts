@@ -1,11 +1,14 @@
 import { nextHop } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** `nextHop(..., { reply: 'inherit' })` + send + TERMINA el pipeline (spec sec.6.2). */
+/** `nextHop(..., { reply: 'inherit' })` + send, then TERMINATES the pipeline (spec sec.6.2). */
 export class ToStep implements FlowStep {
   readonly kind = 'to' as const;
 
-  constructor(private readonly channel: string) {}
+  constructor(
+    private readonly channel: string,
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind, channel: this.channel };

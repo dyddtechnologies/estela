@@ -1,10 +1,12 @@
 import { JumpTimeoutError } from '../flow-step';
 import {
+  describeDest,
   normalizeDests,
-  type FanoutDest,
+  type FlowDest,
   type FlowStep,
   type FlowStepContext,
   type StepOutcome,
+  type StepParams,
 } from '../flow-step';
 import { openFirstMessageWait } from '../../channels/one-shot';
 import { JUMP_REPLY_HEADER, nextHop, newId } from '../../message';
@@ -21,12 +23,13 @@ export class JumpStep implements FlowStep {
   readonly kind = 'jump' as const;
 
   constructor(
-    private readonly dests: readonly FanoutDest[],
+    private readonly dests: readonly FlowDest[],
     private readonly defaultTimeoutMs = DEFAULT_JUMP_TIMEOUT_MS,
+    readonly params?: StepParams,
   ) {}
 
   describe(): Record<string, unknown> {
-    return { kind: this.kind, dests: normalizeDests(this.dests) };
+    return { kind: this.kind, dests: normalizeDests(this.dests).map(describeDest) };
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {

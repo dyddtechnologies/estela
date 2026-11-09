@@ -1,11 +1,14 @@
 import { copyMessage } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** `copyMessage` + fire-and-forget. Never fails el flow (spec sec.6.2, sec.17.6). */
+/** `copyMessage` + fire-and-forget. It never fails the flow (spec sec.6.2, sec.17.6). */
 export class WireTapStep implements FlowStep {
   readonly kind = 'wireTap' as const;
 
-  constructor(private readonly channel: string) {}
+  constructor(
+    private readonly channel: string,
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind, channel: this.channel };

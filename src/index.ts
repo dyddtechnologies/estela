@@ -36,6 +36,7 @@ export * from './channel-registry';
 export * from './flow/flow-step';
 export * from './flow/integration-flow';
 export * from './flow/flow-executor';
+export { FlowDefinitionError, FLOW_SHAPE_CODES } from './flow/flow-definition-error';
 
 // ---------- Phase 5: idempotency ----------
 export * from './idempotency/idempotency-store';

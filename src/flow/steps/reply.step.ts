@@ -1,15 +1,18 @@
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 export interface ReplyOptions {
   /** `'current'` (default) | `'jumpMerge'` = `{ ...payload, jumpReplies }` (spec sec.6.3). */
   payload?: 'current' | 'jumpMerge';
 }
 
-/** Sends al `replyChannel` si existe; no corta por si solo (spec sec.6.3). */
+/** Sends to `replyChannel` when there is one; it does not terminate on its own (spec sec.6.3). */
 export class ReplyStep implements FlowStep {
   readonly kind = 'reply' as const;
 
-  constructor(private readonly options: ReplyOptions = {}) {}
+  constructor(
+    private readonly options: ReplyOptions = {},
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind, payload: this.options.payload ?? 'current' };

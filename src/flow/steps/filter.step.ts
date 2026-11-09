@@ -1,7 +1,7 @@
 import type { IntegrationMessage } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** Lee `msg.payload`; false -> exit con success (idempotency succeed `{filtered:true}`). */
+/** Reads `msg.payload`; false -> exits with success (idempotency completes `{filtered:true}`). */
 export class FilterStep implements FlowStep {
   readonly kind = 'filter' as const;
 
@@ -10,6 +10,7 @@ export class FilterStep implements FlowStep {
       payload: unknown,
       msg: IntegrationMessage,
     ) => boolean | Promise<boolean>,
+    readonly params?: StepParams,
   ) {}
 
   describe(): Record<string, unknown> {
