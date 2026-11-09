@@ -41,6 +41,46 @@ IntegrationModule.forRoot(
 4. The module is `global: true` — feature modules can inject `ChannelRegistry`, `TraceContext`, `ReplyGateway`, `ChannelGraph` without importing.
 5. Init order is fixed: channels → activators (discovered) → flows (`graph.recordFlow` + attach) → Rabbit explorer.
 
+## Wire resilience (`forRoot({ resilience })`)
+
+```ts
+IntegrationModule.forRoot({
+  channels,
+  resilience: {
+    policies: {                                     // named profiles, referenced by name anywhere
+      'http-std': { timeout: { perAttemptMs: 2_000, deadlineMs: 8_000 },
+                    retry: { maxAttempts: 3, requireIdempotencyKey: true },
+                    circuitBreaker: { minimumCalls: 10, openMs: 30_000 } },
+      'act-std':  { extends: 'http-std', retry: false, bulkhead: { maxConcurrent: 20 } },
+    },
+    defaults: { 'outbound-rest': 'http-std', activator: { bulkhead: { maxConcurrent: 50 } } },
+    metrics: promPort,                              // ResilienceMetricsPort: counter / histogram / gauge
+    keyHasher: (k) => createHmac('sha256', secret).update(k).digest('hex'), // HMAC, secret >= 32 bytes
+    events: { channel: 'estela.resilience.events' },// default; false turns it off
+    retryBudget: { initial: 2 },                    // optional budget for requests that arrive without one
+  },
+  outbound: { rest: { bindings: [{ name: 'pay.http', url, resilience: 'http-std' }] } },
+});
+```
+
+- `forRoot({ resilience })` turns on the retry budget (`x-retry-budget`), the events channel and the
+  injectable `ResilienceRegistry` (`breakerState`, `resetBreaker`). Without it, policies still run
+  but no budget is read or sent.
+- References everywhere: a profile name, an inline policy, `{ use: 'name', ...overrides }` (deep-merged
+  once) or `false`. `defaults` keys are edge kinds (`outbound-rest`, `activator`, `saga-outbound`,
+  `flow-handle`, `flow-jump`, `flow-send`); `inbound` is refused (use `inbound.resilience`, which
+  takes `bulkhead` and `rateLimit` only).
+- Invalid options fail boot with `ResilienceDefinitionError` (`code`, `path`, `findings`).
+- Shared state across replicas: `state: redisResilienceStatePort(evalScript, { prefix })` on
+  `rateLimit` and `circuitBreaker`. ioredis: `(s, k, a) => redis.eval(s, k.length, ...k, ...a)`;
+  node-redis: `(s, k, a) => client.eval(s, { keys: [...k], arguments: [...a] })`. If Redis is down,
+  each binding degrades to local state (`degradedLimitPerSec`, default `limitPerSec / replicasHint`)
+  after `stateTimeoutMs` (100) and probes again every `stateProbeMs` (5000).
+- A custom `circuitBreaker.key` / `rateLimit.key` with shared state needs `keyHasher`; use
+  `keyLabel` (hashed) when keys may be personal data. Raw keys are never logged.
+- Sagas: `new SagaRunner({ transactions, resilience: { policies, defaults } })` (or a
+  `ResilienceRuntime`) resolves profile names of `.outbound(..., { resilience })` steps.
+
 ## Wire sagas (TransactionPort, locks, CAS)
 
 ```ts

@@ -56,7 +56,7 @@ saga<Ctx, Tx, Reply>('start')
     await transition(Instance, instances, tx, { id: c.id, to: 'RUNNING' }); // CAS, never a plain UPDATE
     unit.afterCommit(() => cache.del(c.id));                        // only after COMMIT
   })
-  .outbound('notify', (c) => api.notify(c), { compensate: undo })   // never inside a tx, never retried
+  .outbound('notify', (c) => api.notify(c), { compensate: undo })   // never inside a tx; retried only with `resilience`
   .retry({ on: ['deadlock', 'lock-timeout', 'serialization'], attempts: 3, backoffMs: 20 })
   .reply((c) => c.reply);
 ```
@@ -75,9 +75,45 @@ saga<Ctx, Tx, Reply>('start')
 - A lock protects a unit of work; a state machine + `transition()` protects the whole saga.
 - Steps only touch the database (retries re-run them) and never swallow database errors.
 
+## Resilience policies
+
+Where they go (each takes a `ResilienceRef`: a profile name, an inline policy, `{ use, ...over }`, or `false`):
+
+| Subject | Option | Notes |
+|---|---|---|
+| Outbound REST binding | `resilience` on the binding, `outbound.rest.defaults`, `@OutboundRest`, ad-hoc `request()` | `timeoutMs` / `retry` stay as 0.9.0 aliases (no budget, no jitter) |
+| Activator | `@ServiceActivator(ch, { resilience })` | retries only with `idempotent: true` or a message key; prefer bulkhead + timeout here |
+| Inbound | `@InboundRest({ resilience })`, `inbound.resilience` | `bulkhead` / `rateLimit` only; 429 + `Retry-After` before the idempotency claim; refused on Rabbit |
+| Saga step | `.outbound(name, run, { compensate, resilience })` | no `fallback`; `maxAttempts > 1` needs `retry.idempotent: true`; one hop; compensate once after the policy gives up |
+| Flow | `IntegrationFlow.from(src, { resilience: { handle?, jump?, send? } })` | L3 default per step family |
+| Flow step / target | `handle(fn, { resilience })`, `jump(ch, { resilience })`, `jumpTo([{ channel, resilience }])`, `to`, `publish`, `fanoutTo`, `route` | L4; `filter`/`transform`/`reply` refuse it, `wireTap` never takes it |
+| Channel | `{ name, type, resilience }` in `forRoot.channels` | L2: default of sends/jumps INTO it and of its activator; never inbound |
+
+Precedence, highest first: call > step/target/endpoint (L4) > flow (L3) > destination channel (L2) >
+`resilience.defaults[edgeKind]` / module defaults (L1) > built-in (one direct attempt). **Merge
+rule:** each primitive (`timeout`, `retry`, `circuitBreaker`, `bulkhead`, `rateLimit`, `fallback`)
+is taken whole from the highest level that sets it, never merged field by field; `{ use, ...over }`
+is deep-merged once inside its level; `false` cuts every level below. The retry budget and the
+deadline only narrow.
+
+Per edge: `handle` → all primitives, fallback `value` or `channel`; `jump`/`jumpTo` → all,
+fallback only on awaited targets; `to` → all but fallback, except `fallback: { channel }` (plain send);
+`publish`/`fanoutTo`/`route` → all but fallback. A primitive not allowed at L4 fails boot
+(`PRIMITIVE_NOT_ALLOWED`); inherited from L1..L3 it is dropped with one warning.
+
+- A flow step retries only with an idempotency key on the message, a step key, or
+  `retry.idempotent: true`; otherwise one attempt + `retry.suppressed` (boot: `RETRY_WITHOUT_KEY_GATE`).
+- Retries belong on ONE layer, closest to the dependency. A channel policy and its activator both
+  retrying logs `RETRY_STACKED`; the budget (`x-retry-budget`) caps the product.
+- Fallback answers are degraded: never stored as an idempotent result (unless `cacheable: true`).
+  Never use a fallback to hide a side-effect failure.
+- Read the attempt's abort signal with `currentResilienceSignal()` inside activators, flow functions
+  and saga steps.
+
 ## Anti-patterns (reject in review)
 
 - Importing business classes from a flow (flows are strings + functions only).
 - `void handler(...)` when subscribing a flow to an awaited channel (breaks producer waiting).
 - Relying on ambient ALS across `setImmediate`/buffers — context is rebuilt from `msg.headers`.
 - Adding Kafka/BullMQ to channels (v1 out of scope — propose an adapter instead).
+- A hand-written retry loop around an Estela call (use a `resilience` policy).
