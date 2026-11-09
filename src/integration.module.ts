@@ -19,6 +19,11 @@ import { InboundExplorer } from './inbound/inbound.explorer';
 import { discoverInbounds } from './inbound/inbound.discovery';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
+import {
+  FlowParameterResolver,
+  type FlowResolution,
+  type RetryingTarget,
+} from './flow/flow-parameter-resolver';
 import type { FlowDefinition } from './flow/integration-flow';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import type { IdempotencyStore } from './idempotency/idempotency-store';
@@ -305,7 +310,11 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     private readonly resilience: ResilienceRuntime,
   ) {}
 
-  /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
+  /**
+   * Strict order (spec sec.11): channels -> flow parameters -> activators and outbounds ->
+   * flows -> explorer. The flow parameter resolver (RS-67) runs before step 2 because activators
+   * and outbound bindings take profile names, and it fails the boot before any subscription.
+   */
   async onModuleInit(): Promise<void> {
     printEstelaBanner({ enabled: this.options.logging?.banner });
 
@@ -320,34 +329,69 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     for (const spec of this.options.channels) {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
     }
+    this.resilience.declareChannels(this.options.channels);
     this.openResilienceEvents();
 
-    // 2. activators (DiscoveryModule)
-    this.subscribeDiscoveredActivators();
-    this.logDiscoveredInbounds();
-    this.bindOutbounds();
+    // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
+    const resolution = new FlowParameterResolver(this.resilience, this.registry).resolve(
+      this.options.flows,
+    );
 
-    // 3. flows: graph.recordFlow + flow.bind + attach (spec sec.11 step 3)
-    for (const definition of this.options.flows) {
-      const built = definition.build().build();
-      this.graph.recordFlow(definition.name, built);
+    // 2. activators (DiscoveryModule) and outbound bindings
+    const retryingActivators = this.subscribeDiscoveredActivators();
+    this.logDiscoveredInbounds();
+    const retryingOutbounds = this.bindOutbounds();
+    this.warnStackedRetries(resolution.retryingTargets, [
+      ...retryingActivators,
+      ...retryingOutbounds,
+    ]);
+
+    // 3. flows: graph.recordFlow + attach (spec sec.11 step 3)
+    this.attachFlows(resolution);
+
+    // 4. explorer (rabbit), last
+    await this.explorer.onModuleInit();
+  }
+
+  private attachFlows(resolution: FlowResolution): void {
+    for (const [channel, policy] of resolution.channelPolicies) {
+      this.graph.recordChannelPolicy(channel, policy);
+    }
+    this.graph.recordModulePolicies(Object.keys(this.resilience.options.policies ?? {}));
+    for (const flow of resolution.flows) {
+      this.graph.recordFlow(flow.name, flow.built, flow.described);
       const executorDeps: FlowDeps = {
         registry: this.registry,
         trace: this.trace,
         errorChannel: this.options.errorChannel,
         idempotency: this.idempotency,
+        resilience: this.resilience,
+        policies: flow.policies,
       };
       if (this.options.idempotency?.ttlMs !== undefined) {
         executorDeps.idempotencyTtlMs = this.options.idempotency.ttlMs;
       }
       const flowLog = this.hopLogger();
       if (flowLog !== undefined) executorDeps.logger = flowLog;
-      const executor = new FlowExecutor(definition.name, built, executorDeps);
-      executor.attachTo(this.registry);
+      new FlowExecutor(flow.name, flow.built, executorDeps).attachTo(this.registry);
     }
+  }
 
-    // 4. explorer (rabbit) — ultimo
-    await this.explorer.onModuleInit();
+  /**
+   * RS-56, RS-60: one RETRY_STACKED warning per flow target whose retry sends into a channel
+   * whose activator or outbound binding also retries. The retry budget bounds the product.
+   */
+  private warnStackedRetries(
+    targets: readonly RetryingTarget[],
+    endpoints: readonly { channel: string; subject: string }[],
+  ): void {
+    for (const target of targets) {
+      for (const endpoint of endpoints.filter((e) => e.channel === target.channel)) {
+        this.resilience.observer.logger.warn(
+          `RETRY_STACKED: ${target.subject} retries into channel '${target.channel}', and ${endpoint.subject} retries too; the retry budget bounds the attempts`,
+        );
+      }
+    }
   }
 
   /** RS-40: pubsub events channel, published fire-and-forget. */
@@ -359,8 +403,9 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     this.resilience.setPublisher((event) => this.registry.send(channel, event));
   }
 
-  /** Shutdown: drain de queues (plan sec.8.6/sec.9.10). */
+  /** Shutdown: background flow attempts stop, then queues drain (plan sec.8.6/sec.9.10). */
   async onApplicationShutdown(): Promise<void> {
+    this.resilience.shutdown();
     for (const channel of this.registry.list()) {
       if (channel.kind === 'queue') await channel.close?.();
     }
@@ -386,13 +431,21 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
-  private subscribeDiscoveredActivators(): void {
+  /** Subscribes every activator; returns those whose policy retries (RETRY_STACKED input). */
+  private subscribeDiscoveredActivators(): { channel: string; subject: string }[] {
+    const retrying: { channel: string; subject: string }[] = [];
     const found = this.annotatedMethods<ActivatorMetadata>(ACTIVATOR_METADATA);
     for (const { instance, methodName, metadata } of found) {
       const binding = { instance, methodName, metadata };
       const deps = this.activatorDeps();
       subscribeActivator(binding, deps);
-      const summary = activatorResilience(binding, deps).summary;
+      const { summary, executor } = activatorResilience(binding, deps);
+      if ((executor?.plan.retry?.maxAttempts ?? 1) > 1) {
+        retrying.push({
+          channel: metadata.channel,
+          subject: `activator ${instance.constructor.name}.${methodName}`,
+        });
+      }
       const label = `${instance.constructor.name}.${methodName}`;
       this.graph.recordActivator(
         metadata.channel,
@@ -402,13 +455,15 @@ export class IntegrationRuntime implements OnApplicationShutdown {
         `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
       );
     }
+    return retrying;
   }
 
   /**
    * Declared outbound bindings (module options, then `@OutboundRest` methods): bound, logged
    * with one line each and recorded in the graph. A misconfigured binding fails the boot.
    */
-  private bindOutbounds(): void {
+  private bindOutbounds(): { channel: string; subject: string }[] {
+    const retrying: { channel: string; subject: string }[] = [];
     for (const binding of this.options.outbound?.rest?.bindings ?? []) {
       this.outbound.bind(binding);
     }
@@ -424,8 +479,13 @@ export class IntegrationRuntime implements OnApplicationShutdown {
           info.policy === undefined ? ref : { ...ref, policy: info.policy },
         );
       }
+      // The binding summary (RS-42) names `retry xN` only when more than one attempt is allowed.
+      if (info.channel !== undefined && /\bretry x\d+/.test(info.policy ?? '')) {
+        retrying.push({ channel: info.channel, subject: `outbound rest '${info.name}'` });
+      }
       this.logger.log(info.line);
     }
+    return retrying;
   }
 
   /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */

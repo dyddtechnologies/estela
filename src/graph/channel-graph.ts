@@ -29,6 +29,8 @@ export interface GraphNode {
   outbounds: GraphOutboundRef[];
   activators: string[];
   flowsFrom: string[];
+  /** Summary of the channel's `resilience` reference (RS-66); absent without one. */
+  policy?: string;
 }
 
 export type GraphEdgeVia =
@@ -64,6 +66,8 @@ export interface GraphSnapshot {
   edges: GraphEdge[];
   flows: GraphFlowEntry[];
   mermaid: string;
+  /** Module-wide names (RS-66); present only when `resilience.policies` is non-empty. */
+  module?: { policies: string[] };
 }
 
 interface DestLike {
@@ -97,8 +101,8 @@ function sanitizeId(value: string): string {
 }
 
 /**
- * Read-model de topologia (spec sec.12) — Memento del graph. Sin logica de
- * runtime: observadores (registry/flows/activators/inbounds) lo alimentan.
+ * Topology read model (spec sec.12), the Memento of the graph. No runtime logic:
+ * observers (registry, flows, activators, inbounds) feed it.
  */
 export class ChannelGraph {
   private readonly inbounds = new Map<string, GraphInboundRef[]>();
@@ -106,6 +110,18 @@ export class ChannelGraph {
   private readonly activators = new Map<string, string[]>();
   private readonly flows: GraphFlowEntry[] = [];
   private readonly flowEdges: GraphEdge[] = [];
+  private readonly channelPolicies = new Map<string, string>();
+  private modulePolicies: string[] = [];
+
+  /** RS-66: summary of a channel declared with `resilience`. */
+  recordChannelPolicy(channel: string, policy: string): void {
+    this.channelPolicies.set(channel, policy);
+  }
+
+  /** RS-66: names of the module's resilience profiles (names only, never values). */
+  recordModulePolicies(names: readonly string[]): void {
+    this.modulePolicies = [...names].sort((a, b) => a.localeCompare(b));
+  }
 
   recordActivator(channel: string, label: string): void {
     const labels = this.activators.get(channel) ?? [];
@@ -136,8 +152,10 @@ export class ChannelGraph {
     this.outbounds.set(channel, refs);
   }
 
-  recordFlow(name: string, built: BuiltFlow): void {
-    const steps = built.steps.map((step) => step.describe());
+  /** `described` replaces `describe()` of each step with its RS-66 annotations. */
+  recordFlow(name: string, built: BuiltFlow, described?: readonly Record<string, unknown>[]): void {
+    const steps =
+      described === undefined ? built.steps.map((step) => step.describe()) : [...described];
     this.flows.push({ name, source: built.source, steps });
     this.flows.sort((a, b) => a.name.localeCompare(b.name));
     for (const step of steps) {
@@ -170,7 +188,7 @@ export class ChannelGraph {
       if (isFanout) {
         bindings = (channel as { bindings?: readonly string[] }).bindings ?? [];
       }
-      nodes.push({
+      const node: GraphNode = {
         channel: channel.name,
         kind: channel.kind,
         bindings,
@@ -180,17 +198,22 @@ export class ChannelGraph {
         flowsFrom: this.flows
           .filter((flow) => flow.source === channel.name)
           .map((flow) => flow.name),
-      });
+      };
+      const policy = this.channelPolicies.get(channel.name);
+      if (policy !== undefined) node.policy = policy;
+      nodes.push(node);
       edges.push(...this.channelEdges(channel.name, bindings));
     }
     edges.push(...this.flowEdges);
     const mermaid = this.renderMermaid(nodes, edges);
-    return {
+    const snapshot: GraphSnapshot = {
       nodes,
       edges,
       flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })),
       mermaid,
     };
+    if (this.modulePolicies.length > 0) snapshot.module = { policies: [...this.modulePolicies] };
+    return snapshot;
   }
 
   /** Edges that hang off one channel: fanout bindings, inbounds, outbounds and activators. */
@@ -222,7 +245,9 @@ export class ChannelGraph {
     let inboundIndex = 0;
     let outboundIndex = 0;
     for (const node of nodes) {
-      lines.push(`  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}"]`);
+      lines.push(
+        `  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}${policySuffix(node.policy)}"]`,
+      );
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(

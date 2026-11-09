@@ -47,8 +47,10 @@ function activatorAdapter(scope: string): ResilienceEdgeAdapter {
 }
 
 /**
- * Resolves (once per decorated method) the policy of `@ServiceActivator({ resilience })`. Invalid
- * or unknown policies throw `ResilienceDefinitionError` when the activator is subscribed (RS-03).
+ * Resolves (once per decorated method) the policy of an activator: its own
+ * `@ServiceActivator({ resilience })` (L4), the `resilience` of its channel (L2, RS-56) and
+ * `defaults.activator` (L1). Invalid or unknown policies throw `ResilienceDefinitionError` when
+ * the activator is subscribed (RS-03).
  */
 export function activatorResilience(
   binding: ActivatorBinding,
@@ -60,23 +62,34 @@ export function activatorResilience(
   resolved.set(runtime ?? NO_RUNTIME, perRuntime);
   const cached = perRuntime.get(binding.metadata);
   if (cached !== undefined) return cached;
-  const ref = binding.metadata.resilience;
-  const result: ActivatorResilience = {};
-  if (runtime !== undefined && ref !== undefined) {
-    const scope = activatorScope(binding);
-    const plan = runtime.plan(scope, [ref, runtime.options.defaults?.activator], 'activator');
-    if (plan.retry !== undefined && plan.retry.maxAttempts > 1 && !plan.retry.idempotent) {
-      runtime.observer.logger.warn(
-        `${scope}: resilience.retry.maxAttempts > 1 without idempotent: true; only messages with an idempotencyKey are retried`,
-      );
-    }
-    result.executor = runtime.executor(plan, activatorAdapter(scope), {
-      fallbackChannel: runtime.channelFallback(),
-    });
-    const summary = describePolicy(plan);
-    if (summary !== undefined) result.summary = summary;
-  }
+  const result = runtime === undefined ? {} : resolveActivator(binding, runtime);
   perRuntime.set(binding.metadata, result);
+  return result;
+}
+
+function resolveActivator(
+  binding: ActivatorBinding,
+  runtime: ResilienceRuntime,
+): ActivatorResilience {
+  const layers = [
+    binding.metadata.resilience,
+    runtime.channelPolicy(binding.metadata.channel),
+    runtime.options.defaults?.activator,
+  ];
+  const result: ActivatorResilience = {};
+  if (layers.every((layer) => layer === undefined)) return result;
+  const scope = activatorScope(binding);
+  const plan = runtime.plan(scope, layers, 'activator');
+  if (plan.retry !== undefined && plan.retry.maxAttempts > 1 && !plan.retry.idempotent) {
+    runtime.observer.logger.warn(
+      `${scope}: resilience.retry.maxAttempts > 1 without idempotent: true; only messages with an idempotencyKey are retried`,
+    );
+  }
+  result.executor = runtime.executor(plan, activatorAdapter(scope), {
+    fallbackChannel: runtime.channelFallback(),
+  });
+  const summary = describePolicy(plan);
+  if (summary !== undefined) result.summary = summary;
   return result;
 }
 
@@ -90,8 +103,8 @@ export interface ActivatorBinding {
   metadata: ActivatorMetadata;
 }
 
-/** Lee los bindings decorados de una jerarquia de prototipos (Discovery, Fase 10). */
-// Reflexion sobre prototipos — falsos positivos de any/unknown aqui.
+/** Reads the decorated bindings of a prototype chain (Discovery). */
+// Reflection over prototypes: any/unknown false positives here.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unnecessary-type-assertion */
 export function discoverActivators(instances: readonly object[]): ActivatorBinding[] {
   const bindings: ActivatorBinding[] = [];
@@ -120,7 +133,7 @@ export function subscribeActivators(
   return bindings.map((binding) => subscribeActivator(binding, deps));
 }
 
-/** Subscribes un binding: el channel define group/routingKey (spec sec.7.1). */
+/** Subscribes one binding: the channel decides group/routingKey (spec sec.7.1). */
 export function subscribeActivator(binding: ActivatorBinding, deps: ActivatorDeps): Unsubscribe {
   const channel = deps.registry.get(binding.metadata.channel);
   const scope = activatorScope(binding);
@@ -135,10 +148,10 @@ export function subscribeActivator(binding: ActivatorBinding, deps: ActivatorDep
 }
 
 /**
- * Template Method (spec sec.7.1): trace.run -> idem.begin(scope activator) -> method ->
- * `return !== undefined` + `replyChannel` -> responder (jump efimero incluido —
- * protocolo jump; ver plan sec.9.5 corregido). Duplicate + cachedResult -> forward
- * cache. Error -> idem.fail + error.channel + rethrow (sec.8.2 awaited).
+ * Template Method (spec sec.7.1): trace.run -> idem.begin(activator scope) -> method ->
+ * `return !== undefined` + `replyChannel` -> reply (ephemeral jump replies included, see the
+ * jump protocol in plan sec.9.5). Duplicate + cachedResult -> forward the cached result.
+ * Error -> idem.fail + error.channel + rethrow (sec.8.2 awaited).
  */
 export async function invokeActivator(
   binding: ActivatorBinding,
@@ -238,7 +251,7 @@ async function runActivatorMethod(
 }
 
 function isJumpEphemeral(msg: IntegrationMessage): boolean {
-  return msg.headers[JUMP_REPLY_HEADER] === '1'; // metadato ADR-014 (informativo)
+  return msg.headers[JUMP_REPLY_HEADER] === '1'; // ADR-014 metadata (informational)
 }
 
 async function replyToCaller(
@@ -298,7 +311,7 @@ async function resendCachedResult(
     record?.result !== undefined && 'cachedResult' in record.result
       ? record.result.cachedResult
       : undefined;
-  if (cached === undefined) return; // sin cache -> silence (spec sec.7.1)
+  if (cached === undefined) return; // no cached result -> silence (spec sec.7.1)
   await replyToCaller(cached, msg, deps.registry);
 }
 
