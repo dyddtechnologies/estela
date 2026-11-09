@@ -8,8 +8,10 @@ import {
   type ResiliencePlan,
   type ResolvePlanOptions,
 } from './resilience.plan';
+import { RETRY_BUDGET_HEADER } from './retry-budget';
 import type {
   ResilienceClock,
+  ResilienceContext,
   ResilienceEdgeKind,
   ResilienceEvent,
   ResilienceLogger,
@@ -19,6 +21,12 @@ import type {
 import { systemResilienceClock } from './timeout';
 
 export const DEFAULT_RESILIENCE_EVENTS_CHANNEL = 'estela.resilience.events';
+
+export type RequestReplyFn = (
+  channel: string,
+  payload: unknown,
+  headers: Record<string, unknown>,
+) => Promise<unknown>;
 
 export interface ResilienceRuntimeInit {
   /** True under forRoot({ resilience }): retry budget, events channel and registry are on. */
@@ -37,6 +45,7 @@ export class ResilienceRuntime {
   readonly observer: ResilienceObserver;
   readonly registry = new RuntimeResilienceRegistry();
   private publisher: ((event: ResilienceEvent) => Promise<void>) | undefined;
+  private requestReply: RequestReplyFn | undefined;
 
   constructor(
     readonly options: ResilienceModuleOptions = {},
@@ -65,6 +74,36 @@ export class ResilienceRuntime {
 
   setPublisher(publish: (event: ResilienceEvent) => Promise<void>): void {
     this.publisher = publish;
+  }
+
+  /** Request/reply used by `fallback.channel` (the module wires its ReplyGateway). */
+  setRequestReply(requestReply: RequestReplyFn): void {
+    this.requestReply = requestReply;
+  }
+
+  /** Runs a `fallback.channel` as request/reply with the payload and trace of the message. */
+  channelFallback(): (channel: string, ctx: ResilienceContext) => Promise<unknown> {
+    return (channel, ctx) => {
+      const requestReply = this.requestReply;
+      if (requestReply === undefined) {
+        return Promise.reject(new Error('fallback.channel needs a reply gateway'));
+      }
+      const headers = ctx.message?.headers;
+      const init: Record<string, unknown> =
+        headers === undefined
+          ? {}
+          : {
+              traceId: headers.traceId,
+              correlationId: headers.correlationId,
+              causationId: headers.id,
+            };
+      return requestReply(channel, ctx.message?.payload, init);
+    };
+  }
+
+  /** Header carrying the retry budget on the wire (RS-29). */
+  get budgetHeader(): string {
+    return this.options.retryBudget?.header ?? RETRY_BUDGET_HEADER;
   }
 
   /** Resolves and validates a plan with the named policies (RS-03, RS-43, RS-51). */

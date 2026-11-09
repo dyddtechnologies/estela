@@ -8,7 +8,9 @@ import {
   redactUrl,
   type OutboundFailureInfo,
 } from './outbound.errors';
-import type { OutboundRestPlan } from './outbound.plan';
+import { assertOutboundTimeout, type OutboundRestPlan } from './outbound.plan';
+import type { OutboundResiliencePlan, RestAttemptData } from './outbound.resilience';
+import type { ResilienceAttempt } from '../resilience/executor';
 import { buildOutboundRequest } from './outbound.request';
 import type {
   OutboundCallContext,
@@ -183,6 +185,83 @@ async function exchange(
   }
 }
 
+/** One attempt on the resilience executor: the response, or a thrown `OutboundRestError`. */
+async function resilientAttempt(
+  request: OutboundRestRequest,
+  fetchFn: OutboundFetch,
+  attempt: ResilienceAttempt,
+  budgetHeader: string,
+): Promise<OutboundRestResponse> {
+  const info: OutboundFailureInfo = {
+    binding: request.name,
+    url: request.url,
+    method: request.method,
+    attempts: attempt.attempt,
+  };
+  const headers =
+    attempt.budgetOut === undefined
+      ? request.headers
+      : { ...request.headers, [budgetHeader]: String(attempt.budgetOut) };
+  let answer: Answer;
+  try {
+    answer = await send({ ...request, headers }, fetchFn, attempt.signal);
+  } catch (error) {
+    throw new OutboundNetworkError(info, error);
+  }
+  if (answer.ok) return answer.response;
+  const { status, headers: responseHeaders, body } = answer.response;
+  throw new OutboundHttpError(info, status, answer.statusText, responseHeaders, body);
+}
+
+function attemptsOf(error: unknown): number {
+  const attempts = (error as { attempts?: unknown } | null | undefined)?.attempts;
+  return typeof attempts === 'number' ? attempts : 0;
+}
+
+/**
+ * The exchange under a resilience plan (RS-33): the executor wraps only the attempts; the
+ * response mapper runs after a successful attempt, `mapError` once after the final failure, and a
+ * fallback value is the reply as is.
+ */
+async function resilientExchange(
+  plan: OutboundRestPlan,
+  resilience: OutboundResiliencePlan,
+  ctx: OutboundCallContext,
+  request: OutboundRestRequest,
+  call: { fetchFn: OutboundFetch; perAttemptMs: number | undefined },
+): Promise<unknown> {
+  const data: RestAttemptData = { ctx, request, startedAt: Date.now() };
+  const context = (attempts: number): OutboundExchangeContext => ({
+    ...ctx,
+    request,
+    attempts,
+    durationMs: Date.now() - data.startedAt,
+  });
+  let result;
+  try {
+    result = await resilience.executor.execute(
+      {
+        edge: 'outbound-rest',
+        binding: plan.name,
+        channel: plan.channel ?? plan.name,
+        message: ctx.message,
+        data,
+      },
+      (attempt) => resilientAttempt(request, call.fetchFn, attempt, resilience.budgetHeader),
+      call.perAttemptMs === undefined ? {} : { perAttemptMs: call.perAttemptMs },
+    );
+  } catch (error) {
+    const failure: unknown =
+      (await plan.mapError?.(error as OutboundRestError, context(attemptsOf(error)))) ?? error;
+    throw failure;
+  }
+  if (result.fallback) return result.value;
+  return plan.response({
+    ...context(result.attempts),
+    response: result.value as OutboundRestResponse,
+  });
+}
+
 /**
  * Delivers one message as an HTTP call: builds the request, sends it with timeout and the
  * retry policy, maps the response or the failure. Logs one hop (never bodies, headers or
@@ -195,15 +274,24 @@ export async function executeOutboundRest(
   deps: OutboundCallDeps,
 ): Promise<unknown> {
   const { ctx, request } = await buildOutboundRequest(plan, message, call);
+  const run = (): Promise<unknown> => {
+    const resilience = plan.resilience;
+    if (resilience === undefined) return exchange(plan, ctx, request, deps);
+    const override = call.timeoutMs ?? ctx.target.timeoutMs;
+    return resilientExchange(plan, resilience, ctx, request, {
+      fetchFn: plan.fetchFn ?? deps.fetchFn,
+      perAttemptMs: override === undefined ? undefined : assertOutboundTimeout(override),
+    });
+  };
   const log = deps.logger;
-  if (log === undefined) return exchange(plan, ctx, request, deps);
+  if (log === undefined) return run();
   const channel = plan.channel ?? plan.name;
   const target = `outbound:rest ${request.method} ${redactUrl(request.url)}`;
   const startedAt = Date.now();
   log.hopStart(channel, target, message.headers);
   let ok = false;
   try {
-    const result = await exchange(plan, ctx, request, deps);
+    const result = await run();
     ok = true;
     return result;
   } finally {

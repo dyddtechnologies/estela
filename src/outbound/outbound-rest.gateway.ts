@@ -3,8 +3,11 @@ import type { ChannelRegistry } from '../channel-registry';
 import { createMessage, type IntegrationMessage, type MessageHeadersInit } from '../message';
 import type { HopLogger } from '../trace/hop-logger';
 import type { TraceContext } from '../trace/trace-context';
+import { RETRY_BUDGET_MESSAGE_HEADER, ResilienceScope } from '../resilience/retry-budget';
+import { ResilienceRuntime } from '../resilience/runtime';
 import { executeOutboundRest } from './outbound.call';
 import { OutboundError } from './outbound.errors';
+import { ResilienceDefinitionError } from '../resilience/resilience.errors';
 import { resolveOutboundRestPlan, type OutboundRestPlan } from './outbound.plan';
 import type {
   OutboundFetch,
@@ -33,17 +36,22 @@ export interface OutboundRestGatewayDeps {
   fetchFn?: OutboundFetch;
   /** Waits between retry attempts; replaceable in tests. */
   sleep?: (ms: number) => Promise<void>;
+  /** Resilience runtime (the module's); a standalone gateway creates one on first use. */
+  resilience?: ResilienceRuntime;
 }
 
 const globalFetch: OutboundFetch = (url, init) => globalThis.fetch(url, init);
 
 function describeBinding(plan: OutboundRestPlan): OutboundRestBindingInfo {
+  const summary = plan.resilience?.summary;
+  const line = `outbound rest: ${plan.name} -> ${plan.description}`;
   const info: OutboundRestBindingInfo = {
     name: plan.name,
     target: plan.description,
-    line: `outbound rest: ${plan.name} -> ${plan.description}`,
+    line: summary === undefined ? line : `${line} [${summary}]`,
   };
   if (plan.channel !== undefined) info.channel = plan.channel;
+  if (summary !== undefined) info.policy = summary;
   return info;
 }
 
@@ -56,7 +64,19 @@ export class OutboundRestGateway {
   private readonly plans = new Map<string, OutboundRestPlan>();
   private readonly adHoc = new WeakMap<OutboundRestRequestOptions, OutboundRestPlan>();
 
+  private standalone: ResilienceRuntime | undefined;
+
   constructor(private readonly deps: OutboundRestGatewayDeps = {}) {}
+
+  private readonly runtime = (): ResilienceRuntime => {
+    if (this.deps.resilience !== undefined) return this.deps.resilience;
+    this.standalone ??= new ResilienceRuntime({}, { enabled: false });
+    return this.standalone;
+  };
+
+  private planDeps(adHoc: boolean): Parameters<typeof resolveOutboundRestPlan>[1] {
+    return { ...this.deps, resilience: this.runtime, adHoc };
+  }
 
   /**
    * Declares a binding. Strategies are resolved and the configuration validated right away,
@@ -64,7 +84,8 @@ export class OutboundRestGateway {
    * binding and its channel subscription.
    */
   bind(binding: OutboundRestBinding): Unsubscribe {
-    const plan = resolveOutboundRestPlan(binding, this.deps);
+    const plan = resolveOutboundRestPlan(binding, this.planDeps(false));
+    this.assertFallbackChannel(plan);
     if (this.plans.has(plan.name)) {
       throw new OutboundError(`outbound rest '${plan.name}' is already declared`);
     }
@@ -106,7 +127,7 @@ export class OutboundRestGateway {
   private planOf(options: OutboundRestRequestOptions): OutboundRestPlan {
     let plan = this.adHoc.get(options);
     if (plan === undefined) {
-      plan = resolveOutboundRestPlan({ name: 'rest', ...options }, this.deps);
+      plan = resolveOutboundRestPlan({ name: 'rest', ...options }, this.planDeps(true));
       this.adHoc.set(options, plan);
     }
     return plan;
@@ -122,7 +143,24 @@ export class OutboundRestGateway {
             correlationId: ambient.correlationId,
             parentSpanId: ambient.spanId,
           };
+    // RS-29: under forRoot({ resilience }) a call inherits the budget of its scope.
+    const budget =
+      this.deps.resilience?.enabled === true ? ResilienceScope.current()?.budget : undefined;
+    if (budget !== undefined) inherited[RETRY_BUDGET_MESSAGE_HEADER] = budget;
     return createMessage(input.payload, { ...inherited, ...input.headers });
+  }
+
+  /** A `fallback.channel` must exist when the binding is declared (section 5.6). */
+  private assertFallbackChannel(plan: OutboundRestPlan): void {
+    const channel = plan.resilience?.plan.fallback?.channel;
+    const registry = this.deps.registry;
+    if (channel === undefined || registry === undefined || registry.tryGet(channel) !== undefined)
+      return;
+    throw new ResilienceDefinitionError(
+      plan.name,
+      'fallback.channel',
+      `names an unknown channel '${channel}'`,
+    );
   }
 
   private run(
