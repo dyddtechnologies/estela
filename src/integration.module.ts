@@ -330,6 +330,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
     }
     this.resilience.declareChannels(this.options.channels);
+    if (this.resilience.enabled) this.registry.inheritRetryBudget();
     this.openResilienceEvents();
 
     // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
