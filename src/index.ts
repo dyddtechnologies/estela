@@ -59,6 +59,7 @@ export {
   HttpExceptionFailureCodec,
   INBOUND_STORED_FAILURE_KEY,
   InboundIdempotencyInFlightError,
+  InboundOverloadedError,
   InboundReplayedFailureError,
   markInboundFailure,
   readInboundFailureMark,
