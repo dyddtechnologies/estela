@@ -28,6 +28,8 @@ interface Entry {
   sharedUntil?: number;
   sharedQuota: boolean;
   sharedSeen: boolean;
+  /** This pod holds the shared half-open probe lease of the current half-open period. */
+  leaseHeld: boolean;
 }
 
 export interface Admission {
@@ -60,6 +62,7 @@ function newEntry(): Entry {
     checkedAt: -Infinity,
     sharedQuota: false,
     sharedSeen: false,
+    leaseHeld: false,
   };
 }
 
@@ -94,7 +97,7 @@ export class CircuitBreakers {
     if (entry === undefined) return { admitted: true, admission: { key, probe: false } };
     this.maybeHalfOpen(key, entry);
     if (entry.state === 'open') return this.rejected(entry);
-    if (entry.state === 'half-open') return this.admitProbe(key, entry);
+    if (entry.state === 'half-open') return this.admitProbe(key, entry, deadlineAt);
     if (this.shared !== undefined) {
       const sharedResult = await this.checkShared(key, entry, deadlineAt);
       if (sharedResult !== undefined) return sharedResult;
@@ -192,6 +195,7 @@ export class CircuitBreakers {
     entry.state = 'half-open';
     entry.probes = 0;
     entry.probeSuccesses = 0;
+    entry.leaseHeld = false;
     this.hooks.transition('breaker.half-open', key);
   }
 
@@ -203,10 +207,32 @@ export class CircuitBreakers {
     return result;
   }
 
-  private admitProbe(key: string, entry: Entry): AdmitResult {
+  /**
+   * With shared state, the pod that opened the breaker probes only while it holds the lease too,
+   * so one pod probes per half-open period (RS-23). The slot is reserved while the lease is asked.
+   */
+  private async admitProbe(key: string, entry: Entry, deadlineAt: number): Promise<AdmitResult> {
     if (entry.probes >= this.plan.halfOpenCalls) return { admitted: false };
     entry.probes += 1;
+    if (this.shared !== undefined && !entry.leaseHeld) {
+      if (!(await this.takeLease(key, deadlineAt))) {
+        entry.probes -= 1;
+        return { admitted: false };
+      }
+      entry.leaseHeld = true;
+    }
     return { admitted: true, admission: { key, entry, probe: true } };
+  }
+
+  /** True when the lease was granted, or when degraded state leaves the decision local. */
+  private async takeLease(key: string, deadlineAt: number): Promise<boolean> {
+    const port = this.plan.state!;
+    const stateKey = this.shared!.stateKey(key);
+    const lease = await this.shared!.switch.call(
+      () => port.tryProbeLease(stateKey, this.plan.openMs),
+      deadlineAt,
+    );
+    return lease === undefined || lease.value;
   }
 
   /** Reads the shared marker at most once per `syncMs` (RS-23); undefined = admit as closed. */
@@ -247,19 +273,13 @@ export class CircuitBreakers {
 
   /** A pod that saw a marker probes after it expires, only while it holds the lease. */
   private async sharedProbe(key: string, entry: Entry, deadlineAt: number): Promise<AdmitResult> {
-    const shared = this.shared!;
-    const port = this.plan.state!;
-    const stateKey = shared.stateKey(key);
-    const lease = await shared.switch.call(
-      () => port.tryProbeLease(stateKey, this.plan.openMs),
-      deadlineAt,
-    );
     // Degraded state: decide locally, the marker read earlier has expired.
-    if (lease !== undefined && !lease.value) return { admitted: false };
+    if (!(await this.takeLease(key, deadlineAt))) return { admitted: false };
     entry.sharedSeen = false;
     entry.state = 'half-open';
     entry.probes = 1;
     entry.probeSuccesses = 0;
+    entry.leaseHeld = true;
     return { admitted: true, admission: { key, entry, probe: true } };
   }
 
@@ -286,6 +306,7 @@ export class CircuitBreakers {
 
   private open(key: string, entry: Entry, ms: number, type: BreakerTransition): void {
     entry.state = 'open';
+    entry.leaseHeld = false;
     entry.openUntil = this.clock.monotonic() + ms;
     entry.outcomes = [];
     entry.probeSuccesses = 0;
