@@ -14,6 +14,9 @@ export { MemoryIdempotencyStore };
 export { MemoryLockPort } from './memory-lock-port';
 export { MemoryTransitionPort } from './memory-transition-port';
 export { testUnitOfWork, type TestUnitOfWork } from './test-unit-of-work';
+export { manualResilienceClock, type ManualResilienceClock } from './manual-resilience-clock';
+export { MemoryResilienceStatePort } from './memory-resilience-state-port';
+export { collectResilienceEvents } from './resilience-events';
 
 /** Semantic alias from spec sec.14: same invariants as `createMessage`. */
 export function createTestMessage<T>(

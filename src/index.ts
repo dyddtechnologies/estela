@@ -101,3 +101,6 @@ export * from './saga/lock-port';
 export * from './saga/state-machine';
 export * from './saga/transition';
 export * from './saga/postgres/index';
+
+// ---------- Resilience: policies, executor, classifiers, retry budget (SPI-445) ----------
+export * from './resilience/index';
