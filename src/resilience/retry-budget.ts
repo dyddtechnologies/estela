@@ -32,6 +32,8 @@ interface ScopeFrame {
   degraded: boolean;
   /** Message frames bound the degraded mark; attempt frames only carry budget and signal. */
   traceId?: string;
+  /** Inbound request frame: the messages it dispatches in this chain link to it (RS-27). */
+  root?: boolean;
   parent?: ScopeFrame;
 }
 
@@ -83,7 +85,7 @@ export class ResilienceScope {
    * frame only within the same trace, so a degraded mark never leaks into an unrelated request.
    */
   static runMessage<T>(
-    value: { budget?: number; traceId?: string; fromEventsChannel?: boolean },
+    value: { budget?: number; traceId?: string; fromEventsChannel?: boolean; root?: boolean },
     fn: (scope: { degraded(): boolean }) => T,
   ): T {
     const ambient = storage.getStore();
@@ -93,13 +95,8 @@ export class ResilienceScope {
     };
     if (value.budget !== undefined) frame.budget = value.budget;
     if (value.traceId !== undefined) frame.traceId = value.traceId;
-    if (
-      ambient !== undefined &&
-      value.traceId !== undefined &&
-      traceOf(ambient) === value.traceId
-    ) {
-      frame.parent = ambient;
-    }
+    if (value.root === true) frame.root = true;
+    if (ambient !== undefined && linksTo(ambient, value.traceId)) frame.parent = ambient;
     return storage.run(frame, () => fn({ degraded: () => frame.degraded }));
   }
 
@@ -109,6 +106,16 @@ export class ResilienceScope {
       frame.degraded = true;
     }
   }
+}
+
+/** Same trace, or a message dispatched by an inbound request in its own chain. */
+function linksTo(ambient: ScopeFrame, traceId: string | undefined): boolean {
+  if (traceId !== undefined && traceOf(ambient) === traceId) return true;
+  for (let frame: ScopeFrame | undefined = ambient; frame !== undefined; frame = frame.parent) {
+    if (frame.root === true) return frame.traceId === undefined || frame.traceId === traceId;
+    if (frame.traceId !== undefined) return false;
+  }
+  return false;
 }
 
 function traceOf(frame: ScopeFrame): string | undefined {

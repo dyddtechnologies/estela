@@ -113,13 +113,14 @@ export class ChannelGraph {
     this.activators.set(channel, labels);
   }
 
-  recordInbound(spec: InboundSpec): void {
+  recordInbound(spec: InboundSpec, policy?: string): void {
     const refs = this.inbounds.get(spec.channel) ?? [];
     const ref: GraphInboundRef = {
       transport: spec.transport,
       requestReply: spec.requestReply === true,
     };
     if (spec.operation !== undefined) ref.operation = spec.operation;
+    if (policy !== undefined) ref.policy = policy;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
   }
@@ -225,7 +226,7 @@ export class ChannelGraph {
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(
-          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}"] --> ${sanitizeId(node.channel)}`,
+          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}${policySuffix(ref.policy)}"] --> ${sanitizeId(node.channel)}`,
         );
       }
       for (const ref of node.outbounds) {

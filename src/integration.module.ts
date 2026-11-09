@@ -42,6 +42,8 @@ import {
 } from './outbound/outbound.decorators';
 import type { OutboundModuleOptions } from './outbound/outbound.types';
 import { ResilienceRegistry } from './resilience/registry';
+import { describePolicy } from './resilience/resilience.plan';
+import { inboundShedPlan } from './inbound/inbound.resilience';
 import type { ResilienceLogger, ResilienceModuleOptions } from './resilience/resilience.types';
 import { ResilienceRuntime } from './resilience/runtime';
 
@@ -102,11 +104,13 @@ function inboundDepsProvider(): Provider {
       gateway: ReplyGateway,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
+      resilience: ResilienceRuntime,
     ): InboundInterceptorDeps => ({
       registry,
       trace,
       idempotency,
       replyGateway: gateway,
+      resilience,
       ...(opts.inbound !== undefined ? { defaults: opts.inbound } : {}),
       // Lazy and app-wide: consumer providers do not exist yet when this factory runs.
       resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
@@ -118,6 +122,7 @@ function inboundDepsProvider(): Provider {
       ReplyGateway,
       INTEGRATION_OPTIONS,
       ModuleRef,
+      RESILIENCE_RUNTIME,
     ],
   };
 }
@@ -428,18 +433,22 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     const skipped = (error: unknown): void => {
       this.logger.warn(`inbound discovery skipped: ${String(error)}`);
     };
+    let inbounds: ReturnType<typeof discoverInbounds> = [];
     try {
       const sources = [...this.discovery.getControllers(), ...this.discovery.getProviders()];
-      const inbounds = discoverInbounds(sources, {
+      inbounds = discoverInbounds(sources, {
         methodNames: (proto) => this.metadataScanner.getAllMethodNames(proto),
         onError: skipped,
       });
-      for (const inbound of inbounds) {
-        this.graph.recordInbound(inbound.spec);
-        this.logger.log(inbound.line);
-      }
     } catch (error) {
       skipped(error);
+    }
+    for (const inbound of inbounds) {
+      // RS-03, RS-37: an invalid shedding policy fails the boot, outside the discovery guard.
+      const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.resilience);
+      const policy = plan === undefined ? undefined : describePolicy(plan);
+      this.graph.recordInbound(inbound.spec, policy);
+      this.logger.log(policy === undefined ? inbound.line : `${inbound.line} [${policy}]`);
     }
   }
 

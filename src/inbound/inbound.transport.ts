@@ -13,10 +13,17 @@ export interface InboundExtraction {
 export interface InboundTransportStrategy {
   readonly transport: InboundTransport;
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction;
+  /** Raw headers before the handler runs (load-shedding keys, RS-37). Optional: `{}` without it. */
+  rawHeaders?(context: ExecutionContext): Record<string, unknown>;
 }
 
 export class HttpInboundStrategy implements InboundTransportStrategy {
   readonly transport = 'rest' as const;
+
+  rawHeaders(context: ExecutionContext): Record<string, unknown> {
+    const request = context.switchToHttp().getRequest<Record<string, unknown> | undefined>();
+    return (request?.headers ?? {}) as Record<string, unknown>;
+  }
 
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction {
     const request = context.switchToHttp().getRequest<Record<string, unknown>>();
@@ -34,6 +41,12 @@ interface GrpcMetadataLike {
 export class GrpcInboundStrategy implements InboundTransportStrategy {
   readonly transport = 'grpc' as const;
 
+  rawHeaders(context: ExecutionContext): Record<string, unknown> {
+    const metadata = context.switchToRpc().getContext<GrpcMetadataLike | undefined>();
+    if (typeof metadata?.toJSON === 'function') return metadata.toJSON();
+    return (metadata ?? {}) as Record<string, unknown>;
+  }
+
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction {
     const rpc = context.switchToRpc();
     const data = rpc.getData<unknown>();
@@ -49,6 +62,13 @@ export class GrpcInboundStrategy implements InboundTransportStrategy {
 
 export class GraphQLInboundStrategy implements InboundTransportStrategy {
   readonly transport = 'graphql' as const;
+
+  rawHeaders(context: ExecutionContext): Record<string, unknown> {
+    const gqlContext = context.getArgs()[2] as
+      | { req?: { headers?: Record<string, unknown> }; extensions?: Record<string, unknown> }
+      | undefined;
+    return gqlContext?.req?.headers ?? gqlContext?.extensions ?? {};
+  }
 
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction {
     /* eslint-disable @typescript-eslint/no-unsafe-assignment -- getArgs() es any[] en Nest */

@@ -58,6 +58,23 @@ export class InboundIdempotencyInFlightError extends InboundError {
   }
 }
 
+/**
+ * A request shed by inbound load shedding (RS-37): HTTP 429, and `grpcCode` 8
+ * (RESOURCE_EXHAUSTED) for the gRPC status mapper or an app exception filter.
+ */
+export class InboundOverloadedError extends HttpException {
+  readonly code = 'INBOUND_OVERLOADED';
+  readonly grpcCode = 8;
+
+  constructor(
+    readonly channel: string,
+    readonly reason: 'bulkhead-full' | 'rate-limited',
+    readonly retryAfterMs?: number,
+  ) {
+    super({ statusCode: 429, code: 'INBOUND_OVERLOADED', reason }, 429);
+  }
+}
+
 /** Thrown when a stored failure that was not an HTTP exception is replayed. */
 export class InboundReplayedFailureError extends InboundError {
   constructor(

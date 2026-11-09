@@ -2,6 +2,7 @@ import type { ExecutionContext, Type } from '@nestjs/common';
 import type { IntegrationMessage } from '../message';
 import { ChannelError } from '../channel';
 import type { IdempotencyStore } from '../idempotency/idempotency-store';
+import type { InboundResiliencePolicy, ResiliencePolicyRef } from '../resilience/resilience.types';
 
 /** Transportes inbound (spec sec.7.2 + extension GraphQL ADR-015). */
 export type InboundTransport = 'rest' | 'grpc' | 'rabbit' | 'graphql';
@@ -24,6 +25,8 @@ export interface InboundSpec {
   reply?: InboundReplyOption;
   /** Idempotency rules of this endpoint; `false` turns the inbound claim off. */
   idempotency?: false | InboundIdempotencyOptions;
+  /** Load shedding (RS-37): bulkhead and rateLimit only; refused on Rabbit. */
+  resilience?: ResiliencePolicyRef<InboundResiliencePolicy>;
 }
 
 export const INBOUND_SPEC_METADATA = 'integration:inbound-spec';
@@ -275,4 +278,6 @@ export interface InboundIdempotencyOptions {
 export interface InboundDefaults {
   reply?: InboundReplyOption;
   idempotency?: false | InboundIdempotencyOptions;
+  /** Module-wide load shedding (RS-37); endpoints override it per primitive. */
+  resilience?: ResiliencePolicyRef<InboundResiliencePolicy>;
 }

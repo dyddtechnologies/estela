@@ -6,7 +6,14 @@ import {
   type ExecutionContext,
   type NestInterceptor,
 } from '@nestjs/common';
-import { mergeMap, type Observable } from 'rxjs';
+import { finalize, mergeMap, type Observable } from 'rxjs';
+import {
+  DEGRADED_HEADER,
+  RETRY_BUDGET_MESSAGE_HEADER,
+  ResilienceScope,
+} from '../resilience/retry-budget';
+import type { ResilienceRuntime } from '../resilience/runtime';
+import { inboundBudget, inboundShedder, overloaded, shedContext } from './inbound.resilience';
 import type { ChannelRegistry } from '../channel-registry';
 import {
   AmqpHeaderMapper,
@@ -63,6 +70,22 @@ export interface InboundInterceptorDeps {
   defaults?: InboundDefaults;
   /** Resolves `{ useExisting }` strategies; without it only functions and instances work. */
   resolver?: InboundProviderResolver;
+  /** Resilience runtime: load shedding, retry budget and the degraded mark (RS-27, RS-29, RS-37). */
+  resilience?: ResilienceRuntime;
+}
+
+/** Request/reply port that also returns the reply headers (ReplyGateway). */
+interface MessageReplyPort {
+  sendAndReceiveMessage(
+    channel: string,
+    payload: unknown,
+    headers: MessageHeadersInit,
+    timeoutMs?: number,
+  ): Promise<IntegrationMessage>;
+}
+
+function hasMessageReply(port: RequestReplyPort): port is RequestReplyPort & MessageReplyPort {
+  return typeof (port as Partial<MessageReplyPort>).sendAndReceiveMessage === 'function';
 }
 
 /** Token DI del bundle de deps — resuelve en cualquier modulo (global). */
@@ -109,21 +132,44 @@ export class InboundInterceptor implements NestInterceptor {
       return Promise.reject(new InboundError(`sin strategy para transporte '${spec.transport}'`));
     }
     const receivedAt = Date.now();
-    return Promise.resolve(
+    const handle = (): Observable<unknown> =>
       next.handle().pipe(
         mergeMap(async (handlerResult) => {
           const extraction = strategy.extract(context, handlerResult, spec);
           return this.dispatch({ spec, ...extraction, handlerResult, context, receivedAt });
         }),
-      ),
+      );
+    const runtime = this.deps.resilience;
+    const shedder =
+      runtime === undefined ? undefined : inboundShedder(spec, this.deps.defaults, runtime);
+    if (shedder === undefined) return Promise.resolve(handle());
+    // RS-37: shed before the handler and the idempotency claim; the slot lives with the reply.
+    return shedder.admit(shedContext(context, spec, strategy)).then(
+      (release) => handle().pipe(finalize(release)),
+      (error: unknown) => {
+        throw overloaded(error, context, spec);
+      },
     );
   }
 
-  private async dispatch(request: InboundRequestContext): Promise<unknown> {
+  private dispatch(request: InboundRequestContext): Promise<unknown> {
+    const runtime = this.deps.resilience;
+    if (runtime === undefined) return this.dispatchIn(request, undefined, undefined);
+    const budget = inboundBudget(request.rawHeaders, runtime);
+    const value = { root: true, ...(budget === undefined ? {} : { budget }) };
+    return ResilienceScope.runMessage(value, (frame) => this.dispatchIn(request, frame, budget));
+  }
+
+  private async dispatchIn(
+    request: InboundRequestContext,
+    frame: { degraded(): boolean } | undefined,
+    budget: number | undefined,
+  ): Promise<unknown> {
     const { spec } = request;
     const mapper = this.mappers.get(spec.transport);
     if (mapper === undefined) throw new InboundError(`sin header-mapper para '${spec.transport}'`);
     const headersInit = mapper.mapIn(request.rawHeaders as never);
+    if (budget !== undefined) headersInit[RETRY_BUDGET_MESSAGE_HEADER] = budget;
     const plan = this.planFor(spec);
     const clientKey =
       plan.clientKey === undefined ? headersInit.idempotencyKey : plan.clientKey(request);
@@ -132,7 +178,7 @@ export class InboundInterceptor implements NestInterceptor {
     const outcome =
       claim.status === 'repeat'
         ? repeatOutcome(claim.repeat, keyContext, headersInit)
-        : await this.send(plan, keyContext, claim, headersInit);
+        : await this.send(plan, keyContext, claim, headersInit, frame);
     // Mapped after the claim is settled: a mapper throw never triggers the failure policy.
     return plan.reply(buildReplyContext(request, clientKey, outcome));
   }
@@ -142,6 +188,7 @@ export class InboundInterceptor implements NestInterceptor {
     request: InboundKeyContext,
     claim: InboundClaim,
     headersInit: MessageHeadersInit,
+    frame: { degraded(): boolean } | undefined,
   ): Promise<InboundReplyOutcome> {
     const { spec, payload } = request;
     const storageKey = claim.status === 'acquired' ? claim.at.key : undefined;
@@ -149,9 +196,12 @@ export class InboundInterceptor implements NestInterceptor {
     const headers = forwardedHeaders(rule, headersInit, request.clientKey, storageKey);
     const msg: IntegrationMessage = createMessage(payload, headers);
     let result: unknown;
+    let degradedReply = false;
     try {
       if (spec.requestReply === true) {
-        result = await this.requestReplyViaGateway(spec, payload, headers);
+        const reply = await this.requestReplyViaGateway(spec, payload, headers);
+        result = reply.payload;
+        degradedReply = reply.degraded;
       } else {
         await this.deps.registry.send(spec.channel, payload, headers);
       }
@@ -159,11 +209,13 @@ export class InboundInterceptor implements NestInterceptor {
       await this.gate.failed(claim, error, request);
       throw error;
     }
+    const degraded = degradedReply || frame?.degraded() === true;
+    if (degraded) await this.gate.discard(claim);
     if (spec.requestReply === true) {
-      await this.gate.succeed(claim, { cachedResult: result });
+      if (!degraded) await this.gate.succeed(claim, { cachedResult: result });
       return replyOutcome(msg, result);
     }
-    await this.gate.succeed(claim, { accepted: true, id: msg.headers.id });
+    if (!degraded) await this.gate.succeed(claim, { accepted: true, id: msg.headers.id });
     return acceptedOutcome(msg, request.handlerResult);
   }
 
@@ -171,15 +223,21 @@ export class InboundInterceptor implements NestInterceptor {
     spec: InboundSpec,
     payload: unknown,
     headersInit: MessageHeadersInit,
-  ): Promise<unknown> {
-    if (this.deps.replyGateway === undefined) {
+  ): Promise<{ payload: unknown; degraded: boolean }> {
+    const gateway = this.deps.replyGateway;
+    if (gateway === undefined) {
       throw new InboundError('requestReply requiere ReplyGateway');
     }
-    return this.deps.replyGateway.sendAndReceive(
-      spec.channel,
-      payload,
-      headersInit,
-      spec.timeoutMs,
-    );
+    if (this.deps.resilience !== undefined && hasMessageReply(gateway)) {
+      const reply = await gateway.sendAndReceiveMessage(
+        spec.channel,
+        payload,
+        headersInit,
+        spec.timeoutMs,
+      );
+      return { payload: reply.payload, degraded: reply.headers[DEGRADED_HEADER] === true };
+    }
+    const result = await gateway.sendAndReceive(spec.channel, payload, headersInit, spec.timeoutMs);
+    return { payload: result, degraded: false };
   }
 }
