@@ -4,7 +4,7 @@ Status: draft, revised after the SDD review of 2026-11-09; not implemented. Base
 `docs/SPI-428-koletz-readiness-specs`. Ticket: **SPI-429** (epic SPI-428). Requirement prefix: `MR-`.
 Supersedes section 3 of the combined Koletz readiness draft (`2026-11-09-estela-koletz-readiness.md`
 in the voice-plat repo). Resilience (timeouts, breakers, retry budgets: `ESTELA_RESILIENCE_SPEC.md`,
-ticket placeholder SPI-RES, prefix `RS-`) and sensitive-data redaction (`ESTELA_SENSITIVE_DATA_SPEC.md`,
+ticket placeholder SPI-445, prefix `RS-`) and sensitive-data redaction (`ESTELA_SENSITIVE_DATA_SPEC.md`,
 SPI-433, prefix `SD-`) are separate specs and are referenced, never redefined, here. This spec is
 generic library behaviour: every adopter rule (which services enable the guard, which store, which
 keys are digested) lives in the Koletz adoption spec (`2026-11-09-estela-adoption-koletz.md`, prefix
@@ -66,7 +66,7 @@ recognised as a duplicate (R11).
   here depends on them. Until then, a `queue` channel is best-effort and the whole request/reply path
   runs in one pod.
 - Retry, timeouts, circuit breakers, rate limiters and retry budgets for remote calls: the resilience
-  spec (SPI-RES; the budget is RS-28 to RS-31). This spec only states that the stores never retry
+  spec (SPI-445; the budget is RS-28 to RS-31). This spec only states that the stores never retry
   (MR-11) and that no layer defined here retries.
 - Redaction of stored records: SPI-433. It seals or strips records **above** the store and keeps the
   `IdempotencyStore` contract unchanged (SD-35), so this spec adds no codec hook. It provides only the
@@ -1083,7 +1083,7 @@ Cases:
 ```
 SPI-429 (this)  -- IdempotencyStoreUnavailableError -->  SPI-431 Execute maps it to gRPC UNAVAILABLE
                                                           (in-flight to ABORTED); soft, by name
-SPI-429         -- shipped stores, D-REDIS-DOWN ------>  SPI-RES resilience: classifies the error as
+SPI-429         -- shipped stores, D-REDIS-DOWN ------>  SPI-445 resilience: classifies the error as
                                                           transient, owns the retry budget (soft)
 SPI-433         -- seals records above the store ---->  independent of SPI-429; SD-35 contract test
                                                           is reused against both shipped stores
@@ -1106,10 +1106,10 @@ routes for must-not-lose work.
 2. **SPI-429 multi-replica (P1).** Its boot guard is released and enabled in Koletz (KA-01, KA-02)
    before any service runs more than one replica or an HPA; until then the Koletz CI check KA-03
    blocks scaling. It does not gate A1.
-3. **SPI-RES resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
+3. **SPI-445 resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
    SPI-430 and SPI-436 merge after it or rebase onto it.
 4. **Koletz adoption (KA-)**, gated by the P0 items: A1 by SPI-433 + SPI-432; A4 by SPI-433 +
-   SPI-431; A3 by SPI-RES (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
+   SPI-431; A3 by SPI-445 (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
    allowed) by the SPI-429 stores.
 
 The build-time dependencies between the three library tickets stay soft (none blocks another); the

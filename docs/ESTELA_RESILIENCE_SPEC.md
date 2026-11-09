@@ -1,7 +1,7 @@
 # Estela: resilience policy spec
 
 Status: draft, not implemented. Base: `20ae298` (`chore(release): 0.9.0`), branch `docs/SPI-428-koletz-readiness-specs`.
-Ticket: **SPI-RES**, a placeholder key for the ticket still to be opened under epic **SPI-428**. Requirement prefix: `RS-`.
+Ticket: **SPI-445**, a placeholder key for the ticket still to be opened under epic **SPI-428**. Requirement prefix: `RS-`.
 
 This spec covers one deliverable: a resilience policy model native to Estela, the engine that runs it, and the places in Estela that apply it. It replaces section 4 ("Resilience") of the combined Koletz readiness draft (`voice-plat/docs/superpowers/specs/2026-11-09-estela-koletz-readiness.md`). That draft is superseded, and the sections below fix the review findings raised on it. The library stays generic. Every Koletz rule (guardrail 9, quota handling for specific providers, per-channel configuration) lives in the Koletz adoption spec (`KA-` prefix), never here.
 
@@ -117,7 +117,7 @@ New injectable: `ResilienceRegistry` (RS-49), provided only when `forRoot({ resi
 
 ## 2. Requirements
 
-Every requirement has an acceptance criterion and at least one named test (section 10). The traceability table is in section 17. Unless the table says otherwise, the ticket for all of them is **SPI-RES**.
+Every requirement has an acceptance criterion and at least one named test (section 10). The traceability table is in section 17. Unless the table says otherwise, the ticket for all of them is **SPI-445**.
 
 ### 2.1 Model, composition and configuration
 
@@ -1098,14 +1098,14 @@ Local Redis target for RE-04 and RE-05 is `ESTELA_REDIS_URL=redis://localhost:63
 ## 12. Dependencies on other tickets
 
 ```text
-SPI-RES (this) ──provides executor + adapter contract + gRPC classifier──▶ SPI-430 (OutboundGrpcGateway)
-SPI-RES ──provides executor + adapter contract──────────────────────────▶ SPI-436 (SDK outbound)
-SPI-RES ──InboundOverloadedError.grpcCode──────────────────────────────▶ SPI-431 (command inbound status mapping)
-SPI-433 (sensitive data) ──masker "hash"/"partial" as keyLabel/keyHasher──▶ SPI-RES   (soft: RS-43 works without it, keys omitted)
-SPI-429 (multi-replica) ──IdempotencyStoreUnavailableError, boot guard────▶ SPI-RES   (soft: section 5.4 references; RS-50 waits for the guard)
-SPI-RES ──RS-48 requireIdempotencyKey, RS-49 resetBreaker, RS-16 quota class, event names──▶ Koletz adoption spec (KA-)
-SPI-432 (graph exposure) ──governs who sees policy summaries─────────────▶ SPI-RES   (soft)
-SPI-444 (benchmarks) ◀──measures primitive overhead, sets stateTimeoutMs and perf budgets── SPI-RES
+SPI-445 (this) ──provides executor + adapter contract + gRPC classifier──▶ SPI-430 (OutboundGrpcGateway)
+SPI-445 ──provides executor + adapter contract──────────────────────────▶ SPI-436 (SDK outbound)
+SPI-445 ──InboundOverloadedError.grpcCode──────────────────────────────▶ SPI-431 (command inbound status mapping)
+SPI-433 (sensitive data) ──masker "hash"/"partial" as keyLabel/keyHasher──▶ SPI-445   (soft: RS-43 works without it, keys omitted)
+SPI-429 (multi-replica) ──IdempotencyStoreUnavailableError, boot guard────▶ SPI-445   (soft: section 5.4 references; RS-50 waits for the guard)
+SPI-445 ──RS-48 requireIdempotencyKey, RS-49 resetBreaker, RS-16 quota class, event names──▶ Koletz adoption spec (KA-)
+SPI-432 (graph exposure) ──governs who sees policy summaries─────────────▶ SPI-445   (soft)
+SPI-444 (benchmarks) ◀──measures primitive overhead, sets stateTimeoutMs and perf budgets── SPI-445
 SPI-437 (OTel) MAY bridge ResilienceMetricsPort; no dependency either way
 SPI-434 (broker channels): deferred; the budget header rides message headers when it lands
 SPI-435, SPI-438..443: independent
@@ -1118,17 +1118,17 @@ SPI-435, SPI-438..443: independent
 2. **SPI-429 multi-replica (P1).** Its boot guard is released and enabled in Koletz (KA-01, KA-02)
    before any service runs more than one replica or an HPA; until then the Koletz CI check KA-03
    blocks scaling. It does not gate A1.
-3. **SPI-RES resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
+3. **SPI-445 resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
    SPI-430 and SPI-436 merge after it or rebase onto it.
 4. **Koletz adoption (KA-)**, gated by the P0 items: A1 by SPI-433 + SPI-432; A4 by SPI-433 +
-   SPI-431; A3 by SPI-RES (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
+   SPI-431; A3 by SPI-445 (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
    allowed) by the SPI-429 stores.
 
 The build-time dependencies between the three library tickets stay soft (none blocks another); the
 order above is the release plan, not a code dependency.
 
 Notes on that order:
-- SPI-RES has no build-time blocker and work on it can start now; it is released third.
+- SPI-445 has no build-time blocker and work on it can start now; it is released third.
 - SPI-430 and SPI-436 consume it, so they should merge after it or rebase onto it.
 - SPI-433 is not a blocker. RS-43's default (custom keys omitted; shared state refused without a `keyHasher`) is safe without it.
 - SPI-429 is not a blocker. Only the SHOULD RS-50 waits for its guard.
@@ -1183,7 +1183,7 @@ Notes on that order:
 
 | # | Question | Default until answered | Owner |
 |---|---|---|---|
-| OQ-1 | The Jira key of this ticket under SPI-428 | `SPI-RES` placeholder | ESTELA maintainer |
+| OQ-1 | The Jira key of this ticket under SPI-428 | `SPI-445` placeholder | ESTELA maintainer |
 | OQ-2 | Is `replicasHint: 1` the right default, or should shared state require it explicitly? | 1, plus the R3 warning | ESTELA maintainer, with the Koletz platform owner |
 | OQ-3 | `stateTimeoutMs` (100) and the breaker defaults (50%, 10, 20, 30 s) | as written; revisited with SPI-444 data | ESTELA maintainer (SPI-444) |
 | OQ-4 | Propagate the remaining deadline downstream (`x-request-deadline`, gRPC deadline)? | not propagated; SPI-430 sets the gRPC deadline from the remaining one | ESTELA maintainer |
@@ -1211,54 +1211,54 @@ Notes on that order:
 
 | Requirement | Tests | Ticket |
 |---|---|---|
-| RS-01 | RU-01 | SPI-RES |
-| RS-02 | RU-02 | SPI-RES |
-| RS-03 | RU-03, RE-07 | SPI-RES |
-| RS-04 | RU-04 | SPI-RES |
-| RS-05 | RU-05 | SPI-RES |
-| RS-06 | RU-06 | SPI-RES |
-| RS-07 | RU-07a, RU-07b | SPI-RES |
-| RS-08 | RU-08 | SPI-RES |
-| RS-09 | RU-09a, RU-09b | SPI-RES |
-| RS-10 | RU-10 | SPI-RES |
-| RS-11 | RU-11a, RU-11b, RU-11c | SPI-RES |
-| RS-12 | RU-12 | SPI-RES |
-| RS-13 | RU-13a, RU-13b | SPI-RES |
-| RS-14 | RU-14 | SPI-RES |
-| RS-15 | RU-15 | SPI-RES (wired by SPI-430) |
-| RS-16 | RU-16a, RU-16b, RU-16c | SPI-RES |
-| RS-17 | RU-17 | SPI-RES |
-| RS-17a | RU-17a | SPI-RES |
-| RS-18 | RU-18a, RU-18b | SPI-RES |
-| RS-19 | RU-19 | SPI-RES |
-| RS-20 | RU-20a, RU-20b | SPI-RES |
-| RS-21 | RU-21 | SPI-RES |
-| RS-22 | RU-22a, RU-22b | SPI-RES |
-| RS-23 | RE-04, RE-05 | SPI-RES |
-| RS-24 | RU-24a, RU-24b | SPI-RES |
-| RS-25 | RU-25a, RU-25b | SPI-RES |
-| RS-26 | RU-26 | SPI-RES |
-| RS-27 | RE-06, RU-27 | SPI-RES |
-| RS-28 | RE-03 | SPI-RES |
-| RS-29 | RU-29a, RU-29b, RE-02 | SPI-RES |
-| RS-30 | RU-30a, RU-30b | SPI-RES |
-| RS-31 | RU-31 | SPI-RES |
-| RS-32 | RU-32 | SPI-RES |
-| RS-33 | RE-01 | SPI-RES |
-| RS-34 | RU-34, existing outbound specs unmodified | SPI-RES |
-| RS-35 | RU-35 | SPI-RES |
-| RS-36 | RU-36a, RU-36b | SPI-RES |
-| RS-37 | RU-37, RE-02 | SPI-RES (gRPC status mapping by SPI-431) |
-| RS-38 | RU-38a, RU-38b | SPI-RES |
-| RS-39 | RU-39 | SPI-RES (consumed by SPI-430, SPI-436) |
-| RS-40 | RU-40a, RU-40b | SPI-RES |
-| RS-41 | RU-41 | SPI-RES |
-| RS-42 | RU-42 | SPI-RES (exposure: SPI-432) |
-| RS-43 | RU-43a, RU-43b, RU-43c | SPI-RES (masker: SPI-433, soft) |
-| RS-44 | RU-44 | SPI-RES |
-| RS-45 | RU-45 | SPI-RES |
-| RS-46 | RU-46 | SPI-RES |
-| RS-47 | RU-47 | SPI-RES |
-| RS-48 | RU-48 | SPI-RES (consumed by KA spec) |
-| RS-49 | RU-49 | SPI-RES (consumed by KA spec) |
-| RS-50 | RU-50 | SPI-RES, after SPI-429 (else follow-up) |
+| RS-01 | RU-01 | SPI-445 |
+| RS-02 | RU-02 | SPI-445 |
+| RS-03 | RU-03, RE-07 | SPI-445 |
+| RS-04 | RU-04 | SPI-445 |
+| RS-05 | RU-05 | SPI-445 |
+| RS-06 | RU-06 | SPI-445 |
+| RS-07 | RU-07a, RU-07b | SPI-445 |
+| RS-08 | RU-08 | SPI-445 |
+| RS-09 | RU-09a, RU-09b | SPI-445 |
+| RS-10 | RU-10 | SPI-445 |
+| RS-11 | RU-11a, RU-11b, RU-11c | SPI-445 |
+| RS-12 | RU-12 | SPI-445 |
+| RS-13 | RU-13a, RU-13b | SPI-445 |
+| RS-14 | RU-14 | SPI-445 |
+| RS-15 | RU-15 | SPI-445 (wired by SPI-430) |
+| RS-16 | RU-16a, RU-16b, RU-16c | SPI-445 |
+| RS-17 | RU-17 | SPI-445 |
+| RS-17a | RU-17a | SPI-445 |
+| RS-18 | RU-18a, RU-18b | SPI-445 |
+| RS-19 | RU-19 | SPI-445 |
+| RS-20 | RU-20a, RU-20b | SPI-445 |
+| RS-21 | RU-21 | SPI-445 |
+| RS-22 | RU-22a, RU-22b | SPI-445 |
+| RS-23 | RE-04, RE-05 | SPI-445 |
+| RS-24 | RU-24a, RU-24b | SPI-445 |
+| RS-25 | RU-25a, RU-25b | SPI-445 |
+| RS-26 | RU-26 | SPI-445 |
+| RS-27 | RE-06, RU-27 | SPI-445 |
+| RS-28 | RE-03 | SPI-445 |
+| RS-29 | RU-29a, RU-29b, RE-02 | SPI-445 |
+| RS-30 | RU-30a, RU-30b | SPI-445 |
+| RS-31 | RU-31 | SPI-445 |
+| RS-32 | RU-32 | SPI-445 |
+| RS-33 | RE-01 | SPI-445 |
+| RS-34 | RU-34, existing outbound specs unmodified | SPI-445 |
+| RS-35 | RU-35 | SPI-445 |
+| RS-36 | RU-36a, RU-36b | SPI-445 |
+| RS-37 | RU-37, RE-02 | SPI-445 (gRPC status mapping by SPI-431) |
+| RS-38 | RU-38a, RU-38b | SPI-445 |
+| RS-39 | RU-39 | SPI-445 (consumed by SPI-430, SPI-436) |
+| RS-40 | RU-40a, RU-40b | SPI-445 |
+| RS-41 | RU-41 | SPI-445 |
+| RS-42 | RU-42 | SPI-445 (exposure: SPI-432) |
+| RS-43 | RU-43a, RU-43b, RU-43c | SPI-445 (masker: SPI-433, soft) |
+| RS-44 | RU-44 | SPI-445 |
+| RS-45 | RU-45 | SPI-445 |
+| RS-46 | RU-46 | SPI-445 |
+| RS-47 | RU-47 | SPI-445 |
+| RS-48 | RU-48 | SPI-445 (consumed by KA spec) |
+| RS-49 | RU-49 | SPI-445 (consumed by KA spec) |
+| RS-50 | RU-50 | SPI-445, after SPI-429 (else follow-up) |

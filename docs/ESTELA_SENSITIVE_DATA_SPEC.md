@@ -93,7 +93,7 @@ any sink that receives a whole message) or when app code puts custom headers on 
 - Transforming idempotency **keys** at rest (they are identities; open question Q5).
 - Decoding encoded content at run time (base64 blobs, compressed bodies). Encoded leaks are detected by
   `expectNoLeak` in tests, not prevented by the runtime (risk R3).
-- Broker-backed channels (SPI-434) and resilience policies (SPI-RES, the resilience ticket still to be
+- Broker-backed channels (SPI-434) and resilience policies (SPI-445, the resilience ticket still to be
   opened under SPI-428, `RS-` requirements; Q10). No rule here depends on them. This ticket adds no retry loop and
   consumes no retry budget: its errors only carry `retryable` (section 8.1).
 - Performance budgets. Overhead is measured and budgets are set in SPI-444 (SD-41).
@@ -188,7 +188,7 @@ surfaces the epic names:
   unmodified (SD-35).
 - The emitted `.d.ts` stays parseable by TypeScript 4.9 (`test/dist-typescript4.spec.ts`).
 - Outbound REST `retry`/`timeoutMs`: unchanged; nothing to migrate in this ticket. Their migration to
-  the resilience policy model belongs to SPI-RES (RS-34).
+  the resilience policy model belongs to SPI-445 (RS-34).
 - **Migration when a team opts in.** Setting any `sensitive` object changes the default `storeMode`
   of every durable scope it reaches to `status-only` (D5). Visible effects: request/reply endpoints
   with `onDuplicate: 'replay'` fail boot until they choose a `storeMode` (SD-30), and activator
@@ -351,7 +351,7 @@ export interface KeyProvider {
 ```
 
 `KeyProvider` implementations SHOULD NOT retry internally; a failure surfaces as the retryable error of
-SD-32 and the caller's retry layer decides (SPI-RES: RS-17a classifies it `'transient'`, RS-28 to
+SD-32 and the caller's retry layer decides (SPI-445: RS-17a classifies it `'transient'`, RS-28 to
 RS-31 own the budget).
 
 ### 4.4 `sensitive/regex-engine.ts` (new port)
@@ -695,7 +695,7 @@ unit's transaction with the returned sealer (SD-33). Flow scopes have no codec: 
 | idempotency store (Redis) unavailable | unchanged by this ticket: SPI-429 owns it (D-REDIS-DOWN: `IdempotencyStoreUnavailableError`, always fail-closed for `ChannelSpec.sideEffects: true`, configurable with fail-closed default otherwise); `storeMode` adds no fallback and `prepare()` runs before `begin`, so a key-provider failure and a store failure never both happen on one claim | per SPI-429 | n/a |
 
 This ticket adds no retry loop and reads or spends no retry budget. Retryable errors carry
-`retryable: true`; SPI-RES decides which layer retries (RS-17a, RS-28) and how the budget propagates
+`retryable: true`; SPI-445 decides which layer retries (RS-17a, RS-28) and how the budget propagates
 (RS-29 to RS-31).
 `KeyProvider` and `SaltProvider` implementations SHOULD NOT retry internally (4.3), so a caller's
 retry is the only one.
@@ -856,7 +856,7 @@ SPI-433 (this) ──► nothing blocks it; ships first
    ├──► SPI-437 OTel bridge: span attributes through SensitiveRuntime
    ├──► SPI-439 @InboundMcp: endpoint level, same storeMode rules
    ├──► SPI-444: benchmark sets budgets (SD-41); revisits maxScanBytes default
-   ├──► SPI-RES (RS-, key still to open, Q10): classifies SensitiveKeyUnavailableError
+   ├──► SPI-445 (RS-, key still to open, Q10): classifies SensitiveKeyUnavailableError
    │    (retryable) and SensitiveReplayUnavailableError / SensitiveRecordError (terminal), owns
    │    the retry budget
    └──► Koletz adoption spec (KA-): its pack, header additions, per-channel table, salt and key
@@ -870,10 +870,10 @@ SPI-433 (this) ──► nothing blocks it; ships first
 2. **SPI-429 multi-replica (P1).** Its boot guard is released and enabled in Koletz (KA-01, KA-02)
    before any service runs more than one replica or an HPA; until then the Koletz CI check KA-03
    blocks scaling. It does not gate A1.
-3. **SPI-RES resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
+3. **SPI-445 resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
    SPI-430 and SPI-436 merge after it or rebase onto it.
 4. **Koletz adoption (KA-)**, gated by the P0 items: A1 by SPI-433 + SPI-432; A4 by SPI-433 +
-   SPI-431; A3 by SPI-RES (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
+   SPI-431; A3 by SPI-445 (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
    allowed) by the SPI-429 stores.
 
 The build-time dependencies between the three library tickets stay soft (none blocks another); the
@@ -950,7 +950,7 @@ webhook body log) they route them through `SensitiveRuntime` and extend the leak
 | Q7 | `hashChars` default 16 (64 bits) | 16 | ESTELA maintainer |
 | Q8 | `maxScanBytes` default 64 KiB until SPI-444 measures | 64 KiB | ESTELA maintainer (SPI-444) |
 | Q9 | Align the MR spec: drop or reword MR-20 (store-level codec) now that SPI-433 encodes above the store (D13) | Resolved 2026-11-09: MR-20 retired (MR spec D17) | ESTELA maintainer (SPI-429 author) |
-| Q10 | Open the resilience ticket under SPI-428 and give its key, so section 12 and the error classification can name it | Referenced as `SPI-RES` (placeholder, RS OQ-1) | Platform owner |
+| Q10 | Open the resilience ticket under SPI-428 and give its key, so section 12 and the error classification can name it | Referenced as `SPI-445` (placeholder, RS OQ-1) | Platform owner |
 | Q11 | Confirm the `secrets.keys` key list (R12) | As in 6.4 | ESTELA maintainer |
 
 ## 16. Definition of done
@@ -1001,7 +1001,7 @@ webhook body log) they route them through `SensitiveRuntime` and extend the leak
 | SD-29 | `storeMode default: plain without policy, status-only with one, defaulted scopes listed at boot` | SPI-433 |
 | SD-30 | `status-only plus replay on request/reply fails boot`; matrix cases (group G) | SPI-433 |
 | SD-31 | `sealed records: round trip, tamper, key swap` | SPI-433 |
-| SD-32 | `key provider down at claim fails closed before dispatch`; `key provider down at replay never re-runs`; `retired key gives replay unavailable` | SPI-433 (retry layer: SPI-RES, RS-17a) |
+| SD-32 | `key provider down at claim fails closed before dispatch`; `key provider down at replay never re-runs`; `retired key gives replay unavailable` | SPI-433 (retry layer: SPI-445, RS-17a) |
 | SD-33 | `saga ledger: encrypted round trip, key fetched outside the transaction`; `saga ledger: status-only replay` | SPI-433 |
 | SD-34 | `activator duplicate on a status-only record warns and does not reply` | SPI-433 |
 | SD-35 | `sealed and status-only records survive a JSON store` | SPI-433 (reused by SPI-429 store tests) |
