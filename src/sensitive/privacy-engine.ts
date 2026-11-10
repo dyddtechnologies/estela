@@ -25,7 +25,12 @@ import {
   type PrivacyScopes,
 } from './policy-resolver';
 import { nativeRegexEngine } from './regex-engine';
+import { createRecordCodec, type RecordCodec } from './sealed-record';
+import type { SealKeyProvider } from './seal-key';
 import { errorShape, walk, type WalkLimits } from './walker';
+
+/** What `forRoot({ privacy })` accepts: options, `false` (off) or nothing (the baseline). */
+type PrivacyOption = PrivacyModuleOptions | false | undefined;
 
 /** The kind of trail place a value is written to. */
 export enum TrailOutput {
@@ -113,8 +118,10 @@ export interface PrivacyCompileResult {
 interface EngineParts {
   readonly disabled: boolean;
   readonly options: PrivacyModuleOptions | undefined;
+  readonly moduleLevel: ModuleLevel;
   readonly module: FrozenPlan | undefined;
-  readonly scopes: ReadonlyMap<string, FrozenPlan>;
+  /** Grows only at boot, through `addScopes`. */
+  readonly scopes: Map<string, FrozenPlan>;
   readonly secret: FingerprintSecret | undefined;
   readonly limits: WalkLimits;
   readonly logger: PrivacyLogger;
@@ -142,7 +149,7 @@ export class PrivacyEngine {
 
   /** Compiles at module init; throws one PrivacyConfigError with every problem (7.1, SD-37). */
   static async compile(
-    options: PrivacyModuleOptions | false | undefined,
+    options: PrivacyOption,
     scopes: PrivacyScopes = {},
     logger?: PrivacyLogger,
   ): Promise<PrivacyEngine> {
@@ -155,40 +162,121 @@ export class PrivacyEngine {
 
   /** Like `compile`, but returns the findings for the boot resolver instead of throwing (SD-55). */
   static async inspect(
-    options: PrivacyModuleOptions | false | undefined,
+    options: PrivacyOption,
     scopes: PrivacyScopes = {},
     logger: PrivacyLogger = noopLogger,
   ): Promise<PrivacyCompileResult> {
     const findings = new Findings();
+    const secret = await readSecret(options === false ? undefined : options, findings);
+    return PrivacyEngine.build(options, scopes, logger, secret, findings);
+  }
+
+  /**
+   * @internal The baseline engine of a writer built without a module (section 2, D3): the pinned
+   * `secrets@1` pack and `DEFAULT_HIDDEN_HEADERS`, no fingerprint secret, no boot lines.
+   */
+  static baseline(): PrivacyEngine {
+    const result = PrivacyEngine.build(undefined, {}, noopLogger, undefined, new Findings());
+    // The baseline has no configuration, so it cannot have a finding.
+    return result.engine!;
+  }
+
+  /**
+   * @internal A standalone engine compiled without I/O (no fingerprint secret), for writers
+   * built outside a module, such as a saga runner without `privacy.engine` (SD-63).
+   */
+  static compileSync(
+    options: PrivacyModuleOptions | undefined,
+    scopes: PrivacyScopes,
+    logger: PrivacyLogger = noopLogger,
+  ): PrivacyEngine {
+    const result = PrivacyEngine.build(options, scopes, logger, undefined, new Findings());
+    if (result.engine === undefined) {
+      throw new PrivacyConfigError(result.problems, result.findings);
+    }
+    return result.engine;
+  }
+
+  private static build(
+    options: PrivacyOption,
+    scopes: PrivacyScopes,
+    logger: PrivacyLogger,
+    secret: FingerprintSecret | undefined,
+    findings: Findings,
+  ): PrivacyCompileResult {
     const module: ModuleLevel = {
       options: options === false ? undefined : options,
       off: options === false,
     };
-    const secret = await readSecret(module.options, findings);
     const env = compileEnv(module.options, findings);
     if (module.options !== undefined) checkModule(module.options, env);
     const modulePlan = options === false ? undefined : resolveModule(module, env);
-    const plans = new Map<string, FrozenPlan>();
-    const notes: string[] = [];
-    for (const [name, scope] of Object.entries(scopes)) {
-      const resolved = resolveScope(name, scope, module, env);
-      plans.set(name, resolved.plan);
-      notes.push(...resolved.notes);
-    }
+    const resolved = resolveScopes(scopes, module, env);
     if (findings.count > 0) {
       return { engine: undefined, findings: findings.list, problems: findings.problems };
     }
     const engine = new PrivacyEngine({
       disabled: options === false,
       options: module.options,
+      moduleLevel: module,
       module: modulePlan,
-      scopes: plans,
+      scopes: resolved.plans,
       secret,
       limits: limitsOf(module.options),
       logger,
     });
-    engine.logBoot(env, notes);
+    engine.logBoot(['module', ...resolved.plans.keys()], env.exemptions, resolved.notes);
     return { engine, findings: [], problems: [] };
+  }
+
+  /**
+   * @internal Adds scopes found after the module compiled (activators, inbound endpoints, flows,
+   * saga runners). Nothing is added when a scope has a finding; the caller throws them (SD-37).
+   * `sealKeys` says whether the writer of these scopes has its own `SealKeyProvider`.
+   */
+  addScopes(
+    scopes: PrivacyScopes,
+    extra: { sealKeys?: boolean } = {},
+  ): Pick<PrivacyCompileResult, 'findings' | 'problems'> {
+    const findings = new Findings();
+    const base = compileEnv(this.parts.options, findings);
+    const env: CompileEnv = { ...base, hasSealKeys: base.hasSealKeys || extra.sealKeys === true };
+    const resolved = resolveScopes(scopes, this.parts.moduleLevel, env);
+    if (findings.count > 0) return { findings: findings.list, problems: findings.problems };
+    for (const [name, plan] of resolved.plans) this.parts.scopes.set(name, plan);
+    this.logBoot([...resolved.plans.keys()], env.exemptions, resolved.notes);
+    return { findings: [], problems: [] };
+  }
+
+  /** @internal True once a scope is known to the engine. */
+  hasScope(scope: string): boolean {
+    return this.parts.scopes.has(scope);
+  }
+
+  /** @internal `forRoot({ privacy: false })`: every writer keeps its 0.9.0 text (section 2). */
+  get off(): boolean {
+    return this.parts.disabled;
+  }
+
+  /** @internal True when an explicit privacy reaches the context (SD-57); the baseline never does. */
+  reaches(ctx: Omit<TrailContext, 'output'>): boolean {
+    return this.planOf({ ...ctx, output: TrailOutput.Log })?.explicit === true;
+  }
+
+  /**
+   * @internal The record codec of a durable scope (4.6, 8.2): its resolved `remember`, the module
+   * `SealKeyProvider` unless the writer brings its own, and `forTrail` for `Remember.AsShown`.
+   */
+  recordCodec(
+    scope: string,
+    output: TrailOutput,
+    sealKeys: SealKeyProvider | undefined = this.parts.options?.sealKeys,
+  ): RecordCodec {
+    return createRecordCodec(this.rememberOf(scope), {
+      scope,
+      sealKeys,
+      asShown: (record) => this.forTrail(record, { output, scope }),
+    });
   }
 
   /** A sink copy of `value` (6.2); `[HIDE_FAILED]` when hiding throws (SD-23). */
@@ -347,25 +435,26 @@ export class PrivacyEngine {
   }
 
   /** SD-37, SD-18, SD-29, SD-60: names, counts and reasons only. */
-  private logBoot(env: CompileEnv, notes: readonly string[]): void {
+  private logBoot(
+    names: readonly string[],
+    exemptions: CompileEnv['exemptions'],
+    notes: readonly string[],
+  ): void {
     const { logger } = this.parts;
     if (this.parts.disabled) {
-      logger.log('privacy: off (forRoot({ privacy: false }))');
+      if (names.includes('module')) logger.log('privacy: off (forRoot({ privacy: false }))');
       return;
     }
-    const plans: [string, FrozenPlan | undefined][] = [
-      ['module', this.parts.module],
-      ...this.parts.scopes.entries(),
-    ];
-    for (const [name, plan] of plans) {
+    for (const name of names) {
+      const plan = name === 'module' ? this.parts.module : this.parts.scopes.get(name);
       if (plan === undefined) continue;
-      const names = plan.names.length === 0 ? '-' : plan.names.join(',');
+      const uses = plan.names.length === 0 ? '-' : plan.names.join(',');
       logger.log(
         `privacy scope '${name}': fields=${plan.fieldCount} patterns=${plan.patterns.length}` +
-          ` uses=${names} remember=${plan.remember ?? '-'} fingerprint=${this.secretId ?? 'none'}`,
+          ` uses=${uses} remember=${plan.remember ?? '-'} fingerprint=${this.secretId ?? 'none'}`,
       );
     }
-    for (const exemption of env.exemptions) {
+    for (const exemption of exemptions) {
       logger.warn(
         `privacy exemption: ${exemption.subject} path '${exemption.path}' show ${exemption.show}` +
           ` reason: ${exemption.reason}`,
@@ -373,6 +462,21 @@ export class PrivacyEngine {
     }
     for (const note of notes) logger.warn(note);
   }
+}
+
+function resolveScopes(
+  scopes: PrivacyScopes,
+  module: ModuleLevel,
+  env: CompileEnv,
+): { plans: Map<string, FrozenPlan>; notes: string[] } {
+  const plans = new Map<string, FrozenPlan>();
+  const notes: string[] = [];
+  for (const [name, scope] of Object.entries(scopes)) {
+    const resolved = resolveScope(name, scope, module, env);
+    plans.set(name, resolved.plan);
+    notes.push(...resolved.notes);
+  }
+  return { plans, notes };
 }
 
 async function readSecret(
