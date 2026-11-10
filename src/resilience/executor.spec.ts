@@ -447,6 +447,35 @@ describe('CareExecutor', () => {
     await expect(h.exec.execute(ctxOf(), ok('4'))).resolves.toMatchObject({ value: '4' });
   });
 
+  it('RU-21 a call turned away by lanes counts estela_care_turned_away_total with reason lanes-full', async () => {
+    const h = harness({ lanes: { count: 1, waitlist: 1, waitlistMs: 50 } });
+    let release: () => void = () => undefined;
+    const first = settle(
+      h.exec.execute(
+        ctxOf(),
+        () => new Promise<string>((resolve) => (release = () => resolve('1'))),
+      ),
+    );
+    const second = settle(h.exec.execute(ctxOf(), ok('2')));
+    const third = settle(h.exec.execute(ctxOf(), ok('3')));
+    await h.clock.flush();
+    expect(third.error).toBeInstanceOf(LanesFullError);
+    await h.clock.advance(50);
+    expect(second.error).toBeInstanceOf(LanesFullError);
+    const turnedAway = h.metrics.filter((m) => m.name === 'estela_care_turned_away_total');
+    expect(turnedAway).toEqual([
+      expect.objectContaining({
+        labels: { edge: 'activator', binding: 'b', reason: 'lanes-full' },
+      }),
+      expect.objectContaining({
+        labels: { edge: 'activator', binding: 'b', reason: 'lanes-full' },
+      }),
+    ]);
+    release();
+    await h.clock.flush();
+    expect(first.value).toMatchObject({ value: '1' });
+  });
+
   it('RU-22a token bucket refills on the monotonic clock and reports readyInMs', async () => {
     const h = harness({ pace: { perSecond: 2, burst: 2 } });
     await h.exec.execute(ctxOf(), ok(1));

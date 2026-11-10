@@ -364,6 +364,10 @@ export class CareExecutor<T = unknown> {
       if (slot.reason === 'waitlist-expired' && slot.byDeadline)
         throw this.outOfTime(ctx, state.tries, undefined);
       this.emit({ type: 'lanes.full', reason: 'lanes-full' }, ctx);
+      this.observer.counter('estela_care_turned_away_total', {
+        ...this.labels,
+        reason: 'lanes-full',
+      });
       throw new LanesFullError({ ...this.meta(state.tries), reason: slot.reason });
     }
     try {
