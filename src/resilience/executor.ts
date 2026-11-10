@@ -51,6 +51,8 @@ export interface CareEdgeAdapter {
   defaultKey?(ctx: CareContext): string;
   /** Marker of this edge's own overdue errors on top of the engine timer (flow jumps). */
   isOverdue?(error: unknown): boolean;
+  /** RS-66: the target channel of a flow send or jump subject, for events without a call. */
+  readonly channel?: string;
 }
 
 /** One try handed to `run`. */
@@ -714,6 +716,7 @@ export class CareExecutor<T = unknown> {
 
   private onTransition(type: BreakerTransition, key: string): void {
     const ctx: CareContext = { edge: this.plan.edge, binding: this.plan.binding, tryNumber: 0 };
+    if (this.adapter.channel !== undefined) ctx.channel = this.adapter.channel;
     this.emit({ type }, ctx, key);
     if (type === 'valve.shut' || type === 'valve.forced-shut') {
       this.observer.logger.warn(`${type} for ${this.where()}`);

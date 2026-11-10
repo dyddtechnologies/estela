@@ -657,6 +657,29 @@ describe('flow care (SPI-445 section 2.13)', () => {
       expect(JSON.stringify(w.events)).not.toContain('secret-123');
     });
 
+    it('RU-66a valve events of a flow send target carry the target channel', async () => {
+      const w = world();
+      w.inbox('crm', () => {
+        throw flaky();
+      });
+      w.bind(
+        'wa',
+        IntegrationFlow.from('in').fanoutTo([
+          { channel: 'crm', care: { valve: { minCalls: 1, failPercent: 50, shutMs: 60_000 } } },
+        ]),
+      );
+      await settle(w.send('in', { text: 'secret-123' }));
+      const valve = w.events.filter((event) => event.type.startsWith('valve.'));
+      expect(valve).toEqual([
+        expect.objectContaining({
+          type: 'valve.shut',
+          edge: 'flow-send',
+          binding: 'flow:wa#fanout#0:crm',
+          channel: 'crm',
+        }),
+      ]);
+    });
+
     it('RU-70 flows without any care configuration behave as in 0.9.0', async () => {
       const shapes = async (withRuntime: boolean): Promise<unknown[]> => {
         const w = world();

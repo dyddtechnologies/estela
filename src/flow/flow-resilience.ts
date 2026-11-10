@@ -57,6 +57,7 @@ export function flowAdapter(
 ): CareEdgeAdapter {
   return {
     kind: edge,
+    ...(channel === undefined ? {} : { channel }),
     classify: (error) => classifyFlowError(edge, error),
     repeatable: (ctx) => messageKey(ctx) !== undefined,
     safe: () => false,
