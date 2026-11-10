@@ -30,6 +30,8 @@ interface Entry {
   sharedSeen: boolean;
   /** This pod holds the shared half-open probe lease of the current half-open period. */
   leaseHeld: boolean;
+  /** Wall-clock end of the shared mark this pod wrote for its current opening, once stored. */
+  markedUntil?: number;
 }
 
 export interface Admission {
@@ -96,7 +98,10 @@ export class CircuitBreakers {
     const entry = this.entryFor(key);
     if (entry === undefined) return { admitted: true, admission: { key, probe: false } };
     this.maybeHalfOpen(key, entry);
-    if (entry.state === 'shut') return this.rejected(entry);
+    if (entry.state === 'shut') {
+      if (!(await this.resumedElsewhere(entry, deadlineAt, key))) return this.rejected(entry);
+      this.close(key, entry);
+    }
     if (entry.state === 'probing') return this.admitProbe(key, entry, deadlineAt);
     if (this.shared !== undefined) {
       const sharedResult = await this.checkShared(key, entry, deadlineAt);
@@ -258,6 +263,8 @@ export class CircuitBreakers {
           entry.sharedUntil = until;
           entry.sharedQuota = quota !== undefined && quota >= (plain ?? -Infinity);
           entry.sharedSeen = true;
+        } else {
+          this.forgetClearedMark(entry);
         }
       }
     }
@@ -269,6 +276,39 @@ export class CircuitBreakers {
       return result;
     }
     return this.sharedProbe(key, entry, deadlineAt);
+  }
+
+  /**
+   * A mark gone before its end was cleared by a resume on another pod (RS-49), not expired:
+   * forget it instead of rejecting until the cached end.
+   */
+  private forgetClearedMark(entry: Entry): void {
+    if (!entry.sharedSeen || (entry.sharedUntil ?? -Infinity) <= this.clock.wall()) return;
+    entry.sharedSeen = false;
+    entry.sharedQuota = false;
+    delete entry.sharedUntil;
+  }
+
+  /**
+   * RS-49 across pods: a pod shut by its own mark reads the shared marks once per `syncMs`; when
+   * the mark it stored is gone before its end, another pod resumed the valve. A mark that was
+   * never stored (degraded state) proves nothing, so the local opening stands.
+   */
+  private async resumedElsewhere(entry: Entry, deadlineAt: number, key: string): Promise<boolean> {
+    const markedUntil = entry.markedUntil;
+    if (this.shared === undefined || markedUntil === undefined) return false;
+    const now = this.clock.monotonic();
+    if (now - entry.checkedAt < this.plan.syncMs) return false;
+    entry.checkedAt = now;
+    const stateKey = this.shared.stateKey(key);
+    const port = this.plan.state!;
+    const answer = await this.shared.switch.call(
+      () => Promise.all([port.shutUntil(stateKey), port.shutUntil(`${stateKey}:quota`)]),
+      deadlineAt,
+    );
+    if (answer === undefined) return false;
+    const [plain, quota] = answer.value;
+    return plain === undefined && quota === undefined && this.clock.wall() < markedUntil;
   }
 
   /** A pod that saw a marker probes after it expires, only while it holds the lease. */
@@ -310,9 +350,10 @@ export class CircuitBreakers {
     entry.openUntil = this.clock.monotonic() + ms;
     entry.outcomes = [];
     entry.probeSuccesses = 0;
+    delete entry.markedUntil;
     if (type === 'valve.shut') delete entry.forcedBy;
     this.hooks.transition(type, key);
-    this.writeMarker(key, ms, type === 'valve.forced-shut');
+    this.writeMarker(key, entry, ms, type === 'valve.forced-shut');
   }
 
   private close(key: string, entry: Entry): void {
@@ -324,16 +365,24 @@ export class CircuitBreakers {
     entry.probeSuccesses = 0;
     entry.sharedSeen = false;
     delete entry.sharedUntil;
+    delete entry.markedUntil;
     delete entry.forcedBy;
     if (!wasClosed) this.hooks.transition('valve.flowing', key);
   }
 
   /** One write per transition; failures degrade through the switch, never the call. */
-  private writeMarker(key: string, ms: number, quota: boolean): void {
+  private writeMarker(key: string, entry: Entry, ms: number, quota: boolean): void {
     if (this.shared === undefined) return;
     const port = this.plan.state!;
     const stateKey = quota ? `${this.shared.stateKey(key)}:quota` : this.shared.stateKey(key);
     const until = this.clock.wall() + (Number.isFinite(ms) ? ms : MANUAL_MARKER_MS);
-    void this.shared.switch.call(() => port.markShut(stateKey, until), Infinity);
+    const openedUntil = entry.openUntil;
+    void this.shared.switch
+      .call(() => port.markShut(stateKey, until), Infinity)
+      .then((stored) => {
+        // Only the opening that wrote it may later read its absence as a remote resume.
+        if (stored !== undefined && entry.state === 'shut' && entry.openUntil === openedUntil)
+          entry.markedUntil = until;
+      });
   }
 }

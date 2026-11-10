@@ -77,4 +77,49 @@ describe('shared circuit valve probing (RS-23)', () => {
       value: 'a',
     });
   });
+
+  it('RS-49: a resume on the opener clears the cached mark on a pod that saw it', async () => {
+    const { clock, engines } = pods(2);
+    const [opener, other] = engines;
+    await opener!.execute(ctxOf(), () => Promise.reject(transient())).catch(() => undefined);
+    await clock.flush();
+    await expect(other!.execute(ctxOf(), () => Promise.resolve('x'))).rejects.toBeInstanceOf(
+      ValveShutError,
+    );
+    await opener!.resume();
+    await clock.advance(10);
+    await expect(other!.execute(ctxOf(), () => Promise.resolve('y'))).resolves.toMatchObject({
+      value: 'y',
+    });
+  });
+
+  it('RS-49: a resume on a pod that only saw the mark reopens the opener', async () => {
+    const { clock, engines } = pods(2);
+    const [opener, other] = engines;
+    await opener!.execute(ctxOf(), () => Promise.reject(transient())).catch(() => undefined);
+    await clock.flush();
+    await other!.resume();
+    await expect(opener!.execute(ctxOf(), () => Promise.resolve('x'))).rejects.toBeInstanceOf(
+      ValveShutError,
+    );
+    await clock.advance(10);
+    await expect(opener!.execute(ctxOf(), () => Promise.resolve('y'))).resolves.toMatchObject({
+      value: 'y',
+    });
+    expect(opener!.valveState()).toEqual({ state: 'flowing' });
+  });
+
+  it('a mark the opener never stored does not reopen it when the state comes back', async () => {
+    const { clock, port, engines } = pods(1);
+    const [opener] = engines;
+    port.down();
+    await opener!.execute(ctxOf(), () => Promise.reject(transient())).catch(() => undefined);
+    await clock.flush();
+    port.up();
+    await clock.advance(10);
+    await expect(opener!.execute(ctxOf(), () => Promise.resolve('x'))).rejects.toBeInstanceOf(
+      ValveShutError,
+    );
+    expect(opener!.valveState()).toEqual({ state: 'shut' });
+  });
 });
