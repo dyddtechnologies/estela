@@ -6,6 +6,10 @@ Shared flow parameter model: [`ESTELA_FLOW_PARAMETERS.md`](./ESTELA_FLOW_PARAMET
 `docs/SPI-428-koletz-readiness-specs`. Ticket: **SPI-429** (epic SPI-428). Requirement prefix: `MR-`.
 Cross-spec consistency pass (2026-11-09, with SPI-433, SPI-445 and the KA- spec): MR-47 and MR-49 are
 marked "(amended)" (class rule of RS-67, `id` rule of RS-66); OQ-14 takes SD-67 for the resolver.
+Amended 2026-11-10: SPI-433 names follow its Estela-own privacy vocabulary (`privacy`, `remember`,
+`Remember.OutcomeOnly`, `Remember.Sealed`; SD section 19), and the delivery order now has SPI-445
+first (it ships the shared flow parameter scaffolding and the resolver), SPI-433 stacked on it, then
+this ticket (section 10, OQ-14, MR-47).
 Supersedes section 3 of the combined Koletz readiness draft (`2026-11-09-estela-koletz-readiness.md`
 in the voice-plat repo). Resilience (timeouts, breakers, retry budgets: `ESTELA_RESILIENCE_SPEC.md`,
 ticket SPI-445, prefix `RS-`) and sensitive-data redaction (`ESTELA_SENSITIVE_DATA_SPEC.md`,
@@ -278,7 +282,7 @@ Test ids are defined in section 8. Ticket for all rows: SPI-429, unless marked.
 | MR-44 | MUST | A `handle` step with an `idempotency` object claims once per execution of the step through `IdempotencyService.claim` (policy of section 4.4) with `at.channel` = the flow source. Key: `idempotency.key(payload, msg)` when set, else `headers.idempotencyKey`. An `undefined` or empty-string key means no claim for that run (unlike the 0.9.0 flow and activator claims, which keep claiming an empty-string header and are not changed); a resolver that throws fails the step with that error and makes no claim. On success the step settles `complete` with `{ cachedResult: output }`, or `{ completed: true }` when the handler returns `undefined` (the activator's shape, `activator-wrapper.ts:99-104`; an `undefined` return keeps the message unchanged, `handle.step.ts:16`); on error it settles `fail`, swallowing a settle error as the flow does (`flow-executor.ts:78-80`), and the error takes the flow's 0.9.0 failure path. Attempts added by SPI-445 run between the claim and the settle, so they never claim twice. | Given step `s` with `idempotency: {}` and a keyed message; when the handler returns `{ ok: 1 }`; then the store sees exactly one `begin('flow:f#s', k, ttl)` and one `complete` with `{ cachedResult: { ok: 1 } }`. Given a resolver returning `''`; then no `begin` is sent and the handler runs once. Given a resolver that throws `E`; then the handler does not run, no `begin` is sent and the flow rejects with `E`. | FP6, FP7 |
 | MR-45 | MUST | A step claim that is not acquired never runs the handler. When the record is `completed` and its result has an own `cachedResult` property (including `null`), the step output is that value (after the store's JSON round trip, R13) and the flow continues; when it is `completed` with `{ completed: true }` (the handler returned `undefined`), the flow continues with the incoming message unchanged, as the first run did (D21). In every other case (in flight, failed, or a repeat `get` that fails, MR-37) the flow stops with result status `duplicate`, runs no later step and raises no error, as the flow claim does today (`flow-executor.ts:64-66`). A `bypassed` claim (fail-open, MR-14) runs the handler and settles nothing. A failing settle follows MR-15. | Given a completed record `{ cachedResult: { ok: 1 } }` for `flow:f#s` and the flow claim off; when the same key arrives; then the handler is not invoked and the next step receives payload `{ ok: 1 }`. Given a completed record `{ completed: true }`; then the handler is not invoked and the next step receives the incoming payload. Given an in-flight record; then `execute` resolves `{ status: 'duplicate' }` and the next step does not run. | FP8, E8 |
 | MR-46 | MUST | A user-supplied `scope` (flow or step) is a non-empty string that does not contain `::`, the separator of `idempotencyStorageKey` (`idempotency-store.ts:20-22`), because such a scope could share storage keys with another scope; otherwise boot throws `TypeError` naming the option path. A user step `id` of a step with a claim may not contain `::` or `#`, and the resolver refuses (`TypeError`) a step claim whose default scope `flow:<flow>#<stepId>` equals another claim's default scope (for example flow `a#b`'s flow claim and step `b` of flow `a`); two custom scopes that are equal are deliberate sharing (OQ-13). Default scopes (`flow:<name>`, `flow:<flow>#<stepId>`, `activator:<Class>.<method>`, `activator-wrapper.ts:59`) are not validated, so 0.9.0 names keep working. | Given flow `f` with `idempotency: { scope: 'a::b' }`; when the app boots; then it throws `TypeError` naming `flow 'f' idempotency.scope`. Given flow `a#b` and flow `a` with a claiming step `b`; when the app boots; then it throws `TypeError` naming both subjects. | FP9 |
-| MR-47 (amended) | MUST | The flow parameter resolver resolves every store reference in `onModuleInit`, after channels are created and before activators subscribe and flows attach (section 4.5 step 2). It checks every reference and collects all findings before throwing: a store name not in `idempotency.stores` (module `store`, channel, flow, step, activator or inbound) is an `UNKNOWN_PROFILE` error, and the resolver throws one `ReplicaConfigError` whose `findings` lists every finding and whose message names each subject and option path (for example `flow 'loan' step 'credit': idempotency.store unknown store 'ledgr'`). A name bound to `{ useExisting }` is resolved through `ModuleRef` on its first use and at the latest at `onApplicationBootstrap`, where a failure is `STORE_REF_UNRESOLVED` (MR-23). (amended, cross-spec) The resolver is the one shared with SPI-433 and SPI-445, and RS-67 owns its class rule: `ReplicaConfigError` is thrown when every error finding is an idempotency finding; when the same boot also has error findings of another concern, exactly one `FlowDefinitionError` is thrown and these findings are carried in it as `FlowParameterFinding` with `concern: 'idempotency'`. | Given two unknown names, one on a channel and one on a step; when the app boots; then `init()` rejects once with `ReplicaConfigError` whose `findings` has two `UNKNOWN_PROFILE` entries, and no flow was attached and no activator subscribed. Given the same two names plus an unknown sensitive profile on a step; then `init()` rejects once with `FlowDefinitionError` whose `findings` hold the two idempotency findings and the sensitive one. | FP10 |
+| MR-47 (amended) | MUST | The flow parameter resolver resolves every store reference in `onModuleInit`, after channels are created and before activators subscribe and flows attach (section 4.5 step 2). It checks every reference and collects all findings before throwing: a store name not in `idempotency.stores` (module `store`, channel, flow, step, activator or inbound) is an `UNKNOWN_PROFILE` error, and the resolver throws one `ReplicaConfigError` whose `findings` lists every finding and whose message names each subject and option path (for example `flow 'loan' step 'credit': idempotency.store unknown store 'ledgr'`). A name bound to `{ useExisting }` is resolved through `ModuleRef` on its first use and at the latest at `onApplicationBootstrap`, where a failure is `STORE_REF_UNRESOLVED` (MR-23). (amended, cross-spec) The resolver is the one shared with SPI-433 and SPI-445, and RS-67 owns its class rule: `ReplicaConfigError` is thrown when every error finding is an idempotency finding; when the same boot also has error findings of another concern, exactly one `FlowDefinitionError` is thrown and these findings are carried in it as `FlowParameterFinding` with `concern: 'idempotency'`. | Given two unknown names, one on a channel and one on a step; when the app boots; then `init()` rejects once with `ReplicaConfigError` whose `findings` has two `UNKNOWN_PROFILE` entries, and no flow was attached and no activator subscribed. Given the same two names plus an unknown privacy profile on a step; then `init()` rejects once with `FlowDefinitionError` whose `findings` hold the two idempotency findings and the privacy one. | FP10 |
 | MR-48 | MUST | Observation (MR-16), the purge timer (MR-17) and the replica guard (MR-23) cover every distinct store referenced at any level: module, named, channel, flow, step, activator and inbound. Each flow and step store is a guard subject (`flow 'f' idempotency store`, `flow 'f' step 's' idempotency store`), and so is each activator store (`activator <Class>.<method> idempotency store`). | Given `multi`, a shared module store, and step `s` whose `idempotency.store` is a memory store; when the app boots; then one `PROCESS_LOCAL_IDEMPOTENCY_STORE` error names `flow 'f' step 's' idempotency store`. Given a Postgres store used only by an activator and `purgeIntervalMs` set; when the timer fires; then that store is purged. | FP11, SU8 |
 | MR-49 (amended) | MUST | `GET /integration/graph` shows store wiring by name only. `GraphSnapshot.module` gains `replicas` and `stores: { name; kind; visibility }[]`; `GraphNode` gains `delivery?`, `sideEffects?` and `store?`; a `GraphFlowEntry` gains `options.idempotency`; a `handle` step with a claim gains `idempotency: { scope, store, storeKind, visibility }` (`store` omitted for an unnamed store, `visibility` omitted when the store does not declare it). The graph never contains keys, key resolvers, store connection data or record contents. (amended, cross-spec) A step that carries an `idempotency` annotation also shows its `id`, by the rule of RS-66 shared by the three specs (SD Q17); an unconfigured step shows neither. | Given an app with `stores: { shared: redisStore }`, channel `pay` with `sideEffects: true`, and a step claim on `shared`; when the graph is fetched; then `module.stores` is `[{ name: 'shared', kind: 'redis', visibility: 'shared' }]`, node `pay` has `sideEffects: true`, the step has `idempotency.scope = 'flow:f#s'`, and a scan of the JSON finds no option value of the Redis store and no key. | GR1, GR2 |
 | MR-50 | MUST | With no option of section 16 set (no `stores`, no `FlowOptions`, no step options, no `ChannelSpec.idempotency`, no `ActivatorOptions.idempotency`, no `delivery`/`sideEffects`, no `replicas`/`ESTELA_REPLICAS`), every claim, scope, TTL, store, log line and the `GET /integration/graph` JSON are identical to 0.9.0: new graph fields are omitted, never present as empty values. | Given the 0.9.0 example app; when it boots, runs a keyed flow message and an activator message, and serves the graph; then the recorded store calls and the graph JSON equal the 0.9.0 snapshots. | FP12, GU7 |
@@ -920,7 +924,7 @@ service built outside the module. OQ-5 tracks the transition port.
 
 | Combination | Behaviour |
 |---|---|
-| `onDuplicate: 'replay'` + shared store | Replay reads `result.cachedResult` from the shared record, so pod B replays pod A's answer. The reply mapper runs in pod B. The value has been through JSON: a `Date` replays as an ISO string, `undefined` members and `Map`/`Set` contents are lost, class instances replay as plain objects. The memory store replays the original object, so a handler that relies on such types behaves differently once a shared store is configured; documented next to the option. SPI-433 `status-only` and `encrypted` records are handled above the store (SD-30, SD-35). |
+| `onDuplicate: 'replay'` + shared store | Replay reads `result.cachedResult` from the shared record, so pod B replays pod A's answer. The reply mapper runs in pod B. The value has been through JSON: a `Date` replays as an ISO string, `undefined` members and `Map`/`Set` contents are lost, class instances replay as plain objects. The memory store replays the original object, so a handler that relies on such types behaves differently once a shared store is configured; documented next to the option. SPI-433 `Remember.OutcomeOnly` and `Remember.Sealed` records are handled above the store (SD-30, SD-35). |
 | `onDuplicate: 'replay'` + fail-open bypass | Nothing was stored, so a later repeat runs again: replay is impossible for bypassed runs. Documented next to the option. |
 | `onInFlight: 'reject'` + store unavailable on the follow-up `get` | Rejects with `InboundIdempotencyInFlightError` (I4). |
 | `onFailure: 'store'` + shared store | The failure is serialized by the inbound `failureCodec` and stored through `complete`; any pod replays it. |
@@ -946,7 +950,7 @@ service built outside the module. OQ-5 tracks the transition port.
   model:
   - In scope for this spec: what the store persists (`result`, `error`, the key) and what Estela logs
     about it. Floor: `serializeError` only (MR-08), no keys or values in logs (MR-16), optional
-    `keyDigest` (MR-19). Sealing or stripping `result` (`storeMode`) and redaction of the other
+    `keyDigest` (MR-19). Sealing or stripping `result` (`remember`) and redaction of the other
     sinks (hop logs, history, wire-tap, saga ledger, test captures) are SPI-433.
   - Scopes are logged. They are meant to be names (`flow:orders`, `org:<id>`); the README states that
     personal data goes in keys, never in scopes.
@@ -1175,7 +1179,7 @@ store stub.
   `forRoot`, at flow, step and activator level -> `TypeError` from `init()` before any name is
   resolved.
 - **FP10.** Unknown names at channel and step -> one `ReplicaConfigError` with two `UNKNOWN_PROFILE`
-  findings; plus an unknown sensitive profile -> one `FlowDefinitionError` with all three (RS-67); no flow attached, no activator subscribed; a `{ useExisting }` name that never resolves
+  findings; plus an unknown privacy profile -> one `FlowDefinitionError` with all three (RS-67); no flow attached, no activator subscribed; a `{ useExisting }` name that never resolves
   -> `STORE_REF_UNRESOLVED` at bootstrap (MR-47).
 - **FP11.** Coverage: a step memory store in multi is an error finding with the step subject; an
   activator-only Postgres store is purged; an endpoint-only store is observed (MR-48, amended MR-16,
@@ -1226,8 +1230,8 @@ store stub.
     named stores, and "give every step with a claim an explicit `id`" (section 1.4).
 - **README, "Flow parameters" (section 16).** The idempotency rows of the shared flow parameter
   model: levels, per-key precedence, `false`, the `sideEffects` floor, step claims and duplicates,
-  store names in the graph. It links the shared model instead of restating the resilience and
-  sensitive rows.
+  store names in the graph. It links the shared model instead of restating the care and
+  privacy rows.
 - **CHANGELOG.** Produced by semantic-release from the `feat` commit; `package.json` is not edited.
 
 ## 10. Dependencies on other tickets
@@ -1249,7 +1253,8 @@ SPI-429         -- named stores, store kind, flow/ --->  shared flow parameter m
 SPI-445         -- ResilienceScope.markDegraded ----->  SPI-429 MR-51 (inert until SPI-445 merges)
 SPI-429         -- ReplicaSafetyInput.contributed --->  SPI-445 RS-50 (MR-52)
 SPI-445, SPI-433 -- FlowParameterResolver ----------->  one resolver shared by the three specs;
-                                                          SPI-433 creates it (SD-67, OQ-14)
+                                                          SPI-445 creates it, SPI-433 adds the
+                                                          privacy pass (SD-67, OQ-14)
 ```
 
 SPI-429 has no blocking dependency; its place in the release plan is the agreed order below. The
@@ -1257,21 +1262,27 @@ arrows above are consumers of SPI-429; none of them blocks it. SPI-430, SPI-432,
 SPI-440, SPI-442 and SPI-443 neither block nor consume it. SPI-435 (BullMQ) and SPI-434 are the
 routes for must-not-lose work.
 
-### Agreed delivery order (identical in the four SPI-428 specs)
+### Agreed delivery order (identical in the four SPI-428 specs) **(amended 2026-11-10)**
 
-1. **SPI-433 sensitive data (P0)** ships first. With SPI-432 (graph control, P0) it gates the first
-   Koletz adoption step (A1).
-2. **SPI-429 multi-replica (P1).** Its boot guard is released and enabled in Koletz (KA-01, KA-02)
+1. **SPI-445 care (resilience)** lands first. It ships the shared flow parameter scaffolding with
+   its care members only: `FlowOptions`, `StepCommonOptions`, `FlowTarget`/`FlowDest`,
+   `JumpOptions`, `ProfileName`, `FlowParameterFinding`, `FlowDefinitionError` and the care-only
+   `FlowParameterResolver` (SD-67, RS 3.9). SPI-429 has not merged, so RS-50 is deferred to a
+   follow-up that lands with the SPI-429 guard. SPI-430 and SPI-436 merge after it or rebase onto it.
+2. **SPI-433 privacy (P0)**, stacked on SPI-445 (branch `feat/SPI-433-sensitive` on
+   `feat/SPI-445-resilience`). It adds the privacy members to that scaffolding and the privacy pass
+   to the resolver; it re-creates none of it. With SPI-432 (graph control, P0) it gates the first
+   Koletz adoption step (A1); because it is stacked, A1 also waits for SPI-445 to merge.
+3. **SPI-429 multi-replica (P1).** It adds the idempotency members to the same scaffolding and
+   brings the RS-50 follow-up. Its boot guard is released and enabled in Koletz (KA-01, KA-02)
    before any service runs more than one replica or an HPA; until then the Koletz CI check KA-03
    blocks scaling. It does not gate A1.
-3. **SPI-445 resilience** after SPI-429, so RS-50 lands with the guard instead of as a follow-up;
-   SPI-430 and SPI-436 merge after it or rebase onto it.
-4. **Koletz adoption (KA-)**, gated by the P0 items: A1 by SPI-433 + SPI-432; A4 by SPI-433 +
-   SPI-431; A3 by SPI-445 (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared store, scaling
-   allowed) by the SPI-429 stores.
+4. **Koletz adoption (KA-)**, gated by the P0 items: A1 by SPI-433 (on SPI-445) + SPI-432; A4 by
+   SPI-433 + SPI-431; A3 by SPI-445 (plus SPI-430 / SPI-436 for gRPC and SDK hops); A7 (shared
+   store, scaling allowed) by the SPI-429 stores.
 
-The build-time dependencies between the three library tickets stay soft (none blocks another); the
-order above is the release plan, not a code dependency.
+SPI-433 has one build-time dependency: it extends the scaffolding SPI-445 shipped. SPI-429 stays
+soft against both (it only adds members). The order above is the release plan.
 
 ## 11. Risks (accepted, documented)
 
@@ -1354,7 +1365,7 @@ order above is the release plan, not a code dependency.
 | OQ-11 | A step with a claim but no explicit `id` gets the positional default `<kind>#<index>`, which shifts when a step is inserted (section 1.4). Refuse it at boot, warn, or only document? | Only document (README, review skill); no new boot code | ESTELA maintainer |
 | OQ-12 | Type of a contributed finding `code` (MR-52): widen `ReplicaFinding.code` to `ReplicaFindingCode \| (string & {})`, or add each sibling code (`PROCESS_LOCAL_RATE_LIMIT`, `PROCESS_LOCAL_BREAKER`, `REPLICAS_HINT_DEFAULT`) to the union? | Widen; exhaustive switches on the union in apps keep compiling | ESTELA maintainer |
 | OQ-13 | Two flows that set the same custom `scope` share claims. Refuse at boot, or allow as deliberate sharing? | Allow and document | ESTELA maintainer |
-| OQ-14 | Which ticket ships `FlowParameterResolver` and `IntegrationFlow.from(source, options)` (SPI-433, SPI-429 or SPI-445 is first to merge), and where the shared flow parameter model file is committed in this repo | (amended) Resolver: SPI-433, the first ticket of the agreed delivery order, ships the resolver skeleton and the shared types (SD-67); SPI-429 adds its idempotency members. Location: open, the same question as SD Q12 and RS OQ-16; default: committed next to the specs in `docs/` | ESTELA maintainer |
+| OQ-14 | Which ticket ships `FlowParameterResolver` and `IntegrationFlow.from(source, options)` (SPI-433, SPI-429 or SPI-445 is first to merge), and where the shared flow parameter model file is committed in this repo | (amended 2026-11-10) Resolver: SPI-445, the first ticket of the agreed delivery order, ships the resolver and the shared types with care members only; SPI-433, stacked on it, adds the privacy members (SD-67); SPI-429 adds its idempotency members. Location: open, the same question as SD Q12 and RS OQ-16; default: committed next to the specs in `docs/` | ESTELA maintainer |
 | OQ-15 | Step claims on `transform` (the shared model refuses `idempotency` there, steering side effects to `handle`). Keep the refusal? | Keep | ESTELA maintainer |
 | OQ-16 | D19 deviates from the shared model (section 1.1: an inbound endpoint's L2 is its own channel). Amend the model to exclude inbound endpoints from the idempotency L2, or make inbound read `ChannelSpec.idempotency` between `InboundDefaults` and the endpoint spec? | Amend the model (keep D19) | ESTELA maintainer, with the owners of SPI-433 and SPI-445 |
 
@@ -1430,7 +1441,7 @@ order above is the release plan, not a code dependency.
 | MR-44 | MUST | FP6, FP7 | SPI-429 |
 | MR-45 | MUST | FP8, E8 | SPI-429 |
 | MR-46 | MUST | FP9 | SPI-429 |
-| MR-47 (amended) | MUST | FP10 | SPI-429 (resolver shared with SPI-433, SPI-445; skeleton shipped by SPI-433, SD-67; class rule RS-67) |
+| MR-47 (amended) | MUST | FP10 | SPI-429 (resolver shared with SPI-433, SPI-445; shipped by SPI-445, privacy pass by SPI-433, SD-67; class rule RS-67) |
 | MR-48 | MUST | FP11, SU8 | SPI-429 |
 | MR-49 (amended) | MUST | GR1, GR2 | SPI-429 (graph fields of SPI-433/SPI-445 are theirs; `id` rule RS-66) |
 | MR-50 | MUST | FP12, GU7 | SPI-429 |
@@ -1443,7 +1454,7 @@ order above is the release plan, not a code dependency.
 This section applies the shared ESTELA flow parameter model (proposal shared by SPI-433, SPI-429,
 SPI-445 and the KA- adoption spec; file location OQ-14) to the concern of this spec: idempotency
 claims, the stores behind them, the `sideEffects` and `delivery` floors, and the replica mode. It
-uses the model's names and shapes and does not restate its resilience or sensitive rules. The
+uses the model's names and shapes and does not restate its care or privacy rules. The
 requirements are MR-39 to MR-53 (section 2.7). With none of these options set, Estela behaves as
 0.9.0 (MR-50).
 
@@ -1509,7 +1520,7 @@ export interface ChannelSpec {
 // src/flow/integration-flow.ts
 export interface FlowOptions {
   idempotency?: false | { ttlMs?: number; store?: StoreRef; onStoreUnavailable?: StoreUnavailablePolicy; scope?: string };
-  /* resilience (SPI-445) and sensitive (SPI-433) members are defined by the shared model */
+  /* care (SPI-445) and privacy (SPI-433) members are defined by the shared model */
 }
 static from(source: string, options?: FlowOptions): IntegrationFlow;
 
@@ -1527,7 +1538,7 @@ handle(fn: MapFn, opts?: StepCommonOptions & { resilience?: ResilienceRef; idemp
 export interface ActivatorOptions {
   group?: string; routingKey?: string;
   idempotency?: { store?: StoreRef; ttlMs?: number; onStoreUnavailable?: StoreUnavailablePolicy };
-  /* resilience, sensitive: shared model */
+  /* care, privacy: shared model */
 }
 
 // src/inbound/inbound.types.ts
@@ -1596,7 +1607,7 @@ idempotency?: { scope: string; store?: string; storeKind: string; visibility?: '
 
 `module.stores` lists the entries of `idempotency.stores` only; a claim on an unnamed store (an
 object passed directly) shows `storeKind` and `visibility` without `store`. `policies` and `profiles`
-lists and the `policy`/`sensitive` annotations are owned by SPI-445 and SPI-433. The graph has no key field at all: neither keys nor key resolvers (nor whether a step uses
+lists and the `care`/`privacy` annotations are owned by SPI-445 and SPI-433. The graph has no key field at all: neither keys nor key resolvers (nor whether a step uses
 one) are shown.
 
 ### 16.7 Example
