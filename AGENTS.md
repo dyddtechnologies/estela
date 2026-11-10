@@ -59,6 +59,9 @@
   proves the rule on a fixture.
 - `src/resilience/` (`resilience-is-leaf`): never imports `src/outbound`, `src/inbound`,
   `src/activator`, `src/saga` or `src/flow`; those depend on it (edge adapters live with their edge).
+- `src/sensitive/` (`sensitive-no-npm`, `sensitive-is-leaf`): the privacy engine imports no npm
+  package (only `node:` core modules) and no other `src/` file; its log sink is an injected
+  `PrivacyLogger`. `test/sensitive-bounds.spec.ts` proves the npm rule on a fixture.
 
 ## Adding features (OCP)
 
@@ -76,6 +79,10 @@
   References: `activator-wrapper.ts`, `saga-resilience.ts`, `outbound.resilience.ts`.
 - New shared-state backend for `pace` and `valve` → `CareStatePort` implementation
   (reference: `redisCareState`, which takes a script-evaluation function from the app).
+- New built-in privacy pack or a change to what a pack rule matches → `src/sensitive/packs.ts` +
+  corpus tests + a pack version bump (`secrets@2`); the baseline stays pinned to `secrets@1`.
+- New privacy providers → `FingerprintSecretProvider`, `SealKeyProvider` or a `RegexEngine` (for
+  example over `re2`, injected by the app; Estela never imports it).
 
 ## Ports a consumer implements
 
@@ -84,7 +91,8 @@ Changing one of these (adding a required member, changing a signature) is a brea
 `ChannelFactory` · `InboundTransportStrategy` (its `rawHeaders(context)` is **optional**: without it,
 an inbound `pace.key` gets `{}`) · `CareStatePort` (shared `pace` and `valve` state:
 `takeTurn`, `markShut`, `shutUntil`, `claimProbe`, `clearShut`) · `CareMetricsPort`
-(`counter`, `histogram`, `gauge`). New members on them must be optional.
+(`counter`, `histogram`, `gauge`) · `FingerprintSecretProvider` (`current`) · `SealKeyProvider`
+(`current`, `byId`) · `RegexEngine` (`name`, `compile`). New members on them must be optional.
 
 ## Testing rules
 
@@ -94,7 +102,9 @@ an inbound `pace.key` gets `{}`) · `CareStatePort` (shared `pace` and `valve` s
   `manualCareClock` (deterministic care time; no jest fake timers) ·
   `MemoryCareState` (shared state with fault injection: `down`, `slow`, `hang`, `failNext`) ·
   `collectCareEvents` (events channel) · `bindFlow(flow, registry, { care })` (resolves flow care
-  like module boot, without Nest).
+  like module boot, without Nest) ·
+  `captureTrail` (records every trail write: logs, store, ledger, channels) · `expectNoLeak`
+  (fails when a secret appears in any `LeakForm`; never prints it) · `leakForms`.
 - Test files: `*.spec.ts` under `src/` or `test/` (jest roots).
 - Handlers subscribed to awaited channels must return their promise (never `void p`) —
   producers of `direct` channels wait for full execution (spec §17.3).
