@@ -1045,9 +1045,13 @@ channels: [{ name: 'inventory.reserve', type: 'direct', care: 'activator-std' }]
   10 s. Each try waits on its own ephemeral reply channel, unregistered when the try ends, so a
   late reply from an earlier try is dropped. A jump with extra tries toward a keyed activator needs
   an `eachTryMs` longer than the activator's work.
-- A jump whose reply carries `planB: true`, or a step that plan B
+- When the module has care, a jump whose reply carries `planB: true`, or a step that plan B
   answered, marks the flow, and the flow's claim is settled without storing the result. The jump
   writes `headers.jumpPlanB[channel] = true` next to `jumpReplies[channel]`.
+- Without any care configuration (no `forRoot({ care })` and no `care` on any channel, flow, step,
+  activator, inbound endpoint or outbound binding) flows, activators and inbound endpoints behave
+  exactly as in 0.9.0: no message scope is opened, a `wireTap` copy keeps every header, and a reply
+  header `planB: true` neither marks a flow nor releases an idempotency claim.
 - Flow steps get an `id` (default `<kind>#<index>`); steps with care show `id`, `care` and
   `repeatableBy` in the graph, and the module lists `careProfiles`.
 

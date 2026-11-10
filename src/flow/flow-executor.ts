@@ -73,7 +73,8 @@ export class FlowExecutor {
 
   execute(input: IntegrationMessage): Promise<FlowExecutionResult> {
     const engine = this.deps.care;
-    if (engine === undefined) return this.executeInScope(input, undefined);
+    // RS-70: without any care configuration the run opens no scope, exactly as in 0.9.0.
+    if (engine?.configured !== true) return this.executeInScope(input, undefined);
     // RS-64, RS-65: one message scope per run, rebuilt from the headers (invariant 7).
     const triesLeft = engine.enabled
       ? parseTriesLeft(input.headers[TRIES_LEFT_MESSAGE_HEADER])

@@ -61,6 +61,7 @@ export class CareEngine {
   private requestReply: RequestReplyFn | undefined;
   private readonly channelCare = new Map<string, CareRefOf>();
   private readonly stopping = new AbortController();
+  private careSeen = false;
 
   constructor(
     readonly options: CareModuleOptions = {},
@@ -120,8 +121,20 @@ export class CareEngine {
   /** RS-56: records the L2 references of the declared channels (`ChannelSpec.care`). */
   declareChannels(specs: readonly { name: string; care?: CareRefOf }[]): void {
     for (const spec of specs) {
-      if (spec.care !== undefined) this.channelCare.set(spec.name, spec.care);
+      if (spec.care === undefined) continue;
+      this.channelCare.set(spec.name, spec.care);
+      this.careSeen = true;
     }
+  }
+
+  /**
+   * True once the module has any care configuration: `forRoot({ care })`, or a `care` reference
+   * resolved for a channel, flow, step, activator, inbound endpoint or outbound binding. While it
+   * is false, flows, activators and inbound endpoints keep the 0.9.0 behaviour exactly: no message
+   * scope, no plan B mark and every header copied as is (RS-70).
+   */
+  get configured(): boolean {
+    return this.enabled || this.careSeen;
   }
 
   /** L2 reference of a channel, or undefined when its spec sets none. */
@@ -155,6 +168,7 @@ export class CareEngine {
     edge: CareEdge,
     options: Omit<ResolvePlanOptions, 'profiles'> = {},
   ): CarePlan {
+    if (layers.some((layer) => layer !== undefined)) this.careSeen = true;
     const plan = resolveCarePlan(binding, layers, edge, {
       ...options,
       ...(this.options.profiles === undefined ? {} : { profiles: this.options.profiles }),

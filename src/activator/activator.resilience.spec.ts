@@ -9,7 +9,7 @@ import { createMessage } from '../message';
 import { currentTrySignal } from '../resilience/executor';
 import { CareConfigError } from '../resilience/resilience.errors';
 import type { CareEvent, CareModuleOptions } from '../resilience/resilience.types';
-import { PLAN_B_HEADER } from '../resilience/retry-budget';
+import { CareScope, PLAN_B_HEADER } from '../resilience/retry-budget';
 import { CareEngine } from '../resilience/runtime';
 import { TraceContext } from '../trace/trace-context';
 import { discoverActivators, subscribeActivators, type ActivatorDeps } from './activator-wrapper';
@@ -57,6 +57,15 @@ class FallbackActivator {
   }
 }
 
+class ScopeProbe {
+  scoped: boolean[] = [];
+
+  @ServiceActivator('probe.in')
+  run(): void {
+    this.scoped.push(CareScope.current() !== undefined);
+  }
+}
+
 function world(options: CareModuleOptions = {}) {
   const trace = new TraceContext();
   const registry = new ChannelRegistry({ trace });
@@ -79,6 +88,25 @@ function world(options: CareModuleOptions = {}) {
 }
 
 describe('@ServiceActivator care', () => {
+  it('RU-70 an activator opens a message scope only when the module has care configuration', async () => {
+    for (const enabled of [false, true]) {
+      const registry = new ChannelRegistry({ trace: new TraceContext() });
+      registry.create({ name: 'error.channel', type: 'pubsub' });
+      registry.create({ name: 'probe.in', type: 'direct' });
+      const care = new CareEngine({}, { enabled });
+      const instance = new ScopeProbe();
+      subscribeActivators(discoverActivators([instance]), {
+        registry,
+        trace: registry.trace,
+        errorChannel: 'error.channel',
+        care,
+      });
+      await registry.send('probe.in', {});
+      expect(care.configured).toBe(enabled);
+      expect(instance.scoped).toEqual([enabled]);
+    }
+  });
+
   it('RU-36a activator extra tries only when idempotent or keyed, inside one idempotency claim', async () => {
     const w = world();
     const instance = new RetryingActivator();

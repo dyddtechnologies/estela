@@ -147,9 +147,17 @@ export async function sendHop(
   });
 }
 
-/** RS-64: a reply built while plan B ran marks the waiting flow run. */
-export function markIfPlanB(reply: IntegrationMessage): void {
-  if (reply.headers[PLAN_B_HEADER] === true) CareScope.markPlanB();
+/**
+ * True when the flow run has a care scope, which it opens only while the module has care
+ * configuration (RS-70). Without one, every care behaviour of a step stays the 0.9.0 one.
+ */
+export function hasCareScope(ctx: FlowStepContext): boolean {
+  return ctx.planB !== undefined;
+}
+
+/** RS-64: a reply built while plan B ran marks the waiting flow run, when the run has a scope. */
+export function markIfPlanB(ctx: FlowStepContext, reply: IntegrationMessage): void {
+  if (hasCareScope(ctx) && reply.headers[PLAN_B_HEADER] === true) CareScope.markPlanB();
 }
 
 /**
@@ -178,7 +186,7 @@ async function jumpTry(
     copy.headers.replyChannel = replyName;
     await ctx.registry.sendMessage(channel, copy);
     const reply = await wait.promise;
-    markIfPlanB(reply);
+    markIfPlanB(ctx, reply);
     return reply.payload;
   } finally {
     current.signal?.removeEventListener('abort', cancel);

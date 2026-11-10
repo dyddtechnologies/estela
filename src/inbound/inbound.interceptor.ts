@@ -150,7 +150,8 @@ export class InboundInterceptor implements NestInterceptor {
 
   private dispatch(request: InboundRequestContext): Promise<unknown> {
     const runtime = this.deps.care;
-    if (runtime === undefined) return this.dispatchIn(request, undefined, undefined);
+    // RS-70: without any care configuration the request opens no scope, exactly as in 0.9.0.
+    if (runtime?.configured !== true) return this.dispatchIn(request, undefined, undefined);
     const triesLeft = inboundTriesLeft(request.rawHeaders, runtime);
     const value = { root: true, ...(triesLeft === undefined ? {} : { triesLeft }) };
     return CareScope.runMessage(value, (frame) => this.dispatchIn(request, frame, triesLeft));
@@ -224,7 +225,7 @@ export class InboundInterceptor implements NestInterceptor {
     if (gateway === undefined) {
       throw new InboundError('requestReply requiere ReplyGateway');
     }
-    if (this.deps.care !== undefined && hasMessageReply(gateway)) {
+    if (this.deps.care?.configured === true && hasMessageReply(gateway)) {
       const reply = await gateway.sendAndReceiveMessage(
         spec.channel,
         payload,

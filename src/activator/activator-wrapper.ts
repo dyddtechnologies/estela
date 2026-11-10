@@ -159,7 +159,8 @@ export async function invokeActivator(
   deps: ActivatorDeps,
 ): Promise<void> {
   const runtime = deps.care;
-  if (runtime === undefined) return invokeInScope(binding, scope, msg, deps, undefined);
+  // RS-70: without any care configuration the dispatch opens no scope, exactly as in 0.9.0.
+  if (runtime?.configured !== true) return invokeInScope(binding, scope, msg, deps, undefined);
   // RS-27, RS-29: one message scope per dispatch, rebuilt from the headers (invariant 7).
   const triesLeft = runtime.enabled
     ? parseTriesLeft(msg.headers[TRIES_LEFT_MESSAGE_HEADER])

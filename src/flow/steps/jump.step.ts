@@ -85,7 +85,7 @@ export class JumpStep implements FlowStep {
       hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: ephemeral-reply marker
       await ctx.registry.sendMessage(channel, hop);
       const reply = await wait.promise;
-      markIfPlanB(reply);
+      markIfPlanB(ctx, reply);
       jumpReplies[channel] = reply.payload;
     } finally {
       // A failed hop send abandons the wait: release its timer and subscription.

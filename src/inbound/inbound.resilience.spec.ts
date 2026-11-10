@@ -154,4 +154,33 @@ describe('inbound load shedding and tries left', () => {
     expect(runs).toBe(2);
     expect(await w.store.get('inbound:orders.in', 'same')).toBeUndefined();
   });
+
+  it('RU-70 without any care configuration a planB reply header is ignored and the claim is replayed, as in 0.9.0', async () => {
+    const w = world({}, false);
+    expect(w.runtime.configured).toBe(false);
+    let runs = 0;
+    w.registry.get('orders.in').subscribe(async (msg) => {
+      runs += 1;
+      await w.registry.send(msg.headers.replyChannel!, 'answer', { [PLAN_B_HEADER]: true });
+    });
+    const spec: InboundSpec = {
+      channel: 'orders.in',
+      transport: 'rest',
+      requestReply: true,
+      idempotency: { onDuplicate: 'replay' },
+    };
+    const results: unknown[] = [];
+    for (let i = 0; i < 2; i += 1) {
+      const { context } = httpContext(spec, { 'idempotency-key': 'same' });
+      results.push(await lastValueFrom(await w.interceptor.intercept(context, next())));
+    }
+    expect(runs).toBe(1);
+    expect(results).toEqual([
+      expect.objectContaining({ result: 'answer' }),
+      expect.objectContaining({ result: 'answer' }),
+    ]);
+    expect((await w.store.get('inbound:orders.in', 'same'))?.result).toEqual({
+      cachedResult: 'answer',
+    });
+  });
 });
