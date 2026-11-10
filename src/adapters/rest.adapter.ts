@@ -1,6 +1,7 @@
 import type { MessageHandlerFn, Unsubscribe } from '../channel';
 import { HttpHeaderMapper } from './header-mapper';
 import type { ChannelRegistry } from '../channel-registry';
+import { urlForTrail } from '../sensitive/privacy-engine';
 
 /** fetch estructural — evita depender del lib DOM para el tipo global. */
 export interface RestFetchResponse {
@@ -46,7 +47,8 @@ export function bindRestOut(
       body: JSON.stringify(msg.payload),
     });
     if (!response.ok) {
-      throw new Error(`restOut ${method} ${options.url} → HTTP ${response.status}`);
+      // SD-05: the message never carries userinfo, the query string or the fragment.
+      throw new Error(`restOut ${method} ${urlForTrail(options.url)} → HTTP ${response.status}`);
     }
     await response.text(); // drena el body; el resultado util viaja por channels
     return undefined;
