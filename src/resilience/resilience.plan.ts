@@ -107,6 +107,8 @@ export interface CarePlan {
   /** True when a level set `eachTryMs` (shown in the graph summary). */
   readonly patienceExplicit: boolean;
   readonly totalMs?: number;
+  /** True when the effective patience comes from the 0.9.0 `timeoutMs` spelling (RS-69). */
+  readonly legacyPatience?: boolean;
   readonly tries?: TriesPlan;
   readonly valve?: ValvePlan;
   readonly lanes?: LanesPlan;
@@ -388,16 +390,22 @@ function resolvePatience(
   c: Checker,
   layered: Layered,
   defaultEachTryMs: number,
-): Pick<CarePlan, 'eachTryMs' | 'totalMs' | 'patienceExplicit'> {
+): Pick<CarePlan, 'eachTryMs' | 'totalMs' | 'patienceExplicit' | 'legacyPatience'> {
   if (!layered.explicit || !layered.enabled) {
     return { eachTryMs: defaultEachTryMs, patienceExplicit: false };
   }
   const { eachTryMs, totalMs } = layered.options as Patience;
   const legacy = (layered.top as LegacyPatience | undefined)?.[LEGACY_ALIAS] === true;
-  const out: { eachTryMs: number; totalMs?: number; patienceExplicit: boolean } = {
+  const out: {
+    eachTryMs: number;
+    totalMs?: number;
+    patienceExplicit: boolean;
+    legacyPatience?: boolean;
+  } = {
     eachTryMs: defaultEachTryMs,
     patienceExplicit: eachTryMs !== undefined,
   };
+  if (legacy) out.legacyPatience = true;
   // The 0.9.0 spelling keeps the 0.9.0 rule (any finite number >= 0), validated by its edge.
   if (eachTryMs !== undefined) {
     out.eachTryMs = legacy ? eachTryMs : c.int('patience.eachTryMs', eachTryMs, 0, MAX_BACKOFF_MS);

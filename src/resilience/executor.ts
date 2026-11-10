@@ -210,7 +210,10 @@ export class CareExecutor<T = unknown> {
     }
     this.assertIdempotencyKey(ctx);
     const keys = this.resolveKeys(ctx);
-    const endsAt = this.plan.totalMs === undefined ? Infinity : started + this.plan.totalMs;
+    const endsAt = Math.min(
+      this.plan.totalMs === undefined ? Infinity : started + this.plan.totalMs,
+      this.enclosingDeadline(),
+    );
     const state: CallState = { tries: 0 };
     try {
       const value = await this.withLanes(ctx, endsAt, state, () =>
@@ -334,6 +337,15 @@ export class CareExecutor<T = unknown> {
     );
   }
 
+  /**
+   * RS-69: the total patience of an executor running in the same async chain bounds this call
+   * too. A plan in the 0.9.0 spellings ignores it, so it keeps its 0.9.0 timing.
+   */
+  private enclosingDeadline(): number {
+    if (this.plan.legacyPatience === true || this.plan.tries?.legacy !== undefined) return Infinity;
+    return CareScope.current()?.deadlineAt ?? Infinity;
+  }
+
   // ---------- Tries left ----------
 
   private incomingTriesLeft(ctx: CareContext): number | undefined {
@@ -399,7 +411,12 @@ export class CareExecutor<T = unknown> {
         throw this.outOfTime(tctx, tryNumber - 1, lastError);
       }
       try {
-        const value = await this.runTry(tctx, Math.min(limit, remaining), triesLeftOut, run);
+        const value = await this.runTry(
+          tctx,
+          { eachTryMs: Math.min(limit, remaining), endsAt },
+          triesLeftOut,
+          run,
+        );
         this.valves?.success(admission);
         this.observer.counter('estela_care_tries_total', { ...this.labels, class: 'success' });
         return value;
@@ -504,12 +521,16 @@ export class CareExecutor<T = unknown> {
 
   private runTry(
     ctx: CareContext,
-    eachTryMs: number,
+    bounds: { eachTryMs: number; endsAt: number },
     triesLeftOut: number | undefined,
     run: (current: CareTry) => Promise<T>,
   ): Promise<T> {
+    const { eachTryMs, endsAt } = bounds;
     this.adapter.outgoingTriesLeft?.(triesLeftOut);
-    const scoped = { ...(triesLeftOut === undefined ? {} : { triesLeft: triesLeftOut }) };
+    const scoped = {
+      ...(triesLeftOut === undefined ? {} : { triesLeft: triesLeftOut }),
+      ...(Number.isFinite(endsAt) ? { deadlineAt: endsAt } : {}),
+    };
     return withAttemptTimeout(
       this.clock,
       eachTryMs,

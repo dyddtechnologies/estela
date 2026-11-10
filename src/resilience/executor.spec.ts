@@ -11,6 +11,7 @@ import {
   OverPaceError,
   CareKeyError,
 } from './resilience.errors';
+import { LEGACY_ALIAS } from './resilience.plan';
 import { CareScope } from './retry-budget';
 import {
   ctxOf,
@@ -674,6 +675,63 @@ describe('CareExecutor', () => {
       .catch(() => undefined);
     expect(calls).toBe(1);
     expect(h.events.filter((e) => e.type === 'try.held')).toHaveLength(1);
+  });
+
+  it('RU-69 a nested executor in the same async chain caps its total patience at the outer one, and a legacy-alias plan ignores it', async () => {
+    const clock = manualCareClock();
+    const outer = harness({ patience: { totalMs: 1000 } }, { clock });
+    const inner = harness(
+      { patience: { totalMs: 5000 }, tries: { max: 3, spacing: 600, idempotent: true } },
+      { clock, binding: 'inner' },
+    );
+    const innerTries: { at: number; eachTryMs: number }[] = [];
+    let innerError: unknown;
+    const p = settle(
+      outer.exec.execute(ctxOf(), () =>
+        inner.exec
+          .execute(ctxOf('inner'), (attempt) => {
+            innerTries.push({ at: clock.monotonic(), eachTryMs: attempt.eachTryMs });
+            return new Promise<never>((_r, reject) =>
+              clock.setTimer(300, () => reject(transient('slow'))),
+            );
+          })
+          .catch((error: unknown) => {
+            innerError = error;
+            throw error;
+          }),
+      ),
+    );
+    await clock.advance(999);
+    expect(innerError).toBeUndefined();
+    await clock.advance(1);
+    expect(innerTries).toEqual([
+      { at: 0, eachTryMs: 1000 },
+      { at: 900, eachTryMs: 100 },
+    ]);
+    expect(innerError).toBeInstanceOf(OutOfTimeError);
+    expect((innerError as OutOfTimeError).binding).toBe('inner');
+    expect(p.error).toBeInstanceOf(OutOfTimeError);
+    // Outside any executor the scope carries no deadline.
+    expect(CareScope.current()?.deadlineAt).toBeUndefined();
+
+    const legacyClock = manualCareClock();
+    const legacyOuter = harness({ patience: { totalMs: 1000 } }, { clock: legacyClock });
+    const legacy = harness(
+      { patience: { eachTryMs: 5000, [LEGACY_ALIAS]: true } as never },
+      { clock: legacyClock, binding: 'legacy' },
+    );
+    const legacyWaits: number[] = [];
+    const q = settle(
+      legacyOuter.exec.execute(ctxOf(), () =>
+        legacy.exec.execute(ctxOf('legacy'), (attempt) => {
+          legacyWaits.push(attempt.eachTryMs);
+          return Promise.resolve('ok');
+        }),
+      ),
+    );
+    await legacyClock.advance(0);
+    expect(legacyWaits).toEqual([5000]);
+    expect(q.value).toMatchObject({ value: { value: 'ok' } });
   });
 
   it('RU-36b exposes the try signal through currentTrySignal', async () => {

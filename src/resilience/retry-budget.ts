@@ -30,6 +30,8 @@ export function parseTriesLeft(raw: unknown): number | undefined {
 interface ScopeFrame {
   triesLeft?: number;
   signal?: AbortSignal;
+  /** Monotonic end of the enclosing executor's total patience (RS-69); try frames only. */
+  deadlineAt?: number;
   fromEventsChannel: boolean;
   planB: boolean;
   /** Message frames bound the plan B mark; try frames only carry tries left and signal. */
@@ -42,6 +44,8 @@ interface ScopeFrame {
 export interface CareScopeValue {
   triesLeft?: number;
   signal?: AbortSignal;
+  /** Monotonic end of the enclosing executor's total patience (RS-69). */
+  deadlineAt?: number;
   fromEventsChannel?: boolean;
   planB?: boolean;
 }
@@ -56,6 +60,7 @@ function view(frame: ScopeFrame | undefined): CareScopeValue | undefined {
   };
   if (frame.triesLeft !== undefined) value.triesLeft = frame.triesLeft;
   if (frame.signal !== undefined) value.signal = frame.signal;
+  if (frame.deadlineAt !== undefined) value.deadlineAt = frame.deadlineAt;
   return value;
 }
 
@@ -68,8 +73,15 @@ export class CareScope {
     return view(storage.getStore());
   }
 
-  /** Try frame: tries left and signal for nested executors; the plan B mark goes to the parent. */
-  static run<T>(value: { triesLeft?: number; signal?: AbortSignal }, fn: () => T): T {
+  /**
+   * Try frame: tries left, signal and deadline for nested executors in the same async chain; the
+   * plan B mark goes to the parent. A message frame (`runMessage`) never carries the deadline, so
+   * it does not cross a channel hop (RS-69, invariant 7).
+   */
+  static run<T>(
+    value: { triesLeft?: number; signal?: AbortSignal; deadlineAt?: number },
+    fn: () => T,
+  ): T {
     const parent = storage.getStore();
     const frame: ScopeFrame = {
       fromEventsChannel: parent?.fromEventsChannel ?? false,
@@ -77,6 +89,7 @@ export class CareScope {
     };
     if (value.triesLeft !== undefined) frame.triesLeft = value.triesLeft;
     if (value.signal !== undefined) frame.signal = value.signal;
+    if (value.deadlineAt !== undefined) frame.deadlineAt = value.deadlineAt;
     if (parent !== undefined) frame.parent = parent;
     return storage.run(frame, fn);
   }
