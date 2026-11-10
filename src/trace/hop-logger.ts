@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
 import type { MessageHeaders } from '../message';
+import type { PrivacyEngine } from '../sensitive/privacy-engine';
+import { errorForLog } from './trail';
 
 /**
  * Opt-in runtime logging that brackets every flow and every activator hop, so
@@ -23,7 +25,14 @@ export class HopLogger {
   private readonly logger = new Logger('IntegrationRuntime');
   private readonly level: HopLogLevel;
 
-  constructor(level: HopLogLevel = 'log') {
+  /**
+   * `privacy`: the module engine (SPI-433). Without it the error line applies the baseline
+   * (section 2); hop start and end lines never carry a payload.
+   */
+  constructor(
+    level: HopLogLevel = 'log',
+    private readonly privacy?: PrivacyEngine,
+  ) {
     this.level = level;
   }
 
@@ -54,10 +63,7 @@ export class HopLogger {
 
   /** Always logged at error level, regardless of the configured hop level. */
   hopError(channel: string, target: string, h: MessageHeaders, error: unknown): void {
-    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    this.logger.error(
-      `✖ hop ${channel} ${target} ERROR ${reason} [${this.tag(h)}]`,
-      error instanceof Error ? error.stack : undefined,
-    );
+    const { reason, stack } = errorForLog(this.privacy, error, { channel });
+    this.logger.error(`✖ hop ${channel} ${target} ERROR ${reason} [${this.tag(h)}]`, stack);
   }
 }
