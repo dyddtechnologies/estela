@@ -3,6 +3,7 @@ import type { IntegrationMessage } from '../message';
 import { ChannelError } from '../channel';
 import type { IdempotencyStore } from '../idempotency/idempotency-store';
 import type { InboundCare, CareRefOf } from '../resilience/resilience.types';
+import type { PrivacyRef, Remember } from '../sensitive/privacy.types';
 
 /** Transportes inbound (spec sec.7.2 + extension GraphQL ADR-015). */
 export type InboundTransport = 'rest' | 'grpc' | 'rabbit' | 'graphql';
@@ -34,6 +35,8 @@ export interface InboundSpec {
    * a missing header is skipped. Reserved message headers are refused; refused on Rabbit.
    */
   carryHeaders?: readonly string[] | Readonly<Record<string, string>>;
+  /** Endpoint privacy (SPI-433): rules for its records, envelopes and log lines. */
+  privacy?: PrivacyRef;
 }
 
 export const INBOUND_SPEC_METADATA = 'integration:inbound-spec';
@@ -279,6 +282,12 @@ export interface InboundIdempotencyOptions {
    * endpoint.
    */
   forward?: 'raw' | 'resolved' | 'none';
+  /**
+   * What the record keeps (SPI-433, 8.2). Default `Remember.Everything` without an explicit
+   * privacy, `Remember.OutcomeOnly` with one. `Remember.Everything` written here needs
+   * `rememberReason` in a privacy reference of the endpoint.
+   */
+  remember?: Remember;
 }
 
 /** Module-wide defaults (`IntegrationModule.forRoot({ inbound })`); endpoints override them. */
@@ -287,4 +296,6 @@ export interface InboundDefaults {
   idempotency?: false | InboundIdempotencyOptions;
   /** Module-wide inbound care (RS-37); endpoints override it part by part. */
   care?: CareRefOf<InboundCare>;
+  /** Privacy of every inbound endpoint, between the module and the channel (SPI-433, 6.6). */
+  privacy?: PrivacyRef;
 }

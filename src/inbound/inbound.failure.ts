@@ -130,6 +130,19 @@ export class HttpExceptionFailureCodec implements InboundFailureCodec {
   }
 }
 
+/**
+ * `Remember.OutcomeOnly` (SPI-433, 8.2): a stored failure keeps `{ kind, status }` or
+ * `{ kind, name }` only; a replay rethrows the status with a generic body.
+ */
+export function outcomeOnlyFailure(serialized: unknown): unknown {
+  const data = (typeof serialized === 'object' && serialized !== null ? serialized : {}) as Record<
+    string,
+    unknown
+  >;
+  if (data.kind === 'http') return { kind: 'http', status: data.status };
+  return { kind: 'error', name: typeof data.name === 'string' ? data.name : 'Error' };
+}
+
 /** Record written by the `store` action; read back by `readStoredFailure`. */
 export function wrapStoredFailure(data: unknown): Record<string, unknown> {
   return { [INBOUND_STORED_FAILURE_KEY]: { v: 1, data } };
