@@ -1,6 +1,6 @@
 # ESTELA flow parameter model (shared by SPI-433, SPI-429, SPI-445 and the KA- adoption spec)
 
-Status: proposal. It is checked against the code at `estela-wt-SPI-428` (0.9.0). It does not replace any rule in the three library specs. It names the levels, the merge rule for each concern, the profile references, and the option shapes a flow author writes. Each spec should link this model instead of restating these rules.
+Status: proposal. It is checked against the code at `estela-wt-SPI-428` (0.9.0). Amended 2026-11-10: the care concern (SPI-445) uses the Estela-own vocabulary (decision FP-D1). It does not replace any rule in the three library specs. It names the levels, the merge rule for each concern, the profile references, and the option shapes a flow author writes. Each spec should link this model instead of restating these rules.
 
 The normative requirements live in the library specs: `ESTELA_SENSITIVE_DATA_SPEC.md` section 18 (SPI-433, which also ships the shared scaffolding, SD-67), `ESTELA_RESILIENCE_SPEC.md` section 2.13 (SPI-445) and `ESTELA_MULTI_REPLICA_SPEC.md` section 16 (SPI-429). When this document and a spec disagree, the spec wins and this document is corrected. This file is the proposed answer to the location question (SD Q12, RS OQ-16, MR OQ-14).
 
@@ -26,7 +26,7 @@ The normative requirements live in the library specs: `ESTELA_SENSITIVE_DATA_SPE
 | Saga outbound | `.outbound(name, run, { compensate?, compensateLocks? })` | `saga/saga.ts:66-72,124` |
 | Graph | `GET /integration/graph`; `recordFlow` stores each step's `describe()` | `graph/channel-graph.controller.ts:15`, `graph/channel-graph.ts:125-128` |
 
-None of the flow DSL methods accepts a resilience, sensitive or idempotency option today. This model adds them. Every addition is an optional trailing parameter.
+None of the flow DSL methods accepts a care, sensitive or idempotency option today. This model adds them. Every addition is an optional trailing parameter.
 
 ## 1. Levels and precedence
 
@@ -38,7 +38,7 @@ None of the flow DSL methods accepts a resilience, sensitive or idempotency opti
 | L4 | **step / endpoint** | a DSL step option; one fanout or jump target; `@ServiceActivator`; `@InboundRest`/`@InboundGrpc` spec; `OutboundRestBinding`/`@OutboundRest`; a saga `.outbound` step. |
 | L3 | **flow** | `IntegrationFlow.from(source, options)` (new, section 3.2) |
 | L2 | **channel** | `ChannelSpec` in `forRoot({ channels })` |
-| L1 | **module** | `forRoot({ resilience, sensitive, idempotency, replicas, outbound.rest.defaults, inbound })` |
+| L1 | **module** | `forRoot({ care, sensitive, idempotency, replicas, outbound.rest.defaults, inbound })` |
 | L0 | **built-in** | the defaults in each spec (for example RS-01 "no primitive, one attempt"; SD baseline `secrets@1`; MR `'fail-closed'`, `'single'`) |
 
 **Which channel is L2:**
@@ -46,13 +46,13 @@ None of the flow DSL methods accepts a resilience, sensitive or idempotency opti
 - For `handle`, `filter`, `transform` and the flow claim, it is the flow's **source** channel.
 - For an activator or inbound endpoint, it is its own channel.
 
-**Runtime caps are not levels.** The remaining deadline, the incoming `x-retry-budget` (RS-29..31), and a `sideEffects` channel's fail-closed rule (MR) only narrow a resolved value. They never widen it.
+**Runtime caps are not levels.** The remaining deadline, the incoming `x-tries-left` (RS-29..31), and a `sideEffects` channel's fail-closed rule (MR) only narrow a resolved value. They never widen it.
 
 ### 1.2 Merge semantics per concern
 
 | Concern | Across levels | Inside one reference (`use` plus inline) | `false` |
 |---|---|---|---|
-| **Resilience** | **Per-primitive replace.** The highest level that sets `timeout`, `retry`, `circuitBreaker`, `bulkhead`, `rateLimit`, `fallback` or `classify` owns that key whole. Other primitives keep inheriting. There is no field-level merge across levels, which matches today's "not inherited when a binding passes an object" (`outbound.types.ts:250,268`). | **Deep merge, one time only.** Inline fields merge into the named profile's primitive field by field. Arrays and functions replace. `false` replaces. | `resilience: false` means no policy at this level and below: one direct attempt. `retry: false` disables only that primitive. |
+| **Care** | **Per-part replace.** The highest level that sets `patience`, `tries`, `valve`, `lanes`, `pace`, `planB` or `classify` owns that key whole. Other parts keep inheriting. There is no field-level merge across levels, which matches today's "not inherited when a binding passes an object" (`outbound.types.ts:250,268`). | **Deep merge, one time only.** Inline fields merge into the named profile's part field by field. Arrays and functions replace. `false` replaces. | `care: false` means no care at this level and below: one direct try. `tries: false` disables only that part. |
 | **Sensitive** | **Union, stricter wins** (SD-17, unchanged). `fields`, `headers`, `patterns` and `packs` are unioned. Per path, the stricter mode wins. `allow` is the only way to weaken, and it applies to its own level and the levels inside it. `storeMode` comes from the most specific level that sets it. | Same union rule. A list `use: ['pii','secrets']` unions the profiles in order. | Only valid at L1 (`forRoot({ sensitive: false })`, the existing switch). At L2..L5 it is a boot error (`SENSITIVE_FALSE_BELOW_MODULE`). Use `allow` with a `reason` instead. |
 | **Idempotency / store** | **Per-key replace** (`ttlMs`, `store`, `onStoreUnavailable`, `scope`, `key`). | Not applicable. Stores are referenced by name only. | `idempotency: false` turns off this level's claim only. It never turns off an outer claim, such as the flow claim under a step claim. |
 | **Replicas** | **Module only.** `replicas` exists only at L1, or through `ESTELA_REPLICAS` (MR-22). | Not applicable. | Not applicable. |
@@ -69,7 +69,7 @@ None of the flow DSL methods accepts a resilience, sensitive or idempotency opti
 // Profile names: ^[a-z0-9][a-z0-9._-]{0,63}$ (the grammar of PatternRule.name).
 export type ProfileName = string;
 
-export interface NamedResiliencePolicy extends ResiliencePolicy {
+export interface CareProfile extends Care {
   /** Single inheritance, resolved at boot; cycles and depth > 8 fail boot. */
   extends?: ProfileName;
 }
@@ -78,10 +78,10 @@ export interface NamedSensitivePolicy extends SensitivePolicy {
 }
 
 // forRoot additions (all optional, additive)
-export interface ResilienceModuleOptions /* SPI-445 3.1 */ {
-  policies?: Readonly<Record<ProfileName, NamedResiliencePolicy>>;
-  /** L1 defaults per edge kind; a value is a profile name or an inline policy. */
-  defaults?: Partial<Record<ResilienceEdgeKind, ResilienceRef>>;
+export interface CareModuleOptions /* SPI-445 3.1 */ {
+  profiles?: Readonly<Record<ProfileName, CareProfile>>;
+  /** L1 defaults per edge; a value is a profile name or an inline `Care`. */
+  defaults?: Partial<Record<CareEdge, CareRef>>;
 }
 export interface SensitiveModuleOptions /* SPI-433 4.1 */ {
   profiles?: Readonly<Record<ProfileName, NamedSensitivePolicy>>;
@@ -93,13 +93,13 @@ export interface IntegrationIdempotencyOptions /* SPI-429 3.13 */ {
 }
 
 // References accepted at L2..L5
-export type ResilienceRef =
+export type CareRef =
   | ProfileName
-  | (ResiliencePolicy & { use?: ProfileName })
+  | (Care & { use?: ProfileName })
   | false;
-export type InboundResilienceRef =
-  | ProfileName                      // profile must hold only bulkhead/rateLimit (RS-37)
-  | (InboundResiliencePolicy & { use?: ProfileName })
+export type InboundCareRef =
+  | ProfileName                      // profile must hold only lanes/pace (RS-37)
+  | (InboundCare & { use?: ProfileName })
   | false;
 export type SensitiveRef =
   | ProfileName
@@ -113,18 +113,18 @@ export type SensitiveRef =
 export type StoreRef = ProfileName | IdempotencyStore | InboundProviderRef<IdempotencyStore>;
 ```
 
-New edge kinds extend `ResilienceEdgeKind` (SPI-445 3.1): `'flow-handle' | 'flow-jump' | 'flow-send'`. The defaults map uses them as keys.
+New edge kinds extend `CareEdge` (SPI-445 3.1): `'flow-handle' | 'flow-jump' | 'flow-send'`. The defaults map uses them as keys.
 
 Example:
 
 ```ts
 IntegrationModule.forRoot({
-  resilience: {
-    policies: {
-      'http-std': { timeout: { perAttemptMs: 2000, deadlineMs: 8000 }, retry: { maxAttempts: 3 } },
-      'http-guarded': { extends: 'http-std', circuitBreaker: { openMs: 30000 } },
-      'jump-sla': { timeout: { perAttemptMs: 3000 }, retry: { maxAttempts: 2 },
-                    fallback: { value: () => ({ status: 'unknown' }) } },
+  care: {
+    profiles: {
+      'http-std': { patience: { eachTryMs: 2000, totalMs: 8000 }, tries: { max: 3 } },
+      'http-guarded': { extends: 'http-std', valve: { shutMs: 30000 } },
+      'jump-sla': { patience: { eachTryMs: 3000 }, tries: { max: 2 },
+                    planB: { value: () => ({ status: 'unknown' }) } },
     },
     defaults: { 'outbound-rest': 'http-std', 'flow-jump': 'jump-sla' },
   },
@@ -139,7 +139,7 @@ IntegrationModule.forRoot({
   replicas: 'multi',
   channels: [
     { name: 'payments.charge', type: 'direct', sideEffects: true,
-      sensitive: 'card', resilience: 'http-guarded', idempotency: { store: 'ledger' } },
+      sensitive: 'card', care: 'http-guarded', idempotency: { store: 'ledger' } },
   ],
 });
 ```
@@ -168,35 +168,35 @@ export interface StepIdempotencyOptions {
 
 /** A target of fanoutTo / jumpTo (extends today's FanoutTargetInput). */
 export interface FlowTarget extends FanoutTargetInput {
-  resilience?: ResilienceRef;
+  care?: CareRef;
   sensitive?: SensitiveRef;
 }
 export type FlowDest = string | FlowTarget;
 ```
 
-| DSL method (new signature) | `resilience` | `sensitive` | `idempotency` | Notes |
+| DSL method (new signature) | `care` | `sensitive` | `idempotency` | Notes |
 |---|---|---|---|---|
 | `filter(predicate, opts?: StepCommonOptions)` | no | yes | no | A pure function: retrying it adds nothing. |
 | `transform(fn, opts?: StepCommonOptions)` | no | yes, and `apply: 'mask-payload'` | no | Use `handle` for side effects. |
-| `handle(fn, opts?: StepCommonOptions & { resilience?: ResilienceRef; idempotency?: false \| StepIdempotencyOptions })` | yes, all primitives (`flow-handle`, `defaultInProcessClassifier`) | yes, and mask-payload on its output | yes | Retry happens between the step `claim` and `complete`, so it never claims twice (same shape as RS-36). |
+| `handle(fn, opts?: StepCommonOptions & { care?: CareRef; idempotency?: false \| StepIdempotencyOptions })` | yes, all parts (`flow-handle`, `defaultInProcessClassifier`) | yes, and mask-payload on its output | yes | Retry happens between the step `claim` and `complete`, so it never claims twice (same shape as RS-36). |
 | `wireTap(channel, opts?: StepCommonOptions & { redact?: boolean; redactReason?: string })` | **never** | yes; the tap copy is always redacted | no | See rule 4.1. `redact: false` needs `redactReason`. |
-| `fanoutTo(dests: FlowDest[], opts?: StepCommonOptions & { resilience?: ResilienceRef })` | yes, per target (`flow-send`); no `fallback` | yes, per target | inherited from the message key | `wait: false` targets: resilience still applies, but failures still go to error.channel (`forget.ts:15-24`). |
-| `jumpTo(dests: FlowDest[], opts?: …same)` and `jump(channel, { wait?, timeoutMs?, resilience?, sensitive?, id? })` | yes, all primitives (`flow-jump`); `fallback` only on awaited targets | yes | inherited | See rule 4.5. |
-| `publish(channel, routingKey?, opts?)` and `publish(channel, opts)` | yes (`flow-send`); no `fallback` | yes, and mask-payload on the hop copy | inherited | Overload: a string second argument is the routing key. |
-| `route(fn, opts?: StepCommonOptions & { resilience?: ResilienceRef })` | yes, per resolved target; no `fallback` | yes | inherited | The policy is resolved per target channel at run time. Profile names are still validated at boot. |
-| `to(channel, opts?: StepCommonOptions & { resilience?: ResilienceRef })` | yes (`flow-send`); `fallback` only as `{ channel }` | yes, and mask-payload | inherited | Terminates the flow, as today (`to.step.ts:23`). |
+| `fanoutTo(dests: FlowDest[], opts?: StepCommonOptions & { care?: CareRef })` | yes, per target (`flow-send`); no `planB` | yes, per target | inherited from the message key | `wait: false` targets: resilience still applies, but failures still go to error.channel (`forget.ts:15-24`). |
+| `jumpTo(dests: FlowDest[], opts?: …same)` and `jump(channel, { wait?, timeoutMs?, care?, sensitive?, id? })` | yes, all parts (`flow-jump`); `planB` only on awaited targets | yes | inherited | See rule 4.5. |
+| `publish(channel, routingKey?, opts?)` and `publish(channel, opts)` | yes (`flow-send`); no `planB` | yes, and mask-payload on the hop copy | inherited | Overload: a string second argument is the routing key. |
+| `route(fn, opts?: StepCommonOptions & { care?: CareRef })` | yes, per resolved target; no `planB` | yes | inherited | The policy is resolved per target channel at run time. Profile names are still validated at boot. |
+| `to(channel, opts?: StepCommonOptions & { care?: CareRef })` | yes (`flow-send`); `planB` only as `{ channel }` | yes, and mask-payload | inherited | Terminates the flow, as today (`to.step.ts:23`). |
 | `reply(options?: ReplyOptions & { id?: string })` | no | no | no | The reply payload goes to the caller, so it is never redacted (rule 4.4). |
 
 `ReplyOptions` keeps `payload` (`reply.step.ts:3-6`).
 
-On `jump` and `jumpTo`, a target's `timeoutMs` is the **legacy alias** of `resilience.timeout.perAttemptMs`. Setting both on the same target is refused (`LEGACY_AND_NEW_SAME_LAYER`, the RS-35 rule).
+On `jump` and `jumpTo`, a target's `timeoutMs` is the **0.9.0 spelling** of `care.patience.eachTryMs`. Setting both on the same target is refused (`LEGACY_AND_NEW_SAME_LAYER`, the RS-35 rule).
 
 ### 3.2 Flow-level defaults (L3)
 
 ```ts
 export interface FlowOptions {
-  /** Per step family: one flow default cannot leak a primitive into a step that refuses it. */
-  resilience?: { handle?: ResilienceRef; jump?: ResilienceRef; send?: ResilienceRef };
+  /** Per step family: one flow default cannot leak a part into a step that refuses it. */
+  care?: { handle?: CareRef; jump?: CareRef; send?: CareRef };
   sensitive?: SensitiveRef;                      // apply: 'mask-payload' refused here
   idempotency?: false | { ttlMs?: number; store?: StoreRef; onStoreUnavailable?: StoreUnavailablePolicy; scope?: string };
 }
@@ -218,12 +218,12 @@ export interface ChannelSpec {
   sideEffects?: boolean;                          // SPI-429 (floor: fail-closed)
   sensitive?: SensitiveRef;                       // SPI-433 (was SensitivePolicy; widened to refs)
   /** Default for flow steps that send INTO this channel and for activators ON it. */
-  resilience?: ResilienceRef;
+  care?: CareRef;
   idempotency?: { store?: StoreRef; ttlMs?: number; onStoreUnavailable?: StoreUnavailablePolicy };
 }
 ```
 
-Channel `resilience` is never applied to inbound endpoints. Inbound endpoints accept only load shedding (RS-37), and that comes from `InboundDefaults` or `InboundSpec`.
+Channel `care` is never applied to inbound endpoints. Inbound endpoints accept only `lanes` and `pace` (RS-37), and that comes from `InboundDefaults` or `InboundSpec`.
 
 ### 3.4 Decorators and adapters (L4)
 
@@ -231,62 +231,62 @@ Channel `resilience` is never applied to inbound endpoints. Inbound endpoints ac
 // decorators.ts
 export interface ActivatorOptions {
   group?: string; routingKey?: string;
-  resilience?: ResilienceRef;            // RS-36 semantics
+  care?: CareRef;            // RS-36 semantics
   sensitive?: SensitiveRef;              // SD scope activator:<Class>.<method>
   idempotency?: { store?: StoreRef; ttlMs?: number; onStoreUnavailable?: StoreUnavailablePolicy };
 }
 // inbound/inbound.types.ts (InboundRest / InboundGrpc / InboundGraphQL)
-export interface InboundSpec { /* existing */ resilience?: InboundResilienceRef; sensitive?: SensitiveRef }
+export interface InboundSpec { /* existing */ care?: InboundCareRef; sensitive?: SensitiveRef }
 export interface InboundIdempotencyOptions { /* existing */ store?: StoreRef /* name allowed */; storeMode?: StoreMode; onStoreUnavailable?: StoreUnavailablePolicy }
-export interface InboundDefaults { /* existing */ resilience?: InboundResilienceRef; sensitive?: SensitiveRef }
+export interface InboundDefaults { /* existing */ care?: InboundCareRef; sensitive?: SensitiveRef }
 // outbound/outbound.types.ts
-export interface OutboundRestOptions { /* existing */ resilience?: ResilienceRef; sensitive?: SensitiveRef }
-export interface OutboundRestCallOptions { /* existing */ resilience?: ResilienceRef /* RS-33 limits */; sensitive?: SensitiveRef }
+export interface OutboundRestOptions { /* existing */ care?: CareRefOf<OutboundRestCare>; sensitive?: SensitiveRef }
+export interface OutboundRestCallOptions { /* existing */ care?: CareRefOf<OutboundRestCare> /* RS-33 limits */; sensitive?: SensitiveRef }
 // adapters/grpc.adapter.ts (the engine is wired by SPI-430; the shape is fixed here)
-bindGrpcOut(registry, fromChannel, stub, options?: { replyChannel?: string; id?: string; resilience?: ResilienceRef; sensitive?: SensitiveRef })
+bindGrpcOut(registry, fromChannel, stub, options?: { replyChannel?: string; id?: string; care?: CareRef; sensitive?: SensitiveRef })
 // saga/saga.ts
-export interface OutboundOptions<Ctx, Tx> { /* existing */ resilience?: ResilienceRef }   // profile with fallback => SagaDefinitionError
+export interface OutboundOptions<Ctx, Tx> { /* existing */ care?: CareRef }   // profile with planB => SagaDefinitionError
 SagaRunnerOptions.sensitive.policy?: SensitiveRef   // names resolve only when `runtime` is passed
 ```
 
-`@InboundRabbit` with any `resilience` is a boot error (RS-37).
+`@InboundRabbit` with any `care` is a boot error (RS-37).
 
 ## 4. Semantic rules
 
-**4.1 wireTap never carries resilience.**
+**4.1 wireTap never carries care.**
 - The type has no field for it.
-- A JS caller passing `resilience` gets `FlowDefinitionError(WIRETAP_RESILIENCE)` when the flow is built.
-- Flow and channel resilience defaults skip wireTap, including a channel default on the tap's destination channel.
+- A JS caller passing `care` gets `FlowDefinitionError(WIRETAP_CARE)` when the flow is built.
+- Flow and channel `care` defaults skip wireTap, including a channel default on the tap's destination channel.
 - The tap stays fire-and-forget and swallows failures (`wire-tap.step.ts:16`).
-- The tap copy does not consume or forward the retry budget: the `retryBudget` header is removed from the copy.
+- When the module has care, the tap copy does not spend or forward the tries left: the `triesLeft` header is removed from the copy.
 
-**4.2 A step retries only under an idempotency key.** An attempt after the first runs only when one of these holds:
+**4.2 A step tries again only under an idempotency key.** A try after the first runs only when one of these holds:
 - (a) the message carries `headers.idempotencyKey` (propagated by `nextHop`, `message.ts:155`);
 - (b) the step's `idempotency.key` resolves a non-empty key;
-- (c) the step's policy declares `retry.idempotent: true`. This is the RS-09/RS-36 escape hatch. It is logged at boot and shown in the graph as `retryGate: 'declared'`.
+- (c) the step's care declares `tries.idempotent: true`. This is the RS-09/RS-36 escape hatch. It is logged at boot and shown in the graph as `repeatableBy: 'declared'`.
 
-Otherwise `maxAttempts` is reduced to 1 at run time and `retry.suppressed` is emitted. A step policy with `retry.requireIdempotencyKey: true` fails before the first attempt instead (RS-48).
+Otherwise `tries.max` is reduced to 1 at run time and `try.held` is emitted. Step care with `tries.requireIdempotencyKey: true` fails before the first try instead (RS-48).
 
-Boot warning `RETRY_WITHOUT_KEY_GATE`: `maxAttempts > 1` on a step whose flow has no idempotency and no `idempotent: true`.
+Boot warning `TRIES_WITHOUT_KEY`: `tries.max > 1` on a step whose flow has no idempotency and no `idempotent: true`.
 
-Boot warning `RETRY_STACKED`: a send-step retry toward a channel whose bound activator or outbound binding also retries. The retry budget (RS-29..31) bounds the amplification at run time.
+Boot warning `TRIES_STACKED`: a send step with extra tries toward a channel whose bound activator or outbound binding also tries again. Tries left (RS-29..31) bound the amplification at run time.
 
-**4.3 A fallback result is never stored as an idempotent result** (RS-27). When any `fallback` fires during a run, `ResilienceScope.markDegraded()` marks the scope. On a degraded run:
+**4.3 A plan B answer is never stored as an idempotent result** (RS-27). When any `planB` fires during a run, `CareScope.markPlanB()` marks the scope. On a marked run:
 - the step claim and the flow claim settle with `fail` (or `release` when the store has it), not `complete`, so a redelivery with the same key runs again;
 - an activator never writes `cachedResult` (`activator-wrapper.ts:99-104`);
 - inbound `onDuplicate: 'replay'` never replays it.
 
-`fallback.cacheable: true` is the only opt-out. It is logged at boot.
+`planB.cacheable: true` is the only opt-out. It is logged at boot.
 
-The fallback value:
-- on `jump`, lands in `headers.jumpReplies[channel]` with `headers.jumpDegraded[channel] = true`;
+The plan B value:
+- on `jump`, lands in `headers.jumpReplies[channel]` with `headers.jumpPlanB[channel] = true`;
 - on `handle`, becomes the payload.
 
 **4.4 Redaction targets sinks, not deliveries.** The effective policy (L1..L4, union) is applied to copies written to:
 - hop logs (`hop-logger.ts`);
 - error.channel envelopes (`flow-executor.ts:139-150`, `forget.ts:16-24`, `integration.module.ts:161-171`, and the error.channel logger at `:253-255`);
 - wireTap copies;
-- resilience events;
+- care events;
 - graph describe output.
 
 It **never** changes the payload or headers delivered to handlers, next steps, `to`/`publish`/`route`/`fanoutTo`/`jumpTo` destinations, outbound calls or `reply`. Copy-on-write sharing (SD 6.2 step 4) guarantees this.
@@ -297,24 +297,24 @@ The single exception is `sensitive: { apply: 'mask-payload', applyReason }` on a
 
 `mask-payload` at L1, L2 or L3, or on `filter`, `wireTap` or `reply`, is a boot error (`MASK_PAYLOAD_LEVEL`). A tap copy is redacted with the policy of (module, tap channel, flow, step). `redact: false` needs `redactReason`.
 
-**4.5 A jumpTo policy wraps send plus await reply.** For each awaited target, one attempt is:
+**4.5 jumpTo care wraps send plus await reply.** For each awaited target, one try is:
 1. open a new `reply.<uuid>` channel;
 2. send the hop;
-3. await the first reply under `perAttemptMs`, which defaults to target `timeoutMs`, else 10 000 (`jump.step.ts:13,36`);
+3. await the first reply under `eachTryMs`, which defaults to target `timeoutMs`, else 10 000 (`jump.step.ts:13,36`);
 4. in `finally`, cancel the wait and unregister the channel (`:73-77`).
 
 The other steps of the call:
-- `deadlineMs` covers every attempt and backoff.
+- `totalMs` covers every try and every gap between tries.
 - A late reply to an earlier attempt reaches an unregistered channel and is dropped.
 - `JumpTimeoutError` (`flow-step.ts:55`) is classified `transient` by the `flow-jump` adapter.
-- Targets with `wait: false` run the same attempt loop in the background. They refuse `fallback`, and their final failure goes to error.channel as today (`jump.step.ts:38`).
-- Sibling targets of one `jumpTo` resolve their policies independently, and `Promise.all` still joins them (`:43`).
+- Targets with `wait: false` run the same attempt loop in the background. They refuse `planB`, and their final failure goes to error.channel as today (`jump.step.ts:38`).
+- Sibling targets of one `jumpTo` resolve their care independently, and `Promise.all` still joins them (`:43`).
 
-**4.6 Allowed primitives per edge.** This is the RS-05/5.5 table extended:
-- `flow-handle`: all primitives.
-- `flow-jump`: all primitives; fallback only when awaited.
-- `flow-send`: all except `fallback`, except that `to` accepts a `{ channel }` fallback.
-- A profile resolved onto an edge that refuses one of its primitives fails boot (`PRIMITIVE_NOT_ALLOWED`) when that profile was set at L4. When the primitive comes from L1..L3, it is dropped with one boot warning.
+**4.6 Allowed parts per edge.** This is the RS-05/5.5 table extended:
+- `flow-handle`: all parts.
+- `flow-jump`: all parts; `planB` only when awaited.
+- `flow-send`: all except `planB`, except that `to` accepts `planB: { channel }`.
+- A profile resolved onto an edge that refuses one of its parts fails boot (`CARE_PART_NOT_ALLOWED`) when that profile was set at L4. When the part comes from L1..L3, it is dropped with one boot warning (`CARE_PART_DROPPED`).
 
 ## 5. Graph annotations and boot validation
 
@@ -323,20 +323,20 @@ The other steps of the call:
 ```ts
 // each GraphFlowEntry.steps[i] (from describe(), recorded by recordFlow, channel-graph.ts:125)
 { kind: 'jump', id: 'credit', dests: [{ channel: 'credit.check',
-    policy: 'jump-sla+inline',                 // describePolicy (RS-42): profile names, 'inline', or 'module:flow-jump'
-    retryGate: 'key' | 'declared' | 'none',
+    care: 'jump-sla+inline',                   // profile names, 'inline', or 'module:flow-jump' (RS-42, OQ-13)
+    repeatableBy: 'key' | 'declared' | 'none',
     sensitive: ['secrets@1', 'pii'],           // profile and pack names; 'inline' for inline rules
     idempotency: { scope: 'flow:loan#credit', store: 'shared', storeKind: 'redis', visibility: 'shared' } }] }
-// GraphFlowEntry gains: options?: { policy?: {...}; sensitive?: string[]; idempotency?: {...} }
-// GraphNode gains: sensitive?: string[]; delivery?; sideEffects?; policy?: string; store?: string
+// GraphFlowEntry gains: options?: { care?: {...}; sensitive?: string[]; idempotency?: {...} }
+// GraphNode gains: sensitive?: string[]; delivery?; sideEffects?; care?: string; store?: string
 // GraphSnapshot gains: module: { replicas: 'single'|'multi'; stores: { name; kind; visibility }[];
-//                               policies: string[]; profiles: string[] }
-// GraphInboundRef / GraphOutboundRef gain policy?: string (RS) and sensitive?: string[]
+//                               careProfiles: string[]; profiles: string[] }
+// GraphInboundRef / GraphOutboundRef gain care?: string (RS) and sensitive?: string[]
 ```
 
 The graph never contains:
 - regex sources or field paths;
-- inline policy values, fallback values or `classify` functions;
+- inline care values, plan B values or `classify` functions;
 - keys or key labels;
 - store connection data;
 - `allow` reasons.
@@ -348,22 +348,28 @@ The graph never contains:
 A single `FlowParameterResolver` runs in `IntegrationRuntime.onModuleInit` (`integration.module.ts:245`). It runs after channels are created (step 1) and before flows attach (step 3). It resolves every reference and freezes the plans. A flow's `build()` is therefore validated before `attachTo`.
 
 All findings are collected, then reported:
-- If any finding is an error, the resolver throws the error class of its concern: `ResilienceDefinitionError`, `SensitiveConfigError`, `ReplicaConfigError` or `FlowDefinitionError`. The `findings` property lists every finding, and the message names the subject and the option path, for example `flow 'loan' step 'credit': resilience.use unknown profile 'jump-slo'`.
+- If any finding is an error, the resolver throws the error class of its concern: `CareConfigError`, `SensitiveConfigError`, `ReplicaConfigError` or `FlowDefinitionError`. The `findings` property lists every finding, and the message names the subject and the option path, for example `flow 'loan' step 'credit': care.use unknown profile 'jump-slo'`.
 - Warnings are logged once each.
 
 | Code | Level |
 |---|---|
-| `UNKNOWN_PROFILE` (resilience policy, sensitive profile or store name) | error |
+| `UNKNOWN_PROFILE` (care profile, sensitive profile or store name) | error |
 | `PROFILE_CYCLE`, `PROFILE_DEPTH` | error |
-| `PRIMITIVE_NOT_ALLOWED` (L4), `WIRETAP_RESILIENCE`, `LEGACY_AND_NEW_SAME_LAYER` | error |
+| `CARE_PART_NOT_ALLOWED` (L4), `WIRETAP_CARE`, `LEGACY_AND_NEW_SAME_LAYER` | error |
 | `MASK_PAYLOAD_LEVEL`, `SENSITIVE_FALSE_BELOW_MODULE`, missing `applyReason`, `redactReason` or `storeModeReason` | error |
-| `FALLBACK_CHANNEL_MISSING`, `DUPLICATE_STEP_ID`, the 5.6 rules of RS-03 applied to every resolved plan | error |
-| `RETRY_WITHOUT_KEY_GATE`, `RETRY_STACKED`, primitive dropped from L1..L3 | warning |
+| `PLAN_B_CHANNEL_MISSING`, `DUPLICATE_STEP_ID`, the 5.6 rules of RS-03 applied to every resolved plan | error |
+| `TRIES_WITHOUT_KEY`, `TRIES_STACKED`, `CARE_PART_DROPPED` (a part dropped from L1..L3), `TRIES_DECLARED_IDEMPOTENT`, `PLAN_B_CACHEABLE` | warning |
 | `STORE_REF_UNRESOLVED` (a `{ useExisting }` store) | deferred to `onApplicationBootstrap`, where the replica guard (MR 3.13) also receives every step and flow store as a `subject` |
 
 Ad-hoc `request()` call options are still validated on the first call (RS-03, RS-33). Profile names in them are checked against the frozen registry at that point and throw `UNKNOWN_PROFILE`.
 
 **Notes:**
-- **Conflict in the resilience spec:** this model adds `policies`/`defaults` to `ResilienceModuleOptions`, the `flow-*` edge kinds, and policies on flow steps. The resilience spec today lists none of these. Its section 2.9 (RS-33..39) and 5.5 table need rows for the three new edge kinds, or this has to be marked a follow-up there.
-- **Choice to confirm:** rule 4.2 keeps `retry.idempotent: true` as a declared way out of the key requirement, to match RS-09/RS-36. If you want a hard "key only" rule, remove option (c) from 4.2. RS-36 would then need the same change for activators.
+- **Conflict in the resilience spec:** this model adds `profiles`/`defaults` to `CareModuleOptions`, the `flow-*` edge kinds, and care on flow steps. The resilience spec today lists none of these. Its section 2.9 (RS-33..39) and 5.5 table need rows for the three new edge kinds, or this has to be marked a follow-up there.
+- **Choice to confirm:** rule 4.2 keeps `tries.idempotent: true` as a declared way out of the key requirement, to match RS-09/RS-36. If you want a hard "key only" rule, remove option (c) from 4.2. RS-36 would then need the same change for activators.
 - **Other spec edits:** the sensitive spec's 6.6 table needs flow and step rows. Its `wireTap(channel, { redact })` becomes the shape in 3.1. The multi-replica spec needs `stores` by name and the store `kind` label. The KA- adoption spec should reference profiles by name only.
+
+## 6. Decisions log
+
+| # | Question | Decision | Reason |
+|---|---|---|---|
+| FP-D1 | Estela-own vocabulary (2026-11-10) | The care concern uses the Estela vocabulary of `ESTELA_RESILIENCE_SPEC.md` section 18 (D34 there): the option key is `care` on every level (`forRoot({ care })`, `ChannelSpec.care`, `FlowOptions.care`, step and target `care`, decorators and saga steps); its parts are `patience`, `tries`, `valve`, `lanes`, `pace` and `planB`; profiles live in `care.profiles`; the graph shows `care` and `repeatableBy` and the module lists `careProfiles`; finding codes are `WIRETAP_CARE`, `CARE_PART_NOT_ALLOWED`, `CARE_PART_DROPPED`, `PLAN_B_CHANNEL_MISSING`, `TRIES_WITHOUT_KEY` and `TRIES_STACKED`, with concern `'care'`. The shared grammar (`ProfileName`, `use`, `extends`, `false`) and the shared codes (`UNKNOWN_PROFILE`, `PROFILE_CYCLE`, `PROFILE_DEPTH`, `DUPLICATE_STEP_ID`, `LEGACY_AND_NEW_SAME_LAYER`) are unchanged. The jump target `timeoutMs` stays as the 0.9.0 spelling of `care.patience.eachTryMs` | Owner decision 2026-11-10; the names read without the docs and match `sensitive` and `idempotency`. The care names never shipped, so there are no aliases |
