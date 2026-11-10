@@ -25,13 +25,16 @@ export interface IdempotencyLedger<Tx = unknown> {
   release(tx: Tx, scope: string, key: string): Promise<void>;
 }
 
-/** Raised when the same key arrives while its first run has committed a claim but not finished. */
+/**
+ * Raised when the same key arrives while its first run has committed a claim but not finished.
+ * The key stays out of `message` (SD-43); `key` keeps it for app code and every trail output hides it.
+ */
 export class IdempotencyInProgressError extends Error {
   constructor(
     readonly scope: string,
     readonly key: string,
   ) {
-    super(`IDEMPOTENCY_KEY_IN_PROGRESS: ${scope}/${key}`);
+    super(`IDEMPOTENCY_KEY_IN_PROGRESS: ${scope}`);
     this.name = 'IdempotencyInProgressError';
   }
 }
