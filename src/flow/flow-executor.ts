@@ -7,6 +7,7 @@ import type { TraceContext } from '../trace/trace-context';
 import type { HopLogger } from '../trace/hop-logger';
 import type { BuiltFlow } from './integration-flow';
 import type { FlowStepContext, StepOutcome, StepCarePort } from './flow-step';
+import type { FlowPrivacy } from './flow-privacy';
 
 /** Minimal idempotency port (implemented by IdempotencyService). */
 export interface FlowIdempotencyPort {
@@ -32,6 +33,8 @@ export interface FlowDeps {
   care?: CareEngine;
   /** Resolved step care by step index (`FlowParameterResolver`); absent = none. */
   stepCare?: readonly (StepCarePort | undefined)[];
+  /** Trail writers of the flow (SPI-433); absent = the 0.9.0 envelopes, records and taps. */
+  privacy?: FlowPrivacy;
 }
 
 export type FlowExecutionStatus = 'completed' | 'filtered' | 'duplicate';
@@ -106,7 +109,8 @@ export class FlowExecutor {
       return result;
     } catch (error) {
       if (claim !== undefined) {
-        await claim.idem.fail(scope, claim.key, error).catch(() => undefined);
+        const stored = this.deps.privacy?.storedError(error) ?? error;
+        await claim.idem.fail(scope, claim.key, stored).catch(() => undefined);
       }
       await this.reportError(input, error).catch(() => undefined);
       throw error;
@@ -187,12 +191,18 @@ export class FlowExecutor {
     const care = this.deps.stepCare?.[index];
     if (care !== undefined) ctx.care = care;
     if (frame !== undefined) ctx.planB = () => frame.planB();
+    const privacy = this.deps.privacy;
+    if (privacy !== undefined) ctx.trail = privacy.step(index);
     return ctx;
   }
 
   private async reportError(input: IntegrationMessage, error: unknown): Promise<void> {
     const envelope = createMessage(
-      { flow: this.flowName, error, causedBy: input.headers.id },
+      {
+        flow: this.flowName,
+        error: this.deps.privacy === undefined ? error : this.deps.privacy.envelopeError(error),
+        causedBy: input.headers.id,
+      },
       {
         traceId: input.headers.traceId,
         correlationId: input.headers.correlationId,

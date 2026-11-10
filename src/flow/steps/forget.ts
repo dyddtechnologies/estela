@@ -13,8 +13,10 @@ export function reportFireAndForget(
   msg: IntegrationMessage,
 ): void {
   void promise.catch((error: unknown) => {
+    const body = serializeError(error);
+    const shown = ctx.trail === undefined ? body : ctx.trail.envelopeBody(body);
     const envelope = createMessage(
-      { fireAndForget: true, channel, error: serializeError(error), flow: ctx.flowName },
+      { fireAndForget: true, channel, error: shown, flow: ctx.flowName },
       {
         traceId: msg.headers.traceId,
         correlationId: msg.headers.correlationId,

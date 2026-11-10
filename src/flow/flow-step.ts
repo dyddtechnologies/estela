@@ -31,6 +31,24 @@ export interface FlowStepContext {
   care?: StepCarePort;
   /** True once plan B answered for this flow run (RS-64); absent when the run has no care. */
   planB?: () => boolean;
+  /** Trail writers of this step (SPI-433); absent = the 0.9.0 code path. */
+  trail?: StepTrailPort;
+}
+
+/** What a wire tap delivers (SPI-433, SD-52). */
+export enum TapCopy {
+  /** A copy as the trail shows it: hidden values, same id, copied history. */
+  AsShown = 'as-shown',
+  /** The 0.9.0 copy: the same payload reference. Needs `copyReason` under explicit privacy. */
+  Original = 'original',
+}
+
+/** Trail writers a step asks for; the flow layer implements them with the privacy engine. */
+export interface StepTrailPort {
+  /** The `error` of a `wait: false` envelope (S4), from `serializeError`. */
+  envelopeBody(body: unknown): unknown;
+  /** The message a wire tap sends (S10); undefined keeps the shared 0.9.0 copy. */
+  tapCopy(msg: IntegrationMessage): IntegrationMessage | undefined;
 }
 
 /** One try as the care engine hands it to a step. */

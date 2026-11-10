@@ -16,6 +16,7 @@ import {
   type CareStepOptions,
   type StepCommonOptions,
   type StepParams,
+  type TapCopy,
 } from './flow-step';
 import { FanoutStep } from './steps/fanout.step';
 import {
@@ -37,7 +38,7 @@ import { ReplyStep, type ReplyOptions } from './steps/reply.step';
 import { RouteStep } from './steps/route.step';
 import { ToStep } from './steps/to.step';
 import { TransformStep } from './steps/transform.step';
-import { WireTapStep } from './steps/wire-tap.step';
+import { WireTapStep, type TapCopyOptions } from './steps/wire-tap.step';
 
 export interface BuiltFlow {
   source: string;
@@ -67,8 +68,12 @@ export interface FilterOptions extends StepCommonOptions {
   whenDropped?: FilterWhenDropped;
 }
 
-/** Options of `wireTap`; care is never accepted there (RS-58). */
-export type WireTapOptions = StepCommonOptions;
+/**
+ * Options of `wireTap`; care is never accepted there (RS-58). `copy` says what the tap delivers
+ * (SPI-433, SD-52): `TapCopy.AsShown` by default once an explicit privacy reaches the tap;
+ * `TapCopy.Original` then needs `copyReason` (1..200 chars, logged at boot).
+ */
+export type WireTapOptions = StepCommonOptions & { copy?: TapCopy; copyReason?: string };
 
 function hasReply(whenDropped: unknown): boolean {
   return (
@@ -167,7 +172,10 @@ export class IntegrationFlow {
 
   wireTap(channel: string, opts?: WireTapOptions): this {
     this.refuseCare('wireTap', opts);
-    return this.push(new WireTapStep(channel, paramsOf(opts, undefined)));
+    const tap: TapCopyOptions = {};
+    if (opts?.copy !== undefined) tap.copy = opts.copy;
+    if (opts?.copyReason !== undefined) tap.copyReason = opts.copyReason;
+    return this.push(new WireTapStep(channel, paramsOf(opts, undefined), tap));
   }
 
   fanoutTo(dests: readonly FlowDest[], opts?: CareStepOptions): this {
