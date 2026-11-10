@@ -158,6 +158,49 @@ describe('@ServiceActivator care', () => {
     expect(record?.status).not.toBe('completed');
   });
 
+  it('RU-63 a failed keyed claim is released under care, so a sender extra try runs the method again', async () => {
+    class Down {
+      calls = 0;
+
+      @ServiceActivator('down.in')
+      run(): never {
+        this.calls += 1;
+        throw flaky();
+      }
+    }
+    for (const enabled of [true, false]) {
+      const registry = new ChannelRegistry({ trace: new TraceContext() });
+      registry.create({ name: 'error.channel', type: 'pubsub' });
+      registry.create({ name: 'down.in', type: 'direct' });
+      const store = new MemoryIdempotencyStore();
+      const instance = new Down();
+      subscribeActivators(discoverActivators([instance]), {
+        registry,
+        trace: registry.trace,
+        errorChannel: 'error.channel',
+        idempotency: new IdempotencyService({ store }),
+        care: new CareEngine({}, { enabled }),
+      });
+      const send = () => registry.send('down.in', {}, { idempotencyKey: 'wamid.1' });
+      await expect(send()).rejects.toThrow('flaky');
+      const second = await send().then(
+        () => 'resolved',
+        () => 'rejected',
+      );
+      const record = await store.get('activator:Down.run', 'wamid.1');
+      if (enabled) {
+        expect(second).toBe('rejected');
+        expect(instance.calls).toBe(2);
+        expect(record).toBeUndefined();
+      } else {
+        // RS-70: without care the failed claim stays, and the redelivery is a silent duplicate.
+        expect(second).toBe('resolved');
+        expect(instance.calls).toBe(1);
+        expect(record?.status).toBe('failed');
+      }
+    }
+  });
+
   it('refuses an invalid or unknown care when the activator is subscribed', () => {
     class Bad {
       @ServiceActivator('fb.in', { care: 'missing' })

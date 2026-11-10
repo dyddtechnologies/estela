@@ -204,11 +204,28 @@ async function invokeInScope(
     await replyToCaller(result, msg, registry, planB);
   } catch (error) {
     if (idem !== undefined && key !== undefined) {
-      await idem.fail(scope, key, error).catch(() => undefined);
+      await settleFailedClaim(idem, scope, key, error, frame).catch(() => undefined);
     }
     await reportActivatorError(scope, msg, error, deps).catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * RS-60, RS-63: under care (a message `frame` is open), a sender's extra try (a flow send or jump
+ * target) delivers the same `idempotencyKey` again. A claim left `failed` would make that try a
+ * silent duplicate, so the send would resolve and hide the failure: the claim is released instead,
+ * when the store can. Without care configuration it is marked failed, as in 0.9.0 (RS-70).
+ */
+function settleFailedClaim(
+  idem: IdempotencyService,
+  scope: string,
+  key: string,
+  error: unknown,
+  frame: object | undefined,
+): Promise<unknown> {
+  if (frame !== undefined && idem.supportsRelease) return idem.release(scope, key);
+  return idem.fail(scope, key, error);
 }
 
 /** Invokes the activator method under the message trace, bracketed by the optional hop logger. */
