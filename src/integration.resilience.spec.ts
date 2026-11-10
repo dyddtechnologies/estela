@@ -8,6 +8,7 @@ import { ChannelGraph } from './graph/channel-graph';
 import { IntegrationModule, type IntegrationModuleOptions } from './integration.module';
 import { CareControl } from './resilience/registry';
 import { CareConfigError } from './resilience/resilience.errors';
+import { OnQuota } from './resilience/resilience.types';
 import { collectCareEvents } from './testing/resilience-events';
 import type { OutboundFetch } from './outbound/outbound.types';
 
@@ -20,7 +21,7 @@ class QuotaActivator {
   @ServiceActivator('quota.in', {
     care: {
       classify: () => 'quota',
-      valve: { quotaShutMs: 'until-resumed' },
+      valve: { onQuota: OnQuota.ShutUntilResumed },
     },
   })
   run(): string {

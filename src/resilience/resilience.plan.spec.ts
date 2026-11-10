@@ -1,6 +1,6 @@
 import { CareConfigError } from './resilience.errors';
 import { describeCare, expandCareRef, resolveCarePlan, validateProfiles } from './resilience.plan';
-import type { CareProfile, Care } from './resilience.types';
+import { OnQuota, type CareProfile, type Care, type Valve } from './resilience.types';
 
 const resolve = (...layers: (Care | string | undefined)[]) =>
   resolveCarePlan('orders.http', layers, 'outbound-rest');
@@ -31,7 +31,7 @@ describe('resolveCarePlan', () => {
       [{ valve: { failPercent: 101 } }, 'valve.failPercent'],
       [{ valve: { countOn: [] } }, 'valve.countOn'],
       [{ valve: { countOn: ['transient', 'transient'] } }, 'valve.countOn'],
-      [{ valve: { quotaShutMs: 0 } }, 'valve.quotaShutMs'],
+      [{ valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 0 } }, 'valve.quotaShutMs'],
       [{ valve: { state: {} as never } }, 'valve.state'],
       [{ lanes: { count: 0 } }, 'lanes.count'],
       [{ lanes: { count: 1, waitlist: -1 } }, 'lanes.waitlist'],
@@ -49,6 +49,34 @@ describe('resolveCarePlan', () => {
     for (const [policy, path] of cases) {
       expect(definitionError(() => resolve(policy)).path).toBe(path);
     }
+  });
+
+  it('RU-16e resolves each onQuota mode to its shut length', () => {
+    const valve = (v: Valve) => resolve({ valve: v }).valve?.quotaShutMs;
+    expect(valve({ shutMs: 700 })).toBe(700);
+    expect(valve({ shutMs: 700, onQuota: OnQuota.ShutLikeFailure })).toBe(700);
+    expect(valve({ shutMs: 700, onQuota: OnQuota.ShutFor, quotaShutMs: 60_000 })).toBe(60_000);
+    expect(valve({ shutMs: 700, onQuota: OnQuota.ShutUntilResumed })).toBe('until-resumed');
+    // A JavaScript caller may pass the enum's raw string value.
+    expect(valve({ onQuota: 'shut-until-resumed' as OnQuota })).toBe('until-resumed');
+  });
+
+  it('RU-16f refuses quotaShutMs without shut-for, shut-for without it, and unknown modes', () => {
+    const error = (v: Valve) => definitionError(() => resolve({ valve: v }));
+    expect(error({ quotaShutMs: 5000 }).message).toBe(
+      'orders.http: care.valve.quotaShutMs is allowed only with onQuota shut-for',
+    );
+    expect(error({ onQuota: OnQuota.ShutUntilResumed, quotaShutMs: 5000 }).path).toBe(
+      'valve.quotaShutMs',
+    );
+    expect(error({ onQuota: OnQuota.ShutFor }).message).toBe(
+      'orders.http: care.valve.quotaShutMs is required with onQuota shut-for',
+    );
+    expect(error({ onQuota: 'until-resumed' as OnQuota }).message).toBe(
+      'orders.http: care.valve.onQuota must be one of shut-like-failure, shut-for, shut-until-resumed',
+    );
+    expect(error({ onQuota: 'ShutFor' as OnQuota }).path).toBe('valve.onQuota');
+    expect(error({ onQuota: 1 as unknown as OnQuota }).path).toBe('valve.onQuota');
   });
 
   it('RU-04 replaces each part whole by the highest level that sets it and false disables', () => {

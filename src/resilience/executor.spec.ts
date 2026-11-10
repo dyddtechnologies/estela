@@ -12,6 +12,7 @@ import {
   CareKeyError,
 } from './resilience.errors';
 import { LEGACY_ALIAS } from './resilience.plan';
+import { OnQuota } from './resilience.types';
 import { CareScope } from './retry-budget';
 import {
   ctxOf,
@@ -287,7 +288,7 @@ describe('CareExecutor', () => {
   it('RU-16c manual quota opening never probes until resume', async () => {
     const h = harness({
       classify: () => 'quota',
-      valve: { quotaShutMs: 'until-resumed', shutMs: 10 },
+      valve: { onQuota: OnQuota.ShutUntilResumed, shutMs: 10 },
     });
     let calls = 0;
     const call = () => {
@@ -302,6 +303,27 @@ describe('CareExecutor', () => {
     await h.exec.resume();
     expect(h.exec.valveState()).toEqual({ state: 'flowing' });
     await expect(h.exec.execute(ctxOf(), call)).resolves.toMatchObject({ value: 'ok' });
+  });
+
+  it('RU-16d shut-for keeps a quota shut for quotaShutMs, then lets one probe through', async () => {
+    const h = harness({
+      classify: (error: unknown) => ((error as Error).message === 'q' ? 'quota' : 'transient'),
+      valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 5000, shutMs: 10 },
+    });
+    let calls = 0;
+    const call = () => {
+      calls += 1;
+      return calls === 1 ? Promise.reject(new Error('q')) : Promise.resolve('ok');
+    };
+    await expect(h.exec.execute(ctxOf(), call)).rejects.toThrow('q');
+    await h.clock.advance(4999);
+    await expect(h.exec.execute(ctxOf(), call)).rejects.toBeInstanceOf(ValveShutError);
+    expect(calls).toBe(1);
+    expect(h.exec.valveState()).toEqual({ state: 'shut', forcedBy: 'quota' });
+    await h.clock.advance(1);
+    await expect(h.exec.execute(ctxOf(), call)).resolves.toMatchObject({ value: 'ok' });
+    expect(calls).toBe(2);
+    expect(h.exec.valveState()).toEqual({ state: 'flowing' });
   });
 
   it('RU-17 throttled is tried again but not recorded by the valve', async () => {
@@ -912,7 +934,7 @@ describe('CareExecutor', () => {
     const clock = manualCareClock();
     const port = new MemoryCareState(() => clock.wall());
     const h = harness(
-      { classify: () => 'quota', valve: { quotaShutMs: 'until-resumed', state: port } },
+      { classify: () => 'quota', valve: { onQuota: OnQuota.ShutUntilResumed, state: port } },
       { clock },
     );
     await h.exec.execute(ctxOf(), () => Promise.reject(new Error('q'))).catch(() => undefined);

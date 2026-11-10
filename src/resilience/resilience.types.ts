@@ -88,6 +88,16 @@ export interface Tries {
   requireIdempotencyKey?: boolean;
 }
 
+/** What a valve does when a call fails with the 'quota' class (RS-16). */
+export enum OnQuota {
+  /** Shut for `shutMs`, then let probes through, like any other shut. Default. */
+  ShutLikeFailure = 'shut-like-failure',
+  /** Shut for `quotaShutMs`, then let probes through. */
+  ShutFor = 'shut-for',
+  /** Stay shut, with no probes, until `CareControl.resume` is called (RS-49). */
+  ShutUntilResumed = 'shut-until-resumed',
+}
+
 /** Shuts traffic to a dependency that keeps failing, then lets probes through. */
 export interface Valve {
   enabled?: boolean;
@@ -105,8 +115,10 @@ export interface Valve {
   probes?: number;
   /** Kinds counted as failures; default ['transient']. 'quota' always shuts and need not be listed. */
   countOn?: readonly FailureClass[];
-  /** Default shutMs. 'until-resumed': shut until `CareControl.resume` (RS-16, RS-49). */
-  quotaShutMs?: number | 'until-resumed';
+  /** What a 'quota' failure does; default `OnQuota.ShutLikeFailure` (RS-16). */
+  onQuota?: OnQuota;
+  /** Integer ms >= 1; required with `OnQuota.ShutFor`, refused with any other `onQuota`. */
+  quotaShutMs?: number;
   /** Integer >= 1; default 1000. */
   maxKeys?: number;
   /** Default 'local'. */

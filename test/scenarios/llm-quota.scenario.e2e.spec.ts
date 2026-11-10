@@ -9,6 +9,7 @@ import {
   InboundRest,
   IntegrationModule,
   MemoryIdempotencyStore,
+  OnQuota,
   OutboundHttpError,
   OutboundRestGateway,
   ServiceActivator,
@@ -229,7 +230,7 @@ const LLM_TURN_PROFILE = {
   classify: providerQuota,
   patience: { totalMs: 10_000 },
   tries: { max: 3, spacing: { firstMs: 200, growth: 2, spread: 'none' as const } },
-  valve: { minCalls: 10, shutMs: 30_000, quotaShutMs: 'until-resumed' as const },
+  valve: { minCalls: 10, shutMs: 30_000, onQuota: OnQuota.ShutUntilResumed },
   planB: {
     value: (): LlmAnswer => ({ output: HOLDING_TEXT, degraded: true }),
     on: [
@@ -477,7 +478,7 @@ describe('scenario llm-quota: WhatsApp turn against an LLM provider that runs ou
     expect((await s.store.get(`inbound:${TURN_CHANNEL}`, WAMID))?.status).not.toBe('completed');
   });
 
-  it('RS-16: until-resumed never lets a probe through, even 24 h later on the care clock', async () => {
+  it('RS-16: shut-until-resumed never lets a probe through, even 24 h later on the care clock', async () => {
     const s = await boot();
     await (await slowDownThenQuota(s)).response.json();
     await s.clock.advance(24 * 60 * 60 * 1_000);

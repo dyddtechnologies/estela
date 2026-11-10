@@ -6,6 +6,7 @@ import {
   type JitterMode,
 } from './backoff';
 import { CareConfigError } from './resilience.errors';
+import { OnQuota } from './resilience.types';
 import type {
   Care,
   CareClassifierFn,
@@ -550,7 +551,7 @@ function resolveValve(c: Checker, layered: Layered): ValvePlan | undefined {
     shutMs,
     probes: c.int('valve.probes', options.probes ?? 1, 1),
     countOn: c.classes('valve.countOn', options.countOn ?? ['transient'], FAILURE_CLASSES),
-    quotaShutMs: quotaShut(c, options.quotaShutMs, shutMs),
+    quotaShutMs: quotaShut(c, options, shutMs),
     maxKeys: c.int('valve.maxKeys', options.maxKeys ?? 1000, 1),
     syncMs: c.int('valve.syncMs', options.syncMs ?? 1000, 1),
     ...keyAndState(c, 'valve', options),
@@ -558,14 +559,29 @@ function resolveValve(c: Checker, layered: Layered): ValvePlan | undefined {
   return plan;
 }
 
-function quotaShut(
-  c: Checker,
-  quota: number | 'until-resumed' | undefined,
-  shutMs: number,
-): number | 'until-resumed' {
-  return quota === 'until-resumed'
+const ON_QUOTA_VALUES: readonly string[] = Object.values(OnQuota);
+
+function onQuotaMode(c: Checker, value: unknown): OnQuota {
+  const mode = value ?? OnQuota.ShutLikeFailure;
+  if (typeof mode !== 'string' || !ON_QUOTA_VALUES.includes(mode)) {
+    c.fail('valve.onQuota', `must be one of ${ON_QUOTA_VALUES.join(', ')}`);
+  }
+  return mode as OnQuota;
+}
+
+/** RS-16: `quotaShutMs` goes with `OnQuota.ShutFor` only, and that mode needs it. */
+function quotaShut(c: Checker, options: Valve, shutMs: number): ValvePlan['quotaShutMs'] {
+  const mode = onQuotaMode(c, options.onQuota);
+  const shutFor = mode === OnQuota.ShutFor;
+  if (shutFor !== (options.quotaShutMs !== undefined)) {
+    c.fail(
+      'valve.quotaShutMs',
+      shutFor ? 'is required with onQuota shut-for' : 'is allowed only with onQuota shut-for',
+    );
+  }
+  return mode === OnQuota.ShutUntilResumed
     ? 'until-resumed'
-    : c.int('valve.quotaShutMs', quota ?? shutMs, 1);
+    : c.int('valve.quotaShutMs', options.quotaShutMs ?? shutMs, 1);
 }
 
 function resolveLanes(c: Checker, layered: Layered): LanesPlan | undefined {

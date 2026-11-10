@@ -10,6 +10,7 @@ import { connect, createServer as createTcpServer, type AddressInfo, type Socket
 import {
   CareControl,
   IntegrationModule,
+  OnQuota,
   OutboundHttpError,
   OutboundRestGateway,
   ValveShutError,
@@ -661,7 +662,7 @@ d('scenario outage-multipod: a PSP outage seen by two pods sharing Redis', () =>
     const quotaValve = (state: CareStatePort): ValveCare => ({
       classify: (error) =>
         error instanceof OutboundHttpError && error.status === 402 ? 'quota' : undefined,
-      ...outageValve({ quotaShutMs: 'until-resumed' })(state),
+      ...outageValve({ onQuota: OnQuota.ShutUntilResumed })(state),
     });
     const a = await startPod('pod-a', [{ name: binding, path, care: quotaValve }]);
     const b = await startPod('pod-b', [{ name: binding, path, care: quotaValve }]);
@@ -697,7 +698,7 @@ d('scenario outage-multipod: a PSP outage seen by two pods sharing Redis', () =>
     const quotaValve = (state: CareStatePort): ValveCare => ({
       classify: (error) =>
         error instanceof OutboundHttpError && error.status === 402 ? 'quota' : undefined,
-      ...outageValve({ quotaShutMs: 'until-resumed' })(state),
+      ...outageValve({ onQuota: OnQuota.ShutUntilResumed })(state),
     });
     const a = await startPod('pod-a', [{ name: binding, path, care: quotaValve }]);
     const b = await startPod('pod-b', [{ name: binding, path, care: quotaValve }]);
