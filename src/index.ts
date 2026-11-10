@@ -106,3 +106,6 @@ export * from './saga/postgres/index';
 
 // ---------- Care: profiles, executor, classifiers, tries left (SPI-445) ----------
 export * from './resilience/index';
+
+// ---------- Privacy: the trail Estela writes (SPI-433) ----------
+export * from './sensitive/index';

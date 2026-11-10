@@ -104,3 +104,25 @@ d('dist: resilience errors keep instanceof across the main and testing entries (
     expect(run(resilienceProbe(load), 'module')).toEqual(resilienceExpected);
   });
 });
+
+/**
+ * SD-06: `@Private` metadata lives under a registry-wide symbol, so a class decorated by the ESM
+ * build is hidden by an engine of the CJS build. Run as ESM, loading the CJS build with
+ * `createRequire`, so two separate copies are in one process.
+ */
+const privateProbe = `
+import { createRequire } from 'node:module';
+const esm = await import('./dist/index.mjs');
+const cjs = createRequire(process.cwd() + '/')('./dist/index.js');
+class A { constructor() { this.ssn = 'S-1'; this.plain = 'p'; } }
+esm.Private()(A.prototype, 'ssn');
+class B extends A {}
+const engine = await cjs.PrivacyEngine.compile(undefined);
+console.log(JSON.stringify(engine.forTrail(new B(), { output: cjs.TrailOutput.Log })));
+`;
+
+d('dist: @Private metadata crosses ESM and CJS copies (SD-06)', () => {
+  it('test/dist-identity.spec.ts: @Private metadata crosses ESM and CJS copies', () => {
+    expect(run(privateProbe, 'module')).toEqual({ ssn: '[HIDDEN:field]', plain: 'p' });
+  });
+});
