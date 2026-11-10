@@ -181,3 +181,47 @@ describe('resolveCarePlan', () => {
     expect(describeCare(resolve({}))).toBeUndefined();
   });
 });
+describe('RU-53c: coupled fields inside use and extends', () => {
+  const profiles: Readonly<Record<string, CareProfile>> = {
+    parent: {
+      valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 5000, lookBack: { lastMs: 60_000 } },
+      planB: { channel: 'parked' },
+    },
+    child: { extends: 'parent', valve: { onQuota: OnQuota.ShutUntilResumed } },
+  };
+  const valveOf = (care: Care | false | undefined): Valve | undefined => {
+    const valve = care === false ? undefined : care?.valve;
+    return valve === false ? undefined : valve;
+  };
+
+  it('a child that sets onQuota drops the inherited quotaShutMs', () => {
+    const valve = valveOf(expandCareRef('b', 'child', profiles));
+    expect(valve?.onQuota).toBe(OnQuota.ShutUntilResumed);
+    expect(valve).not.toHaveProperty('quotaShutMs');
+    expect(resolve({ valve: valve! }).valve?.quotaShutMs).toBe('until-resumed');
+  });
+
+  it('a child that sets both keeps its own quotaShutMs', () => {
+    const care = expandCareRef(
+      'b',
+      { use: 'parent', valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 9000 } },
+      profiles,
+    );
+    expect(valveOf(care)?.quotaShutMs).toBe(9000);
+  });
+
+  it('a child that sets only quotaShutMs keeps the inherited onQuota', () => {
+    const care = expandCareRef('b', { use: 'parent', valve: { quotaShutMs: 7000 } }, profiles);
+    expect(valveOf(care)).toMatchObject({ onQuota: OnQuota.ShutFor, quotaShutMs: 7000 });
+  });
+
+  it('lookBack and planB alternatives replace each other', () => {
+    const care = expandCareRef(
+      'b',
+      { use: 'parent', valve: { lookBack: { lastCalls: 20 } }, planB: { value: () => 'x' } },
+      profiles,
+    );
+    expect(valveOf(care)?.lookBack).toEqual({ lastCalls: 20 });
+    expect(care === false ? undefined : care?.planB).not.toHaveProperty('channel');
+  });
+});

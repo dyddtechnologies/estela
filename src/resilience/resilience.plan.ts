@@ -212,12 +212,27 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+/**
+ * Fields that only make sense together with, or instead of, a sibling. When the overriding side sets
+ * the key, it also decides the coupled siblings, so an inherited sibling it did not set is dropped.
+ */
+const COUPLED_FIELDS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
+  valve: { onQuota: ['quotaShutMs'] },
+  'valve.lookBack': { lastCalls: ['lastMs'], lastMs: ['lastCalls'] },
+  planB: { value: ['channel'], channel: ['value'] },
+};
+
 /** Deep merge used once inside a reference (`use`, `extends`): arrays, functions and `false` replace. */
-export function deepMergeCare<T>(base: T, over: unknown): T {
+export function deepMergeCare<T>(base: T, over: unknown, path = ''): T {
   if (!isPlainObject(base) || !isPlainObject(over)) return over as T;
   const out: Record<string, unknown> = { ...base };
+  const coupled = COUPLED_FIELDS[path] ?? {};
   for (const [key, value] of Object.entries(over)) {
-    if (value !== undefined) out[key] = deepMergeCare(base[key], value);
+    if (value === undefined) continue;
+    for (const sibling of coupled[key] ?? []) {
+      if (over[sibling] === undefined) delete out[sibling];
+    }
+    out[key] = deepMergeCare(base[key], value, path ? `${path}.${key}` : key);
   }
   return out as T;
 }
