@@ -111,7 +111,12 @@ export class CareScope {
     if (value.triesLeft !== undefined) frame.triesLeft = value.triesLeft;
     if (value.traceId !== undefined) frame.traceId = value.traceId;
     if (value.root === true) frame.root = true;
-    if (ambient !== undefined && linksTo(ambient, value.traceId)) frame.parent = ambient;
+    if (ambient !== undefined && linksTo(ambient, value.traceId)) {
+      frame.parent = ambient;
+      // RS-27: a message dispatched after plan B answered in its chain carries a result built on
+      // that answer; storing it downstream would replay the degraded result after recovery.
+      frame.planB = ambient.planB;
+    }
     return storage.run(frame, () => fn({ planB: () => frame.planB }));
   }
 

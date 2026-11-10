@@ -636,6 +636,18 @@ describe('CareExecutor', () => {
     expect(notDegraded).toBe(false);
   });
 
+  it('RU-27 a message scope opened in a chain after plan B answered starts plan-B-marked', async () => {
+    const h = harness({ planB: { value: () => 'fb', on: ['transient'] } });
+    const seen = await CareScope.runMessage({ traceId: 't', root: true }, async () => {
+      const before = CareScope.runMessage({ traceId: 't' }, (scope) => scope.planB());
+      await h.exec.execute(ctxOf(), () => Promise.reject(transient()));
+      const after = CareScope.runMessage({ traceId: 't' }, (scope) => scope.planB());
+      const otherTrace = CareScope.runMessage({ traceId: 'u' }, (scope) => scope.planB());
+      return { before, after, otherTrace };
+    });
+    expect(seen).toEqual({ before: false, after: true, otherTrace: false });
+  });
+
   it('RU-30a a trying-again layer claims the tries left for downstream and nested executors', async () => {
     const budgets: (number | undefined)[] = [];
     const nested: (number | undefined)[] = [];
