@@ -4,7 +4,7 @@ import { FanoutChannel } from './channels/fanout.channel';
 import { PubSubChannel } from './channels/pubsub.channel';
 import { QueueChannel } from './channels/queue.channel';
 import type { ChannelDeps } from './channels/channel-deps';
-import type { ResilienceRef } from './resilience/resilience.types';
+import type { CareRef } from './resilience/resilience.types';
 
 /** Channel declaration in `forRoot` (spec sec.5). */
 export interface ChannelSpec {
@@ -13,10 +13,10 @@ export interface ChannelSpec {
   capacity?: number;
   bindings?: readonly string[];
   /**
-   * L2 resilience (RS-56): the default of flow send and jump steps whose destination is this
-   * channel and of activators on it. Never applied to inbound endpoints, `wireTap` or `handle`.
+   * L2 care (RS-56): the default of flow send and jump steps whose destination is this channel
+   * and of activators on it. Never applied to inbound endpoints, `wireTap` or `handle`.
    */
-  resilience?: ResilienceRef;
+  care?: CareRef;
 }
 
 /** Factory Method per kind (plan sec.6 OCP / ADR-010). */

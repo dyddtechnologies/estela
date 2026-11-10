@@ -11,7 +11,7 @@ import {
   MemoryIdempotencyStore,
   OutboundHttpError,
   OutboundRestGateway,
-  ResilienceDefinitionError,
+  CareConfigError,
   ServiceActivator,
   type IntegrationModuleOptions,
   type OutboundRestBinding,
@@ -59,7 +59,7 @@ function calls(upstream: Upstream, path: string): number {
 }
 
 /** POST bodies are not retried by the REST classifier without this (RS-09). */
-const retry3 = { retry: { maxAttempts: 3, idempotent: true, backoff: 1 } } as const;
+const retry3 = { tries: { max: 3, idempotent: true, spacing: 1 } } as const;
 
 async function startApp(
   options: Partial<IntegrationModuleOptions>,
@@ -98,7 +98,7 @@ class ShedController {
     channel: 'shed.in',
     requestReply: true,
     idempotency: {},
-    resilience: { rateLimit: { limitPerSec: 1, burst: 1 } },
+    care: { pace: { perSecond: 1, burst: 1 } },
   })
   shed(@Body() body: unknown): unknown {
     return body;
@@ -159,7 +159,7 @@ class QuoteActivator {
   }
 }
 
-describe('resilience e2e (loopback HTTP)', () => {
+describe('care e2e (loopback HTTP)', () => {
   let upstream: Upstream;
   const apps: INestApplication[] = [];
 
@@ -190,21 +190,21 @@ describe('resilience e2e (loopback HTTP)', () => {
     ...extra,
   });
 
-  it('RE-01 outbound rest binding retries 503s, calls mapError once and logs one hop', async () => {
+  it('RE-01 outbound rest binding extra tries 503s, calls mapError once and logs one hop', async () => {
     const hopStart = jest.spyOn(HopLogger.prototype, 'hopStart');
     const hopEnd = jest.spyOn(HopLogger.prototype, 'hopEnd');
     const mapped: unknown[] = [];
     const { app } = await startApp(
       {
-        resilience: { events: { channel: false } },
+        care: { events: { channel: false } },
         logging: { banner: false, hops: true },
         outbound: {
           rest: {
             bindings: [
               binding('erp', '/fail-erp', {
-                resilience: {
+                care: {
                   ...retry3,
-                  circuitBreaker: { minimumCalls: 10 },
+                  valve: { minCalls: 10 },
                 },
                 mapError: (error) => {
                   mapped.push(error);
@@ -235,12 +235,12 @@ describe('resilience e2e (loopback HTTP)', () => {
     expect(ends[0]?.[3]).toBe(false);
   });
 
-  it('RE-02 inbound rate limit answers 429 with Retry-After before the idempotency claim', async () => {
+  it('RE-02 inbound pace answers 429 with Retry-After before the idempotency claim', async () => {
     const store = new MemoryIdempotencyStore();
     const { app, url } = await startApp(
       {
         channels: [{ name: 'shed.in', type: 'direct' }],
-        resilience: { events: { channel: false } },
+        care: { events: { channel: false } },
         idempotency: { store },
       },
       [ShedController],
@@ -253,45 +253,45 @@ describe('resilience e2e (loopback HTTP)', () => {
     expect(second.status).toBe(429);
     expect(second.headers.get('retry-after')).toBe('1');
     expect(await second.json()).toMatchObject({
-      code: 'INBOUND_OVERLOADED',
-      reason: 'rate-limited',
+      code: 'INBOUND_BUSY',
+      reason: 'over-pace',
     });
     expect(await store.get('inbound:shed.in', 'shed-b')).toBeUndefined();
     expect((await store.get('inbound:shed.in', 'shed-a'))?.status).toBe('completed');
   });
 
-  it('RE-02 an inbound x-retry-budget of 0 stops downstream retries', async () => {
+  it('RE-02 an inbound x-tries-left of 0 stops downstream extra tries', async () => {
     const { app, url } = await startApp(
       {
         channels: [{ name: 'budget.in', type: 'direct' }],
-        resilience: { events: { channel: false } },
+        care: { events: { channel: false } },
         outbound: {
-          rest: { bindings: [binding('downstream', '/fail-budget', { resilience: retry3 })] },
+          rest: { bindings: [binding('downstream', '/fail-budget', { care: retry3 })] },
         },
       },
       [BudgetController],
       [RelayActivator],
     );
     apps.push(app);
-    const capped = await post(`${url}/budget`, { n: 1 }, { 'x-retry-budget': '0' });
+    const capped = await post(`${url}/budget`, { n: 1 }, { 'x-tries-left': '0' });
     expect(capped.status).toBe(500);
     expect(calls(upstream, '/fail-budget')).toBe(1);
-    expect(upstream.seen.get('/fail-budget')?.[0]?.['x-retry-budget']).toBe('0');
+    expect(upstream.seen.get('/fail-budget')?.[0]?.['x-tries-left']).toBe('0');
     upstream.seen.clear();
     const free = await post(`${url}/budget`, { n: 2 });
     expect(free.status).toBe(500);
     expect(calls(upstream, '/fail-budget')).toBe(3);
-    expect(upstream.seen.get('/fail-budget')?.[0]?.['x-retry-budget']).toBe('0');
+    expect(upstream.seen.get('/fail-budget')?.[0]?.['x-tries-left']).toBe('0');
   });
 
-  it('RE-03 two in-process apps chained over HTTP: the failing leaf receives at most maxAttempts calls', async () => {
-    const resilience = { events: { channel: false as const } };
+  it('RE-03 two in-process apps chained over HTTP: the failing leaf receives at most tries.max calls', async () => {
+    const care = { events: { channel: false as const } };
     const middle = await startApp(
       {
         channels: [{ name: 'budget.in', type: 'direct' }],
-        resilience,
+        care,
         outbound: {
-          rest: { bindings: [binding('downstream', '/fail-leaf', { resilience: retry3 })] },
+          rest: { bindings: [binding('downstream', '/fail-leaf', { care: retry3 })] },
         },
       },
       [BudgetController],
@@ -300,10 +300,10 @@ describe('resilience e2e (loopback HTTP)', () => {
     apps.push(middle.app);
     const edge = await startApp(
       {
-        resilience,
+        care,
         outbound: {
           rest: {
-            bindings: [{ name: 'middle', url: `${middle.url}/budget`, resilience: retry3 }],
+            bindings: [{ name: 'middle', url: `${middle.url}/budget`, care: retry3 }],
           },
         },
       },
@@ -321,12 +321,12 @@ describe('resilience e2e (loopback HTTP)', () => {
     expect(calls(upstream, '/fail-leaf')).toBe(3);
   });
 
-  it('RE-03 (control) without forRoot({ resilience }) on the middle app the leaf receives 9 calls', async () => {
+  it('RE-03 (control) without forRoot({ care }) on the middle app the leaf receives 9 calls', async () => {
     const middle = await startApp(
       {
         channels: [{ name: 'budget.in', type: 'direct' }],
         outbound: {
-          rest: { bindings: [binding('downstream', '/fail-leaf', { resilience: retry3 })] },
+          rest: { bindings: [binding('downstream', '/fail-leaf', { care: retry3 })] },
         },
       },
       [BudgetController],
@@ -335,10 +335,10 @@ describe('resilience e2e (loopback HTTP)', () => {
     apps.push(middle.app);
     const edge = await startApp(
       {
-        resilience: { events: { channel: false } },
+        care: { events: { channel: false } },
         outbound: {
           rest: {
-            bindings: [{ name: 'middle', url: `${middle.url}/budget`, resilience: retry3 }],
+            bindings: [{ name: 'middle', url: `${middle.url}/budget`, care: retry3 }],
           },
         },
       },
@@ -358,14 +358,14 @@ describe('resilience e2e (loopback HTTP)', () => {
     const { app, url } = await startApp(
       {
         channels: [{ name: 'quote.in', type: 'direct' }],
-        resilience: { events: { channel: false } },
+        care: { events: { channel: false } },
         idempotency: { store },
         outbound: {
           rest: {
             bindings: [
               binding('pricing', '/fail-pricing', {
-                resilience: {
-                  fallback: { value: () => ({ price: 0, estimated: true }), cacheable },
+                care: {
+                  planB: { value: () => ({ price: 0, estimated: true }), cacheable },
                 },
               }),
             ],
@@ -385,7 +385,7 @@ describe('resilience e2e (loopback HTTP)', () => {
     return { store, bodies, runs: app.get(QuoteActivator).runs };
   }
 
-  it('RE-06 a fallback answer is not replayed for a duplicate idempotency key', async () => {
+  it('RE-06 a plan B answer is not replayed for a duplicate idempotency key', async () => {
     const { store, bodies, runs } = await quoteTwice(false);
     expect(runs).toBe(2);
     expect(calls(upstream, '/fail-pricing')).toBe(2);
@@ -397,7 +397,7 @@ describe('resilience e2e (loopback HTTP)', () => {
     expect(activatorRecord?.status).not.toBe('completed');
   });
 
-  it('RE-06 (control) a cacheable fallback answer is replayed for the duplicate key', async () => {
+  it('RE-06 (control) a cacheable plan B answer is replayed for the duplicate key', async () => {
     const { store, bodies, runs } = await quoteTwice(true);
     expect(runs).toBe(1);
     // onDuplicate 'replay' answers the duplicate in the endpoint's own reply shape.
@@ -408,21 +408,21 @@ describe('resilience e2e (loopback HTTP)', () => {
     );
   });
 
-  it('RE-07 an invalid resilience option fails module boot', async () => {
+  it('RE-07 an invalid care option fails module boot', async () => {
     const boot = startApp(
       {
-        resilience: {},
+        care: {},
         outbound: {
           rest: {
-            bindings: [binding('bad', '/ok', { resilience: { retry: { maxAttempts: 0 } } })],
+            bindings: [binding('bad', '/ok', { care: { tries: { max: 0 } } })],
           },
         },
       },
       [],
       [],
     );
-    await expect(boot).rejects.toThrow(ResilienceDefinitionError);
-    await expect(boot).rejects.toThrow('bad: resilience.retry.maxAttempts');
+    await expect(boot).rejects.toThrow(CareConfigError);
+    await expect(boot).rejects.toThrow('bad: care.tries.max');
     expect(calls(upstream, '/ok')).toBe(0);
   });
 });

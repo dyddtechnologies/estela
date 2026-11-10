@@ -9,16 +9,16 @@ import { createMessage, type IntegrationMessage, type MessageHeadersInit } from 
 import type { FlowDefinition } from '../flow/integration-flow';
 import { FlowExecutor, type FlowDeps, type FlowIdempotencyPort } from '../flow/flow-executor';
 import { FlowParameterResolver, type ResolvedFlow } from '../flow/flow-parameter-resolver';
-import type { ResilienceRuntime } from '../resilience/runtime';
+import type { CareEngine } from '../resilience/runtime';
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
 
 export { MemoryIdempotencyStore };
 export { MemoryLockPort } from './memory-lock-port';
 export { MemoryTransitionPort } from './memory-transition-port';
 export { testUnitOfWork, type TestUnitOfWork } from './test-unit-of-work';
-export { manualResilienceClock, type ManualResilienceClock } from './manual-resilience-clock';
-export { MemoryResilienceStatePort } from './memory-resilience-state-port';
-export { collectResilienceEvents } from './resilience-events';
+export { manualCareClock, type ManualCareClock } from './manual-resilience-clock';
+export { MemoryCareState } from './memory-resilience-state-port';
+export { collectCareEvents } from './resilience-events';
 
 /** Semantic alias from spec sec.14: same invariants as `createMessage`. */
 export function createTestMessage<T>(
@@ -34,17 +34,17 @@ export interface BindFlowOptions {
   idempotencyTtlMs?: number;
   errorChannel?: string;
   /**
-   * Resilience runtime (SPI-445): the flow's parameters are resolved like at module boot
-   * (`FlowParameterResolver`), so policies, budget and degraded marks run without Nest.
-   * Declare channel policies with `runtime.declareChannels(specs)` before binding.
+   * Care engine (SPI-445): the flow's parameters are resolved like at module boot, so care,
+   * tries left and plan B marks run without Nest. Declare channel care with
+   * `engine.declareChannels(specs)` before binding.
    */
-  resilience?: ResilienceRuntime;
+  care?: CareEngine;
 }
 
 function resolveOne(
   definition: FlowDefinition,
   registry: ChannelRegistry,
-  runtime: ResilienceRuntime | undefined,
+  runtime: CareEngine | undefined,
 ): ResolvedFlow | undefined {
   if (runtime === undefined) return undefined;
   return new FlowParameterResolver(runtime, registry).resolve([definition]).flows[0];
@@ -63,7 +63,7 @@ export function bindFlow(
   if (registry.tryGet(errorChannel) === undefined) {
     registry.create({ name: errorChannel, type: 'pubsub' });
   }
-  const runtime = options.resilience;
+  const runtime = options.care;
   const resolved = resolveOne(definition, registry, runtime);
   const built = resolved?.built ?? definition.build().build();
   if (registry.tryGet(built.source) === undefined) {
@@ -72,8 +72,8 @@ export function bindFlow(
   const deps: FlowDeps = { registry, trace: options.trace ?? registry.trace, errorChannel };
   if (options.idempotency !== undefined) deps.idempotency = options.idempotency;
   if (options.idempotencyTtlMs !== undefined) deps.idempotencyTtlMs = options.idempotencyTtlMs;
-  if (runtime !== undefined) deps.resilience = runtime;
-  if (resolved !== undefined) deps.policies = resolved.policies;
+  if (runtime !== undefined) deps.care = runtime;
+  if (resolved !== undefined) deps.stepCare = resolved.stepCare;
   const executor = new FlowExecutor(definition.name, built, deps);
   executor.attachTo(registry);
   return executor;

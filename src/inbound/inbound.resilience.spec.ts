@@ -7,13 +7,13 @@ import { ReplyGateway } from '../gateway/reply-gateway';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
 import type { IntegrationMessage } from '../message';
-import { ResilienceDefinitionError } from '../resilience/resilience.errors';
-import type { ResilienceModuleOptions } from '../resilience/resilience.types';
-import { DEGRADED_HEADER } from '../resilience/retry-budget';
-import { ResilienceRuntime } from '../resilience/runtime';
-import { manualResilienceClock } from '../testing/manual-resilience-clock';
+import { CareConfigError } from '../resilience/resilience.errors';
+import type { CareModuleOptions } from '../resilience/resilience.types';
+import { PLAN_B_HEADER } from '../resilience/retry-budget';
+import { CareEngine } from '../resilience/runtime';
+import { manualCareClock } from '../testing/manual-resilience-clock';
 import { TraceContext } from '../trace/trace-context';
-import { InboundOverloadedError } from './inbound.failure';
+import { InboundBusyError } from './inbound.failure';
 import { InboundInterceptor } from './inbound.interceptor';
 import { inboundShedPlan } from './inbound.resilience';
 import { INBOUND_SPEC_METADATA, type InboundSpec } from './inbound.types';
@@ -34,83 +34,73 @@ function httpContext(spec: InboundSpec, headers: Record<string, string> = {}) {
 
 const next = (value: unknown = undefined): CallHandler => ({ handle: () => of(value) });
 
-function world(options: ResilienceModuleOptions = {}, enabled = true) {
+function world(options: CareModuleOptions = {}, enabled = true) {
   const trace = new TraceContext();
   const registry = new ChannelRegistry({ trace });
   registry.create({ name: 'orders.in', type: 'direct' });
   const store = new MemoryIdempotencyStore();
   const idempotency = new IdempotencyService({ store });
-  const runtime = new ResilienceRuntime(
-    { clock: manualResilienceClock(), ...options },
-    { enabled },
-  );
+  const runtime = new CareEngine({ clock: manualCareClock(), ...options }, { enabled });
   const replyGateway = new ReplyGateway({ registry, trace, defaultTimeoutMs: 500 });
   const interceptor = new InboundInterceptor({
     registry,
     trace,
     idempotency,
     replyGateway,
-    resilience: runtime,
+    care: runtime,
   });
   return { registry, store, interceptor, runtime };
 }
 
-describe('inbound load shedding and budget', () => {
-  it('RU-37 inbound accepts only bulkhead and rateLimit and refuses Rabbit', () => {
-    const runtime = new ResilienceRuntime();
+describe('inbound load shedding and tries left', () => {
+  it('RU-37 inbound accepts only lanes and pace and refuses Rabbit', () => {
+    const runtime = new CareEngine();
     const base = { channel: 'orders.in', transport: 'rest' as const };
     expect(() =>
-      inboundShedPlan({ ...base, resilience: { retry: {} } as never }, undefined, runtime),
-    ).toThrow(ResilienceDefinitionError);
+      inboundShedPlan({ ...base, care: { tries: {} } as never }, undefined, runtime),
+    ).toThrow(CareConfigError);
     expect(() =>
       inboundShedPlan(
-        { ...base, transport: 'rabbit', resilience: { bulkhead: { maxConcurrent: 1 } } },
+        { ...base, transport: 'rabbit', care: { lanes: { count: 1 } } },
         undefined,
         runtime,
       ),
-    ).toThrow('orders.in: resilience.transport is not allowed on @InboundRabbit');
+    ).toThrow('orders.in: care.transport is not allowed on @InboundRabbit');
     expect(
-      inboundShedPlan(
-        { ...base, transport: 'rabbit' },
-        { resilience: { bulkhead: { maxConcurrent: 1 } } },
-        runtime,
-      ),
+      inboundShedPlan({ ...base, transport: 'rabbit' }, { care: { lanes: { count: 1 } } }, runtime),
     ).toBeUndefined();
     expect(inboundShedPlan(base, undefined, runtime)).toBeUndefined();
-    expect(
-      inboundShedPlan(base, { resilience: { bulkhead: { maxConcurrent: 2 } } }, runtime)?.bulkhead
-        ?.maxConcurrent,
-    ).toBe(2);
+    expect(inboundShedPlan(base, { care: { lanes: { count: 2 } } }, runtime)?.lanes?.count).toBe(2);
   });
 
-  it('sheds over the rate limit with 429 and Retry-After before the idempotency claim', async () => {
+  it('sheds over the pace with 429 and Retry-After before the idempotency claim', async () => {
     const w = world();
     w.registry.get('orders.in').subscribe(() => undefined);
     const spec: InboundSpec = {
       channel: 'orders.in',
       transport: 'rest',
       idempotency: {},
-      resilience: { rateLimit: { limitPerSec: 1, burst: 1 } },
+      care: { pace: { perSecond: 1, burst: 1 } },
     };
     const first = httpContext(spec, { 'idempotency-key': 'a' });
     await lastValueFrom(await w.interceptor.intercept(first.context, next()));
     const second = httpContext(spec, { 'idempotency-key': 'b' });
     const error = await w.interceptor.intercept(second.context, next()).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(InboundOverloadedError);
-    expect((error as InboundOverloadedError).getStatus()).toBe(429);
-    expect((error as InboundOverloadedError).grpcCode).toBe(8);
+    expect(error).toBeInstanceOf(InboundBusyError);
+    expect((error as InboundBusyError).getStatus()).toBe(429);
+    expect((error as InboundBusyError).grpcCode).toBe(8);
     expect(second.response['Retry-After']).toBe('1');
     expect(await w.store.get('inbound:orders.in', 'b')).toBeUndefined();
     expect((await w.store.get('inbound:orders.in', 'a'))?.status).toBe('completed');
   });
 
-  it('holds the bulkhead slot until the reply observable completes', async () => {
+  it('holds the lanes slot until the reply observable completes', async () => {
     const w = world();
     w.registry.get('orders.in').subscribe(() => undefined);
     const spec: InboundSpec = {
       channel: 'orders.in',
       transport: 'rest',
-      resilience: { bulkhead: { maxConcurrent: 1 } },
+      care: { lanes: { count: 1 } },
     };
     const pending = new Subject<unknown>();
     const firstObservable = await w.interceptor.intercept(httpContext(spec).context, {
@@ -120,7 +110,7 @@ describe('inbound load shedding and budget', () => {
     const shed = await w.interceptor
       .intercept(httpContext(spec).context, next())
       .catch((e: unknown) => e);
-    expect((shed as InboundOverloadedError).reason).toBe('bulkhead-full');
+    expect((shed as InboundBusyError).reason).toBe('lanes-full');
     pending.next({});
     pending.complete();
     await result;
@@ -128,7 +118,7 @@ describe('inbound load shedding and budget', () => {
     await expect(w.interceptor.intercept(httpContext(spec).context, next())).resolves.toBeDefined();
   });
 
-  it('RE-02 (unit) reads x-retry-budget into the message only when resilience is enabled', async () => {
+  it('RE-02 (unit) reads x-tries-left into the message only when care is enabled', async () => {
     for (const enabled of [true, false]) {
       const w = world({}, enabled);
       const seen: IntegrationMessage[] = [];
@@ -137,19 +127,19 @@ describe('inbound load shedding and budget', () => {
       });
       const { context } = httpContext(
         { channel: 'orders.in', transport: 'rest' },
-        { 'x-retry-budget': '0' },
+        { 'x-tries-left': '0' },
       );
       await lastValueFrom(await w.interceptor.intercept(context, next()));
-      expect(seen[0]!.headers.retryBudget).toBe(enabled ? 0 : undefined);
+      expect(seen[0]!.headers.triesLeft).toBe(enabled ? 0 : undefined);
     }
   });
 
-  it('RU-27 a degraded reply releases the inbound claim so a replay key re-executes', async () => {
+  it('RU-27 a plan-B-marked reply releases the inbound claim so a replay key re-executes', async () => {
     const w = world();
     let runs = 0;
     w.registry.get('orders.in').subscribe(async (msg) => {
       runs += 1;
-      await w.registry.send(msg.headers.replyChannel!, 'fallback', { [DEGRADED_HEADER]: true });
+      await w.registry.send(msg.headers.replyChannel!, 'plan-b', { [PLAN_B_HEADER]: true });
     });
     const spec: InboundSpec = {
       channel: 'orders.in',

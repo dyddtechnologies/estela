@@ -1,4 +1,4 @@
-import type { ResilienceStatePort } from '../resilience.types';
+import type { CareStatePort } from '../resilience.types';
 import {
   CLEAR_OPEN_SCRIPT,
   MARK_OPEN_SCRIPT,
@@ -24,39 +24,39 @@ function toNumber(value: unknown): number | undefined {
 }
 
 /**
- * Reference `ResilienceStatePort` over Redis (RS-23). It imports no Redis client: the app passes a
- * function that evaluates a Lua script. Buckets refill on Redis server time.
+ * Reference `CareStatePort` over Redis (RS-23). It imports no Redis client: the app passes a
+ * function that evaluates a Lua script. Turns refill on Redis server time.
  */
-export function redisResilienceStatePort(
+export function redisCareState(
   evalScript: RedisEvalFn,
   options: { prefix?: string } = {},
-): ResilienceStatePort {
+): CareStatePort {
   const prefix = options.prefix ?? '';
   const key = (name: string): string => `${prefix}${name}`;
   return {
-    async takeToken(name, limitPerSec, burst) {
+    async takeTurn(name, perSecond, burst) {
       const answer = await evalScript(
         TAKE_TOKEN_SCRIPT,
         [key(name)],
-        [String(limitPerSec), String(burst)],
+        [String(perSecond), String(burst)],
       );
       const [granted, wait] = Array.isArray(answer) ? (answer as unknown[]) : [];
-      return { granted: toNumber(granted) === 1, retryAfterMs: toNumber(wait) ?? 0 };
+      return { granted: toNumber(granted) === 1, readyInMs: toNumber(wait) ?? 0 };
     },
-    async markOpen(name, untilMs) {
+    async markShut(name, untilMs) {
       await evalScript(MARK_OPEN_SCRIPT, [key(name)], [String(untilMs), String(Date.now())]);
     },
-    async openUntil(name) {
+    async shutUntil(name) {
       return toNumber(await evalScript(OPEN_UNTIL_SCRIPT, [key(name)], []));
     },
-    async tryProbeLease(name, leaseMs) {
+    async claimProbe(name, leaseMs) {
       return (
         toNumber(
           await evalScript(PROBE_LEASE_SCRIPT, [key(`${name}:lease`)], [String(leaseMs)]),
         ) === 1
       );
     },
-    async clearOpen(name) {
+    async clearShut(name) {
       await evalScript(CLEAR_OPEN_SCRIPT, [key(name), key(`${name}:lease`)], []);
     },
   };

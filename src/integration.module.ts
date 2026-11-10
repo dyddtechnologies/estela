@@ -22,7 +22,7 @@ import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
 import {
   FlowParameterResolver,
   type FlowResolution,
-  type RetryingTarget,
+  type TryingTarget,
 } from './flow/flow-parameter-resolver';
 import type { FlowDefinition } from './flow/integration-flow';
 import { IdempotencyService } from './idempotency/idempotency.service';
@@ -33,7 +33,7 @@ import { ChannelGraph } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
 import {
-  activatorResilience,
+  activatorCare,
   subscribeActivator,
   type ActivatorDeps,
 } from './activator/activator-wrapper';
@@ -46,18 +46,18 @@ import {
   type OutboundRestSpec,
 } from './outbound/outbound.decorators';
 import type { OutboundModuleOptions } from './outbound/outbound.types';
-import { ResilienceRegistry } from './resilience/registry';
-import { describePolicy } from './resilience/resilience.plan';
+import { CareControl } from './resilience/registry';
+import { describeCare } from './resilience/resilience.plan';
 import { inboundShedPlan } from './inbound/inbound.resilience';
-import type { ResilienceLogger, ResilienceModuleOptions } from './resilience/resilience.types';
-import { ResilienceRuntime } from './resilience/runtime';
+import type { CareLogger, CareModuleOptions } from './resilience/resilience.types';
+import { CareEngine } from './resilience/runtime';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
-/** DI token of the module's `ResilienceRuntime` (always present; enabled by forRoot({ resilience })). */
-export const RESILIENCE_RUNTIME = 'INTEGRATION_RESILIENCE_RUNTIME';
+/** DI token of the module's `CareEngine` (always present; enabled by forRoot({ care })). */
+export const CARE_ENGINE = 'INTEGRATION_CARE_ENGINE';
 
-function nestResilienceLogger(): ResilienceLogger {
-  const logger = new Logger('EstelaResilience');
+function nestCareLogger(): CareLogger {
+  const logger = new Logger('EstelaCare');
   return {
     log: (message) => logger.log(message),
     warn: (message) => logger.warn(message),
@@ -87,10 +87,10 @@ export interface IntegrationModuleOptions {
   /** Outbound adapters: module-wide defaults and declared bindings (REST request/reply). */
   outbound?: OutboundModuleOptions;
   /**
-   * Resilience (SPI-445): named policies, retry budget, events channel, metrics and key handling.
-   * Without it, bindings that use `resilience` still run, but no retry budget is read or sent.
+   * Care (SPI-445): named profiles, tries left, events channel, metrics and key handling.
+   * Without it, bindings that use `care` still run, but no tries left are read or sent.
    */
-  resilience?: ResilienceModuleOptions;
+  care?: CareModuleOptions;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
@@ -109,13 +109,13 @@ function inboundDepsProvider(): Provider {
       gateway: ReplyGateway,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
-      resilience: ResilienceRuntime,
+      care: CareEngine,
     ): InboundInterceptorDeps => ({
       registry,
       trace,
       idempotency,
       replyGateway: gateway,
-      resilience,
+      care,
       ...(opts.inbound !== undefined ? { defaults: opts.inbound } : {}),
       // Lazy and app-wide: consumer providers do not exist yet when this factory runs.
       resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
@@ -127,7 +127,7 @@ function inboundDepsProvider(): Provider {
       ReplyGateway,
       INTEGRATION_OPTIONS,
       ModuleRef,
-      RESILIENCE_RUNTIME,
+      CARE_ENGINE,
     ],
   };
 }
@@ -146,32 +146,32 @@ function outboundRestProvider(): Provider {
       trace: TraceContext,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
-      resilience: ResilienceRuntime,
+      care: CareEngine,
     ): OutboundRestGateway => {
       const defaults = opts.outbound?.rest?.defaults;
       const logger = hopLoggerOf(opts);
       return new OutboundRestGateway({
         registry,
         trace,
-        resilience,
+        care,
         ...(defaults === undefined ? {} : { defaults }),
         ...(logger === undefined ? {} : { logger }),
         resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
       });
     },
-    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef, RESILIENCE_RUNTIME],
+    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef, CARE_ENGINE],
   };
 }
 
-/** The resilience runtime, its request/reply for channel fallbacks and, when enabled, the registry. */
-function resilienceProviders(options: IntegrationModuleOptions): Provider[] {
+/** The care engine, its request/reply for plan B channels and, when enabled, `CareControl`. */
+function careProviders(options: IntegrationModuleOptions): Provider[] {
   const providers: Provider[] = [
     {
-      provide: RESILIENCE_RUNTIME,
-      useFactory: (gateway: ReplyGateway): ResilienceRuntime => {
-        const runtime = new ResilienceRuntime(options.resilience ?? {}, {
-          enabled: options.resilience !== undefined,
-          logger: nestResilienceLogger(),
+      provide: CARE_ENGINE,
+      useFactory: (gateway: ReplyGateway): CareEngine => {
+        const runtime = new CareEngine(options.care ?? {}, {
+          enabled: options.care !== undefined,
+          logger: nestCareLogger(),
         });
         runtime.setRequestReply((channel, payload, headers) =>
           gateway.sendAndReceive(channel, payload, headers),
@@ -181,11 +181,11 @@ function resilienceProviders(options: IntegrationModuleOptions): Provider[] {
       inject: [ReplyGateway],
     },
   ];
-  if (options.resilience !== undefined) {
+  if (options.care !== undefined) {
     providers.push({
-      provide: ResilienceRegistry,
-      useFactory: (runtime: ResilienceRuntime) => runtime.registry,
-      inject: [RESILIENCE_RUNTIME],
+      provide: CareControl,
+      useFactory: (runtime: CareEngine) => runtime.control,
+      inject: [CARE_ENGINE],
     });
   }
   return providers;
@@ -246,7 +246,7 @@ export class IntegrationModule {
           new ReplyGateway({ registry, trace }),
         inject: [ChannelRegistry, TraceContext],
       },
-      ...resilienceProviders(options),
+      ...careProviders(options),
       inboundDepsProvider(),
       outboundRestProvider(),
       {
@@ -284,8 +284,8 @@ export class IntegrationModule {
         INBOUND_DEPS,
         InboundExplorer,
         OutboundRestGateway,
-        RESILIENCE_RUNTIME,
-        ...(options.resilience === undefined ? [] : [ResilienceRegistry]),
+        CARE_ENGINE,
+        ...(options.care === undefined ? [] : [CareControl]),
       ],
     };
   }
@@ -306,8 +306,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     @Inject(INTEGRATION_OPTIONS)
     private readonly options: ResolvedIntegrationOptions,
     private readonly outbound: OutboundRestGateway,
-    @Inject(RESILIENCE_RUNTIME)
-    private readonly resilience: ResilienceRuntime,
+    @Inject(CARE_ENGINE)
+    private readonly care: CareEngine,
   ) {}
 
   /**
@@ -329,23 +329,20 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     for (const spec of this.options.channels) {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
     }
-    this.resilience.declareChannels(this.options.channels);
-    if (this.resilience.enabled) this.registry.inheritRetryBudget();
-    this.openResilienceEvents();
+    this.care.declareChannels(this.options.channels);
+    if (this.care.enabled) this.registry.inheritTriesLeft();
+    this.openCareEvents();
 
     // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
-    const resolution = new FlowParameterResolver(this.resilience, this.registry).resolve(
+    const resolution = new FlowParameterResolver(this.care, this.registry).resolve(
       this.options.flows,
     );
 
     // 2. activators (DiscoveryModule) and outbound bindings
-    const retryingActivators = this.subscribeDiscoveredActivators();
+    const tryingActivators = this.subscribeDiscoveredActivators();
     this.logDiscoveredInbounds();
-    const retryingOutbounds = this.bindOutbounds();
-    this.warnStackedRetries(resolution.retryingTargets, [
-      ...retryingActivators,
-      ...retryingOutbounds,
-    ]);
+    const tryingOutbounds = this.bindOutbounds();
+    this.warnStackedTries(resolution.tryingTargets, [...tryingActivators, ...tryingOutbounds]);
 
     // 3. flows: graph.recordFlow + attach (spec sec.11 step 3)
     this.attachFlows(resolution);
@@ -355,10 +352,10 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
 
   private attachFlows(resolution: FlowResolution): void {
-    for (const [channel, policy] of resolution.channelPolicies) {
-      this.graph.recordChannelPolicy(channel, policy);
+    for (const [channel, care] of resolution.channelCare) {
+      this.graph.recordChannelCare(channel, care);
     }
-    this.graph.recordModulePolicies(Object.keys(this.resilience.options.policies ?? {}));
+    this.graph.recordCareProfiles(Object.keys(this.care.options.profiles ?? {}));
     for (const flow of resolution.flows) {
       this.graph.recordFlow(flow.name, flow.built, flow.described);
       const executorDeps: FlowDeps = {
@@ -366,8 +363,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
         trace: this.trace,
         errorChannel: this.options.errorChannel,
         idempotency: this.idempotency,
-        resilience: this.resilience,
-        policies: flow.policies,
+        care: this.care,
+        stepCare: flow.stepCare,
       };
       if (this.options.idempotency?.ttlMs !== undefined) {
         executorDeps.idempotencyTtlMs = this.options.idempotency.ttlMs;
@@ -379,34 +376,34 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
 
   /**
-   * RS-56, RS-60: one RETRY_STACKED warning per flow target whose retry sends into a channel
-   * whose activator or outbound binding also retries. The retry budget bounds the product.
+   * RS-56, RS-60: one TRIES_STACKED warning per flow target whose extra tries send into a
+   * channel whose activator or outbound binding also tries again. Tries left bound the product.
    */
-  private warnStackedRetries(
-    targets: readonly RetryingTarget[],
+  private warnStackedTries(
+    targets: readonly TryingTarget[],
     endpoints: readonly { channel: string; subject: string }[],
   ): void {
     for (const target of targets) {
       for (const endpoint of endpoints.filter((e) => e.channel === target.channel)) {
-        this.resilience.observer.logger.warn(
-          `RETRY_STACKED: ${target.subject} retries into channel '${target.channel}', and ${endpoint.subject} retries too; the retry budget bounds the attempts`,
+        this.care.observer.logger.warn(
+          `TRIES_STACKED: ${target.subject} tries again into channel '${target.channel}', and ${endpoint.subject} tries again too; tries left bound the total`,
         );
       }
     }
   }
 
   /** RS-40: pubsub events channel, published fire-and-forget. */
-  private openResilienceEvents(): void {
-    const channel = this.resilience.eventsChannel;
+  private openCareEvents(): void {
+    const channel = this.care.eventsChannel;
     if (channel === undefined) return;
     if (this.registry.tryGet(channel) === undefined)
       this.registry.create({ name: channel, type: 'pubsub' });
-    this.resilience.setPublisher((event) => this.registry.send(channel, event));
+    this.care.setPublisher((event) => this.registry.send(channel, event));
   }
 
-  /** Shutdown: background flow attempts stop, then queues drain (plan sec.8.6/sec.9.10). */
+  /** Shutdown: background flow tries stop, then queues drain (plan sec.8.6/sec.9.10). */
   async onApplicationShutdown(): Promise<void> {
-    this.resilience.shutdown();
+    this.care.shutdown();
     for (const channel of this.registry.list()) {
       if (channel.kind === 'queue') await channel.close?.();
     }
@@ -432,17 +429,17 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
-  /** Subscribes every activator; returns those whose policy retries (RETRY_STACKED input). */
+  /** Subscribes every activator; returns those whose care tries again (TRIES_STACKED input). */
   private subscribeDiscoveredActivators(): { channel: string; subject: string }[] {
-    const retrying: { channel: string; subject: string }[] = [];
+    const trying: { channel: string; subject: string }[] = [];
     const found = this.annotatedMethods<ActivatorMetadata>(ACTIVATOR_METADATA);
     for (const { instance, methodName, metadata } of found) {
       const binding = { instance, methodName, metadata };
       const deps = this.activatorDeps();
       subscribeActivator(binding, deps);
-      const { summary, executor } = activatorResilience(binding, deps);
-      if ((executor?.plan.retry?.maxAttempts ?? 1) > 1) {
-        retrying.push({
+      const { summary, executor } = activatorCare(binding, deps);
+      if ((executor?.plan.tries?.max ?? 1) > 1) {
+        trying.push({
           channel: metadata.channel,
           subject: `activator ${instance.constructor.name}.${methodName}`,
         });
@@ -456,7 +453,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
         `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
       );
     }
-    return retrying;
+    return trying;
   }
 
   /**
@@ -464,7 +461,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
    * with one line each and recorded in the graph. A misconfigured binding fails the boot.
    */
   private bindOutbounds(): { channel: string; subject: string }[] {
-    const retrying: { channel: string; subject: string }[] = [];
+    const trying: { channel: string; subject: string }[] = [];
     for (const binding of this.options.outbound?.rest?.bindings ?? []) {
       this.outbound.bind(binding);
     }
@@ -477,16 +474,16 @@ export class IntegrationRuntime implements OnApplicationShutdown {
         const ref = { transport: 'rest' as const, target: info.target };
         this.graph.recordOutbound(
           info.channel,
-          info.policy === undefined ? ref : { ...ref, policy: info.policy },
+          info.care === undefined ? ref : { ...ref, care: info.care },
         );
       }
-      // The binding summary (RS-42) names `retry xN` only when more than one attempt is allowed.
-      if (info.channel !== undefined && /\bretry x\d+/.test(info.policy ?? '')) {
-        retrying.push({ channel: info.channel, subject: `outbound rest '${info.name}'` });
+      // The binding summary (RS-42) names `tries xN` only when more than one try is allowed.
+      if (info.channel !== undefined && /\btries x\d+/.test(info.care ?? '')) {
+        trying.push({ channel: info.channel, subject: `outbound rest '${info.name}'` });
       }
       this.logger.log(info.line);
     }
-    return retrying;
+    return trying;
   }
 
   /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */
@@ -505,11 +502,11 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       skipped(error);
     }
     for (const inbound of inbounds) {
-      // RS-03, RS-37: an invalid shedding policy fails the boot, outside the discovery guard.
-      const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.resilience);
-      const policy = plan === undefined ? undefined : describePolicy(plan);
-      this.graph.recordInbound(inbound.spec, policy);
-      this.logger.log(policy === undefined ? inbound.line : `${inbound.line} [${policy}]`);
+      // RS-03, RS-37: invalid inbound care fails the boot, outside the discovery guard.
+      const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.care);
+      const summary = plan === undefined ? undefined : describeCare(plan);
+      this.graph.recordInbound(inbound.spec, summary);
+      this.logger.log(summary === undefined ? inbound.line : `${inbound.line} [${summary}]`);
     }
   }
 
@@ -526,7 +523,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       trace: this.trace,
       errorChannel: this.options.errorChannel,
       idempotency: this.idempotency,
-      resilience: this.resilience,
+      care: this.care,
     };
     if (this.options.idempotency?.ttlMs !== undefined) {
       deps.idempotencyTtlMs = this.options.idempotency.ttlMs;

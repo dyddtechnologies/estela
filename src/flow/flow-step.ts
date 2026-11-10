@@ -1,6 +1,6 @@
 import type { ChannelRegistry } from '../channel-registry';
 import type { IntegrationMessage } from '../message';
-import type { ResilienceRef } from '../resilience/resilience.types';
+import type { CareRef } from '../resilience/resilience.types';
 import type { TraceContext } from '../trace/trace-context';
 
 /**
@@ -26,43 +26,43 @@ export interface FlowStepContext {
   trace: TraceContext;
   errorChannel: string;
   flowName: string;
-  /** Resolved resilience of this step (RS-55..RS-66); absent = the 0.9.0 code path. */
-  policy?: StepPolicyPort;
-  /** True once a fallback marked this flow run degraded (RS-64); absent without a runtime. */
-  degraded?: () => boolean;
+  /** Resolved care of this step (RS-55..RS-66); absent = the 0.9.0 code path. */
+  care?: StepCarePort;
+  /** True once plan B answered for this flow run (RS-64); absent when the run has no care. */
+  planB?: () => boolean;
 }
 
-/** One attempt as the resilience engine hands it to a step. */
-export interface PolicyAttempt {
-  attempt: number;
+/** One try as the care engine hands it to a step. */
+export interface StepTry {
+  tryNumber: number;
   signal: AbortSignal | undefined;
-  /** Effective wait of this attempt in ms; 0 = no per-attempt timeout. */
-  timeoutMs: number;
-  /** Retry budget to stamp on the hop; undefined = leave the hop as built. */
-  budgetOut: number | undefined;
+  /** Effective wait of this try in ms; 0 = no limit. */
+  eachTryMs: number;
+  /** Tries left to stamp on the hop; undefined = leave the hop as built. */
+  triesLeftOut: number | undefined;
 }
 
-/** Resolved policy of one subject: a `handle` step or one send or jump target. */
-export interface TargetPolicyPort {
-  /** Policy subject, `flow:<flow>#<stepId>` or `flow:<flow>#<stepId>:<channel>`. */
+/** Resolved care of one subject: a `handle` step or one send or jump target. */
+export interface TargetCarePort {
+  /** Care subject, `flow:<flow>#<stepId>` or `flow:<flow>#<stepId>:<channel>`. */
   readonly binding: string;
-  /** Runs the attempts; `data` is edge data (the hop of a send target). */
+  /** Runs the tries; `data` is edge data (the hop of a send target). */
   run<T>(
     msg: IntegrationMessage,
-    attempt: (a: PolicyAttempt) => Promise<T>,
+    attempt: (current: StepTry) => Promise<T>,
     data?: unknown,
-  ): Promise<{ value: T; fallback: boolean }>;
+  ): Promise<{ value: T; planB: boolean }>;
 }
 
 /**
- * What a step asks of its resolved resilience. The flow layer implements it
- * (`flow-resilience.ts`); the domain only names the shape.
+ * What a step asks of its resolved care. The flow layer implements it;
+ * the domain only names the shape.
  */
-export interface StepPolicyPort {
-  /** Policy of one target channel, or undefined when the target has no effective policy. */
-  target(channel: string): TargetPolicyPort | undefined;
-  /** Policy of a `handle` step, or undefined. */
-  readonly handle?: TargetPolicyPort | undefined;
+export interface StepCarePort {
+  /** Care of one target channel, or undefined when the target has no effective care. */
+  target(channel: string): TargetCarePort | undefined;
+  /** Care of a `handle` step, or undefined. */
+  readonly handle?: TargetCarePort | undefined;
 }
 
 export type StepOutcome =
@@ -74,7 +74,7 @@ export interface FlowStep {
   readonly kind: FlowStepKind;
   describe(): Record<string, unknown>;
   execute(ctx: FlowStepContext): Promise<StepOutcome>;
-  /** Flow parameters of the step (id, resilience, targets); absent on a step built without any. */
+  /** Flow parameters of the step (id, care, targets); absent on a step built without any. */
   readonly params?: StepParams | undefined;
 }
 
@@ -89,26 +89,26 @@ export interface StepCommonOptions {
   id?: string;
 }
 
-/** Options of a step that accepts a resilience policy (L4). */
-export interface ResilientStepOptions extends StepCommonOptions {
-  resilience?: ResilienceRef;
+/** Options of a step that accepts care (L4). */
+export interface CareStepOptions extends StepCommonOptions {
+  care?: CareRef;
 }
 
-/** Options of `jump(channel, opts)`. `timeoutMs` is the legacy alias of `perAttemptMs`. */
+/** Options of `jump(channel, opts)`. `timeoutMs` is the 0.9.0 spelling of `care.patience.eachTryMs`. */
 export interface JumpOptions {
   wait?: boolean;
   timeoutMs?: number;
-  resilience?: ResilienceRef;
+  care?: CareRef;
   id?: string;
 }
 
 /** Flow-level defaults (L3), split by step family (RS-55). */
 export interface FlowOptions {
-  resilience?: {
-    handle?: ResilienceRef;
-    jump?: ResilienceRef;
+  care?: {
+    handle?: CareRef;
+    jump?: CareRef;
     /** `to`, `publish`, `route` and `fanoutTo`. */
-    send?: ResilienceRef;
+    send?: CareRef;
   };
 }
 
@@ -116,8 +116,8 @@ export interface FlowOptions {
 export interface StepParams {
   /** Explicit id, when the author set one. */
   readonly id?: string;
-  /** L4 step policy; on `fanoutTo`/`jumpTo` it applies to every target. */
-  readonly resilience?: ResilienceRef;
+  /** L4 step care; on `fanoutTo`/`jumpTo` it applies to every target. */
+  readonly care?: CareRef;
   /** Static targets; `route` resolves its targets at run time. */
   readonly targets?: readonly FlowTarget[];
 }
@@ -132,9 +132,9 @@ export interface FanoutTargetInput {
 
 export type FanoutDest = string | FanoutTargetInput;
 
-/** A target of `fanoutTo` / `jumpTo`; its own policy replaces the step's per primitive. */
+/** A target of `fanoutTo` / `jumpTo`; its own care replaces the step's part by part. */
 export interface FlowTarget extends FanoutTargetInput {
-  resilience?: ResilienceRef;
+  care?: CareRef;
 }
 
 export type FlowDest = string | FlowTarget;
@@ -143,11 +143,11 @@ export function normalizeDests(dests: readonly FlowDest[]): FlowTarget[] {
   return dests.map((dest) => (typeof dest === 'string' ? { channel: dest } : dest));
 }
 
-/** A target as the graph shows it: the policy reference is never described (RS-66). */
+/** A target as the graph shows it: the care reference is never described (RS-66). */
 export function describeDest(target: FlowTarget): Record<string, unknown> {
-  if (!Object.hasOwn(target, 'resilience')) return target as unknown as Record<string, unknown>;
+  if (!Object.hasOwn(target, 'care')) return target as unknown as Record<string, unknown>;
   const described: Record<string, unknown> = { ...target };
-  delete described.resilience;
+  delete described.care;
   return described;
 }
 

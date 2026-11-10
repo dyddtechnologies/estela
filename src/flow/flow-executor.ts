@@ -1,19 +1,19 @@
 import type { Unsubscribe } from '../channel';
 import type { ChannelRegistry } from '../channel-registry';
 import { createMessage, type IntegrationMessage } from '../message';
-import { parseRetryBudget, ResilienceScope } from '../resilience/retry-budget';
-import type { ResilienceRuntime } from '../resilience/runtime';
+import { CareScope, parseTriesLeft, TRIES_LEFT_MESSAGE_HEADER } from '../resilience/retry-budget';
+import type { CareEngine } from '../resilience/runtime';
 import type { TraceContext } from '../trace/trace-context';
 import type { HopLogger } from '../trace/hop-logger';
 import type { BuiltFlow } from './integration-flow';
-import type { FlowStepContext, StepOutcome, StepPolicyPort } from './flow-step';
+import type { FlowStepContext, StepOutcome, StepCarePort } from './flow-step';
 
 /** Minimal idempotency port (implemented by IdempotencyService). */
 export interface FlowIdempotencyPort {
   begin(scope: string, key: string, ttlMs: number): Promise<boolean>;
   complete(scope: string, key: string, result: Record<string, unknown>): Promise<void>;
   fail(scope: string, key: string, error: unknown): Promise<void>;
-  /** True when the store can free a key; a degraded run then releases its claim (RS-64). */
+  /** True when the store can free a key; a run that plan B answered then releases its claim (RS-64). */
   readonly supportsRelease?: boolean;
   release?(scope: string, key: string): Promise<unknown>;
 }
@@ -26,12 +26,12 @@ export interface FlowDeps {
   idempotencyTtlMs?: number;
   logger?: HopLogger;
   /**
-   * Resilience runtime: the flow opens a message scope per run (retry budget when enabled,
-   * degraded mark, RS-64, RS-65). Without it the flow runs exactly as in 0.9.0.
+   * Care engine: the flow opens a message scope per run (tries left when enabled, plan B mark,
+   * RS-64, RS-65). Without it the flow runs exactly as in 0.9.0.
    */
-  resilience?: ResilienceRuntime;
-  /** Resolved step policies by step index (`FlowParameterResolver`); absent = none. */
-  policies?: readonly (StepPolicyPort | undefined)[];
+  care?: CareEngine;
+  /** Resolved step care by step index (`FlowParameterResolver`); absent = none. */
+  stepCare?: readonly (StepCarePort | undefined)[];
 }
 
 export type FlowExecutionStatus = 'completed' | 'filtered' | 'duplicate';
@@ -42,7 +42,7 @@ export interface FlowExecutionResult {
 }
 
 interface RunFrame {
-  degraded(): boolean;
+  planB(): boolean;
 }
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 3_600_000;
@@ -72,16 +72,18 @@ export class FlowExecutor {
   }
 
   execute(input: IntegrationMessage): Promise<FlowExecutionResult> {
-    const runtime = this.deps.resilience;
-    if (runtime === undefined) return this.executeInScope(input, undefined);
+    const engine = this.deps.care;
+    if (engine === undefined) return this.executeInScope(input, undefined);
     // RS-64, RS-65: one message scope per run, rebuilt from the headers (invariant 7).
-    const budget = runtime.enabled ? parseRetryBudget(input.headers.retryBudget) : undefined;
+    const triesLeft = engine.enabled
+      ? parseTriesLeft(input.headers[TRIES_LEFT_MESSAGE_HEADER])
+      : undefined;
     const value = {
       traceId: input.headers.traceId,
-      fromEventsChannel: this.built.source === runtime.eventsChannel,
-      ...(budget === undefined ? {} : { budget }),
+      fromEventsChannel: this.built.source === engine.eventsChannel,
+      ...(triesLeft === undefined ? {} : { triesLeft }),
     };
-    return ResilienceScope.runMessage(value, (frame) => this.executeInScope(input, frame));
+    return CareScope.runMessage(value, (frame) => this.executeInScope(input, frame));
   }
 
   private async executeInScope(
@@ -98,7 +100,7 @@ export class FlowExecutor {
     try {
       const result = await this.runTracked(input, frame);
       if (claim !== undefined) {
-        await settleClaim(claim.idem, scope, claim.key, result, frame?.degraded() === true);
+        await settleClaim(claim.idem, scope, claim.key, result, frame?.planB() === true);
       }
       return result;
     } catch (error) {
@@ -181,9 +183,9 @@ export class FlowExecutor {
       errorChannel: this.deps.errorChannel,
       flowName: this.flowName,
     };
-    const policy = this.deps.policies?.[index];
-    if (policy !== undefined) ctx.policy = policy;
-    if (frame !== undefined) ctx.degraded = () => frame.degraded();
+    const care = this.deps.stepCare?.[index];
+    if (care !== undefined) ctx.care = care;
+    if (frame !== undefined) ctx.planB = () => frame.planB();
     return ctx;
   }
 
@@ -202,17 +204,17 @@ export class FlowExecutor {
 }
 
 /**
- * Completes the flow claim, except on a degraded run (RS-64, RS-27): a fallback result is never
- * stored, so the claim is released when the store can, else marked failed.
+ * Completes the flow claim, except on a run that plan B answered (RS-64, RS-27): a plan B result
+ * is never stored, so the claim is released when the store can, else marked failed.
  */
 async function settleClaim(
   idem: FlowIdempotencyPort,
   scope: string,
   key: string,
   result: FlowExecutionResult,
-  degraded: boolean,
+  planB: boolean,
 ): Promise<void> {
-  if (!degraded) {
+  if (!planB) {
     await idem.complete(
       scope,
       key,
@@ -224,5 +226,5 @@ async function settleClaim(
     await idem.release(scope, key);
     return;
   }
-  await idem.fail(scope, key, new Error('degraded result not stored'));
+  await idem.fail(scope, key, new Error('plan B result not stored'));
 }

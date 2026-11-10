@@ -1,19 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { defaultInProcessClassifier } from '../resilience/classifiers';
-import type { ResilienceEdgeAdapter, ResilienceExecutor } from '../resilience/executor';
-import {
-  expandPolicyRef,
-  resolveResiliencePlan,
-  type ResiliencePlan,
-} from '../resilience/resilience.plan';
-import type {
-  ResilienceLogger,
-  ResilienceModuleOptions,
-  ResiliencePolicy,
-  ResilienceRef,
-} from '../resilience/resilience.types';
-import { ResilienceRuntime } from '../resilience/runtime';
-import { AttemptTimeoutError } from '../resilience/timeout';
+import type { CareEdgeAdapter, CareExecutor } from '../resilience/executor';
+import { expandCareRef, resolveCarePlan, type CarePlan } from '../resilience/resilience.plan';
+import type { CareLogger, CareModuleOptions, Care, CareRef } from '../resilience/resilience.types';
+import { CareEngine } from '../resilience/runtime';
+import { TryOverdueError } from '../resilience/timeout';
 import { SagaDefinitionError } from './concurrency-errors';
 
 const EDGE = 'saga-outbound';
@@ -23,43 +14,43 @@ export function sagaStepBinding(sagaName: string, stepName: string): string {
   return `${sagaName}:${stepName}`;
 }
 
-function hasFallback(policy: ResiliencePolicy | false | undefined): boolean {
-  return policy !== undefined && policy !== false && policy.fallback !== undefined;
+function hasFallback(care: Care | false | undefined): boolean {
+  return care !== undefined && care !== false && care.planB !== undefined;
 }
 
-function fallbackError(binding: string, origin: string): SagaDefinitionError {
+function planBError(binding: string, origin: string): SagaDefinitionError {
   return new SagaDefinitionError(
-    `${binding}: resilience.fallback ${origin} is not allowed on a saga outbound step; it would hide the failure and skip the compensation`,
+    `${binding}: care.planB ${origin} is not allowed on a saga outbound step; it would hide the failure and skip the compensation`,
   );
 }
 
-function assertIdempotentRetry(plan: ResiliencePlan): void {
-  const retry = plan.retry;
-  if (retry === undefined || retry.maxAttempts <= 1 || retry.idempotent) return;
+function assertIdempotentTries(plan: CarePlan): void {
+  const tries = plan.tries;
+  if (tries === undefined || tries.max <= 1 || tries.idempotent) return;
   throw new SagaDefinitionError(
-    `${plan.binding}: resilience.retry.maxAttempts > 1 on a saga outbound step needs retry.idempotent: true`,
+    `${plan.binding}: care.tries.max > 1 on a saga outbound step needs tries.idempotent: true`,
   );
 }
 
 /**
- * RS-38, checked when `.outbound()` is declared: an inline fallback is refused, and an inline
- * policy without a profile is resolved so a retry without `idempotent: true` and any invalid
- * value fail here. A profile reference is resolved on the first run, against the runner options.
+ * RS-38, checked when `.outbound()` is declared: an inline plan B is refused, and inline care
+ * without a profile is resolved so extra tries without `idempotent: true` and any invalid value
+ * fail here. A profile reference is resolved on the first run, against the runner options.
  */
-export function validateOutboundResilience(
+export function validateOutboundCare(
   sagaName: string,
   stepName: string,
-  ref: ResilienceRef | undefined,
+  ref: CareRef | undefined,
 ): void {
   if (ref === undefined || ref === false || typeof ref === 'string') return;
   const binding = sagaStepBinding(sagaName, stepName);
-  if (hasFallback(ref)) throw fallbackError(binding, 'set on the step');
+  if (hasFallback(ref)) throw planBError(binding, 'set on the step');
   if (Object.hasOwn(ref, 'use')) return;
-  assertIdempotentRetry(resolveResiliencePlan(binding, [ref], EDGE));
+  assertIdempotentTries(resolveCarePlan(binding, [ref], EDGE));
 }
 
-function nestLogger(): ResilienceLogger {
-  const logger = new Logger('EstelaResilience');
+function nestLogger(): CareLogger {
+  const logger = new Logger('EstelaCare');
   return {
     log: (message) => logger.log(message),
     warn: (message) => logger.warn(message),
@@ -68,42 +59,39 @@ function nestLogger(): ResilienceLogger {
   };
 }
 
-function stepAdapter(binding: string): ResilienceEdgeAdapter {
+function stepAdapter(binding: string): CareEdgeAdapter {
   return {
     kind: EDGE,
     classify: (error) => defaultInProcessClassifier(error),
     // Repeatable only when declared idempotent (checked at definition): a step has no key.
     repeatable: () => false,
     safe: () => false,
-    timeoutError: (_ctx, timeoutMs) => new AttemptTimeoutError(binding, timeoutMs),
+    overdueError: (_ctx, eachTryMs) => new TryOverdueError(binding, eachTryMs),
   };
 }
 
-interface OutboundResilienceStep {
+interface OutboundCareStep {
   readonly name: string;
-  readonly resilience?: ResilienceRef;
+  readonly care?: CareRef;
 }
 
 /**
  * Resolves and caches the executor of each saga outbound step (RS-38). Executors are cached per
- * step object, so a step's breaker, bulkhead and rate limiter persist across runs of the runner.
- * The runner builds its own runtime from `ResilienceModuleOptions`, with the retry budget off.
+ * step object, so a step's valve, lanes and pace persist across runs of the runner.
+ * The runner builds its own engine from `CareModuleOptions`, with tries left off.
  */
-export class SagaResilience {
-  private runtime: ResilienceRuntime | undefined;
-  private readonly executors = new WeakMap<object, ResilienceExecutor<void> | null>();
+export class SagaCare {
+  private runtime: CareEngine | undefined;
+  private readonly executors = new WeakMap<object, CareExecutor<void> | null>();
 
-  constructor(option: ResilienceModuleOptions | ResilienceRuntime | undefined) {
-    if (option instanceof ResilienceRuntime) this.runtime = option;
+  constructor(option: CareModuleOptions | CareEngine | undefined) {
+    if (option instanceof CareEngine) this.runtime = option;
     else if (option !== undefined)
-      this.runtime = new ResilienceRuntime(option, { enabled: false, logger: nestLogger() });
+      this.runtime = new CareEngine(option, { enabled: false, logger: nestLogger() });
   }
 
-  /** The executor of a step, or undefined when no level gives it a policy. */
-  executorFor(
-    sagaName: string,
-    step: OutboundResilienceStep,
-  ): ResilienceExecutor<void> | undefined {
+  /** The executor of a step, or undefined when no level gives it care. */
+  executorFor(sagaName: string, step: OutboundCareStep): CareExecutor<void> | undefined {
     const cached = this.executors.get(step);
     if (cached !== undefined) return cached ?? undefined;
     const executor = this.resolve(sagaName, step);
@@ -111,30 +99,27 @@ export class SagaResilience {
     return executor;
   }
 
-  private resolve(
-    sagaName: string,
-    step: OutboundResilienceStep,
-  ): ResilienceExecutor<void> | undefined {
+  private resolve(sagaName: string, step: OutboundCareStep): CareExecutor<void> | undefined {
     const inherited = this.runtime?.options.defaults?.[EDGE];
-    if (step.resilience === undefined && inherited === undefined) return undefined;
-    this.runtime ??= new ResilienceRuntime({}, { enabled: false, logger: nestLogger() });
+    if (step.care === undefined && inherited === undefined) return undefined;
+    this.runtime ??= new CareEngine({}, { enabled: false, logger: nestLogger() });
     const runtime = this.runtime;
     const binding = sagaStepBinding(sagaName, step.name);
-    const policies = runtime.options.policies;
-    const own = expandPolicyRef(binding, step.resilience, policies);
-    if (hasFallback(own)) throw fallbackError(binding, 'resolved from the step reference');
+    const profiles = runtime.options.profiles;
+    const own = expandCareRef(binding, step.care, profiles);
+    if (hasFallback(own)) throw planBError(binding, 'resolved from the step reference');
     if (own === false) return undefined;
-    let base = expandPolicyRef(binding, inherited, policies);
+    let base = expandCareRef(binding, inherited, profiles);
     if (base !== undefined && base !== false && hasFallback(base)) {
       runtime.observer.logger.warn(
-        `${binding}: resilience.fallback inherited from resilience.defaults.saga-outbound is not allowed on a saga outbound step and was dropped`,
+        `${binding}: care.planB inherited from care.defaults.saga-outbound is not allowed on a saga outbound step and was dropped`,
       );
       const copy = { ...base };
-      delete copy.fallback;
+      delete copy.planB;
       base = copy;
     }
     const plan = runtime.plan(binding, [own, base], EDGE);
-    assertIdempotentRetry(plan);
+    assertIdempotentTries(plan);
     return runtime.executor<void>(plan, stepAdapter(binding));
   }
 }

@@ -1,70 +1,55 @@
 import type { ExecutionContext } from '@nestjs/common';
-import {
-  BulkheadFullError,
-  RateLimitedError,
-  ResilienceDefinitionError,
-} from '../resilience/resilience.errors';
-import { expandPolicyRef, type ResiliencePlan } from '../resilience/resilience.plan';
-import type {
-  InboundShedContext,
-  ResilienceContext,
-  ResiliencePolicy,
-} from '../resilience/resilience.types';
+import { LanesFullError, OverPaceError, CareConfigError } from '../resilience/resilience.errors';
+import { expandCareRef, type CarePlan } from '../resilience/resilience.plan';
+import type { InboundCareContext, CareContext, Care } from '../resilience/resilience.types';
 import { defaultInProcessClassifier } from '../resilience/classifiers';
-import { parseRetryBudgetValue } from '../resilience/retry-budget';
-import type { ResilienceRuntime } from '../resilience/runtime';
+import { parseTriesLeftValue } from '../resilience/retry-budget';
+import type { CareEngine } from '../resilience/runtime';
 import { LoadShedder } from '../resilience/shedder';
-import { InboundOverloadedError } from './inbound.failure';
+import { InboundBusyError } from './inbound.failure';
 import type { InboundTransportStrategy } from './inbound.transport';
 import type { InboundDefaults, InboundSpec } from './inbound.types';
 
-const shedders = new WeakMap<ResilienceRuntime, WeakMap<InboundSpec, LoadShedder | null>>();
+const shedders = new WeakMap<CareEngine, WeakMap<InboundSpec, LoadShedder | null>>();
 
-/** The shed key function of an inbound policy receives the shed context, not a call context. */
-// eslint-disable-next-line sonarjs/function-return-type -- a layer stays to a policy, false (cut) or nothing
-function adaptKey(
-  policy: ResiliencePolicy | false | undefined,
-): ResiliencePolicy | false | undefined {
-  if (policy === false) return false;
-  const rateLimit = policy?.rateLimit;
-  if (rateLimit === undefined || rateLimit === false || rateLimit.key === undefined) return policy;
-  const key = rateLimit.key as unknown as (ctx: InboundShedContext) => string;
+/** The `pace.key` of inbound care receives the inbound context, not a call context. */
+// eslint-disable-next-line sonarjs/function-return-type -- a layer stays care, false (cut) or nothing
+function adaptKey(care: Care | false | undefined): Care | false | undefined {
+  if (care === false) return false;
+  const pace = care?.pace;
+  if (pace === undefined || pace === false || pace.key === undefined) return care;
+  const key = pace.key as unknown as (ctx: InboundCareContext) => string;
   return {
-    ...policy,
-    rateLimit: {
-      ...rateLimit,
-      key: (ctx: ResilienceContext) => key(ctx.data as InboundShedContext),
+    ...care,
+    pace: {
+      ...pace,
+      key: (ctx: CareContext) => key(ctx.data as InboundCareContext),
     },
   };
 }
 
 /**
- * RS-37: resolves the load-shedding plan of an endpoint (bulkhead and rateLimit only) or
- * undefined when it has none. Throws `ResilienceDefinitionError` for other primitives and for
- * any resilience on Rabbit.
+ * RS-37: resolves the inbound care plan of an endpoint (`lanes` and `pace` only) or undefined
+ * when it has none. Throws `CareConfigError` for other parts and for any care on Rabbit.
  */
 export function inboundShedPlan(
   spec: InboundSpec,
   defaults: InboundDefaults | undefined,
-  runtime: ResilienceRuntime,
-): ResiliencePlan | undefined {
+  runtime: CareEngine,
+): CarePlan | undefined {
   if (spec.transport === 'rabbit') {
-    if (spec.resilience !== undefined) {
-      throw new ResilienceDefinitionError(
-        spec.channel,
-        'transport',
-        'is not allowed on @InboundRabbit',
-      );
+    if (spec.care !== undefined) {
+      throw new CareConfigError(spec.channel, 'transport', 'is not allowed on @InboundRabbit');
     }
     return undefined;
   }
-  if (spec.resilience === undefined && defaults?.resilience === undefined) return undefined;
-  const policies = runtime.options.policies;
-  const layers = [spec.resilience, defaults?.resilience].map((ref) =>
-    adaptKey(expandPolicyRef(spec.channel, ref as never, policies)),
+  if (spec.care === undefined && defaults?.care === undefined) return undefined;
+  const profiles = runtime.options.profiles;
+  const layers = [spec.care, defaults?.care].map((ref) =>
+    adaptKey(expandCareRef(spec.channel, ref as never, profiles)),
   );
   const plan = runtime.plan(`inbound:${spec.channel}`, layers, 'inbound', {
-    allowed: ['bulkhead', 'rateLimit'],
+    allowed: ['lanes', 'pace'],
   });
   return plan.empty ? undefined : plan;
 }
@@ -73,7 +58,7 @@ export function inboundShedPlan(
 export function inboundShedder(
   spec: InboundSpec,
   defaults: InboundDefaults | undefined,
-  runtime: ResilienceRuntime,
+  runtime: CareEngine,
 ): LoadShedder | undefined {
   const perRuntime = shedders.get(runtime) ?? new WeakMap<InboundSpec, LoadShedder | null>();
   shedders.set(runtime, perRuntime);
@@ -88,7 +73,7 @@ export function inboundShedder(
             kind: 'inbound',
             classify: (error) => defaultInProcessClassifier(error),
             repeatable: () => false,
-            timeoutError: () => new Error('inbound shedding has no timeout'),
+            overdueError: () => new Error('inbound care has no eachTryMs'),
             defaultKey: () => spec.channel,
           }),
         );
@@ -100,7 +85,7 @@ export function shedContext(
   context: ExecutionContext,
   spec: InboundSpec,
   strategy: InboundTransportStrategy,
-): InboundShedContext {
+): InboundCareContext {
   return {
     channel: spec.channel,
     transport: spec.transport,
@@ -109,23 +94,23 @@ export function shedContext(
   };
 }
 
-/** Maps a shed rejection to `InboundOverloadedError`, setting `Retry-After` on HTTP responses. */
-export function overloaded(error: unknown, context: ExecutionContext, spec: InboundSpec): unknown {
-  let failure: InboundOverloadedError;
-  if (error instanceof RateLimitedError) {
-    failure = new InboundOverloadedError(spec.channel, 'rate-limited', error.retryAfterMs);
-  } else if (error instanceof BulkheadFullError) {
-    failure = new InboundOverloadedError(spec.channel, 'bulkhead-full');
+/** Maps a turned-away call to `InboundBusyError`, setting `Retry-After` on HTTP responses. */
+export function busy(error: unknown, context: ExecutionContext, spec: InboundSpec): unknown {
+  let failure: InboundBusyError;
+  if (error instanceof OverPaceError) {
+    failure = new InboundBusyError(spec.channel, 'over-pace', error.readyInMs);
+  } else if (error instanceof LanesFullError) {
+    failure = new InboundBusyError(spec.channel, 'lanes-full');
   } else {
     return error;
   }
-  if (spec.transport === 'rest' && failure.retryAfterMs !== undefined) {
-    setRetryAfter(context, Math.max(1, Math.ceil(failure.retryAfterMs / 1000)));
+  if (spec.transport === 'rest' && failure.readyInMs !== undefined) {
+    setServerWait(context, Math.max(1, Math.ceil(failure.readyInMs / 1000)));
   }
   return failure;
 }
 
-function setRetryAfter(context: ExecutionContext, seconds: number): void {
+function setServerWait(context: ExecutionContext, seconds: number): void {
   const response = context.switchToHttp().getResponse<Record<string, unknown> | undefined>();
   const value = String(seconds);
   if (typeof response?.setHeader === 'function') {
@@ -139,16 +124,16 @@ function setRetryAfter(context: ExecutionContext, seconds: number): void {
   }
 }
 
-/** RS-29: the raw `x-retry-budget` header, only under forRoot({ resilience }). */
-export function inboundBudget(
+/** RS-29: the raw `x-tries-left` header, only under forRoot({ care }). */
+export function inboundTriesLeft(
   rawHeaders: Record<string, unknown>,
-  runtime: ResilienceRuntime | undefined,
+  runtime: CareEngine | undefined,
 ): number | undefined {
   if (runtime?.enabled !== true) return undefined;
-  const name = runtime.budgetHeader.toLowerCase();
+  const name = runtime.triesLeftHeader.toLowerCase();
   const raw = Object.entries(rawHeaders).find(([header]) => header.toLowerCase() === name)?.[1];
-  const parsed = parseRetryBudgetValue(raw);
+  const parsed = parseTriesLeftValue(raw);
   if (parsed.invalid)
-    runtime.observer.counter('estela_resilience_budget_invalid_total', { edge: 'inbound' });
-  return parsed.budget ?? runtime.options.retryBudget?.initial;
+    runtime.observer.counter('estela_care_tries_left_invalid_total', { edge: 'inbound' });
+  return parsed.triesLeft ?? runtime.options.triesLeft?.initial;
 }

@@ -1,7 +1,7 @@
 /**
  * Shared resilience state against a real Redis (RS-23: RE-04, RE-05). SKIPPED unless
  * ESTELA_REDIS_URL is set, so CI and `npm run verify` stay Redis-free. Each engine stands for a pod:
- * its own runtime, executor and Redis connection, sharing one `redisResilienceStatePort` key space.
+ * its own runtime, executor and Redis connection, sharing one `redisCareState` key space.
  * Every run uses its own key prefix and deletes its keys at the end, so runs can share a server.
  * No Redis client is a dependency: a minimal RESP client over `node:net` lives in this file.
  * Example:
@@ -10,16 +10,16 @@
 import { randomBytes } from 'node:crypto';
 import { connect, type Socket } from 'node:net';
 import {
-  AttemptTimeoutError,
-  CircuitOpenError,
+  TryOverdueError,
+  ValveShutError,
   defaultInProcessClassifier,
-  RateLimitedError,
-  redisResilienceStatePort,
-  ResilienceRuntime,
+  OverPaceError,
+  redisCareState,
+  CareEngine,
   type RedisEvalFn,
-  type ResilienceEdgeAdapter,
-  type ResiliencePolicy,
-  type ResilienceStatePort,
+  type CareEdgeAdapter,
+  type Care,
+  type CareStatePort,
 } from '../src';
 
 const url = process.env.ESTELA_REDIS_URL;
@@ -125,17 +125,17 @@ class RespClient {
   }
 }
 
-const adapter = (binding: string): ResilienceEdgeAdapter => ({
+const adapter = (binding: string): CareEdgeAdapter => ({
   kind: 'outbound-sdk',
   classify: (error) => defaultInProcessClassifier(error),
   repeatable: () => false,
-  timeoutError: (_ctx, timeoutMs) => new AttemptTimeoutError(binding, timeoutMs),
+  overdueError: (_ctx, timeoutMs) => new TryOverdueError(binding, timeoutMs),
 });
 
 /** One engine (a pod): its own runtime and executor over the shared state port. */
-function engine(binding: string, policy: (state: ResilienceStatePort) => ResiliencePolicy) {
-  return (state: ResilienceStatePort) => {
-    const runtime = new ResilienceRuntime({}, { enabled: false });
+function engine(binding: string, policy: (state: CareStatePort) => Care) {
+  return (state: CareStatePort) => {
+    const runtime = new CareEngine({}, { enabled: false });
     const plan = runtime.plan(binding, [policy(state)], 'outbound-sdk');
     const executor = runtime.executor<string>(plan, adapter(binding));
     return {
@@ -153,10 +153,10 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
   const clients: RespClient[] = [];
 
   /** A pod's state port: its own connection, the run's key prefix. */
-  async function podState(): Promise<ResilienceStatePort> {
+  async function podState(): Promise<CareStatePort> {
     const client = await RespClient.open(url!);
     clients.push(client);
-    return redisResilienceStatePort(client.evalScript, { prefix });
+    return redisCareState(client.evalScript, { prefix });
   }
 
   afterAll(async () => {
@@ -190,7 +190,7 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
 
   it('RE-04 two engines share one token bucket under Redis server time', async () => {
     const pod = engine('ratelimit.shared', (state) => ({
-      rateLimit: { limitPerSec: 5, burst: 5, state },
+      pace: { perSecond: 5, burst: 5, state },
     }));
     const a = pod(await podState());
     const b = pod(await podState());
@@ -206,15 +206,15 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
     expect(granted).toHaveLength(5);
     expect(rejected).toHaveLength(15);
     for (const outcome of rejected) {
-      expect(outcome.reason).toBeInstanceOf(RateLimitedError);
+      expect(outcome.reason).toBeInstanceOf(OverPaceError);
     }
   });
 
-  it('RE-05 shared open marker rejects on the other engine and only one engine holds the half-open lease', async () => {
-    const openMs = 400;
+  it('RE-05 shared open marker rejects on the other engine and only one engine holds the probing lease', async () => {
+    const shutMs = 400;
     const syncMs = 50;
     const pod = engine('breaker.shared', (state) => ({
-      circuitBreaker: { minimumCalls: 2, failureRateThreshold: 50, openMs, syncMs, state },
+      valve: { minCalls: 2, failPercent: 50, shutMs, syncMs, state },
     }));
     const opener = pod(await podState());
     const others = [pod(await podState()), pod(await podState())];
@@ -224,7 +224,7 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
     for (let i = 0; i < 2; i += 1) {
       await expect(opener.call(() => Promise.reject(transient()))).rejects.toThrow('down');
     }
-    await expect(opener.call(async () => 'ok')).rejects.toBeInstanceOf(CircuitOpenError);
+    await expect(opener.call(async () => 'ok')).rejects.toBeInstanceOf(ValveShutError);
     await sleep(syncMs + 10);
     let ran = 0;
     for (const other of others) {
@@ -233,10 +233,10 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
           ran += 1;
           return 'ok';
         }),
-      ).rejects.toBeInstanceOf(CircuitOpenError);
+      ).rejects.toBeInstanceOf(ValveShutError);
     }
     expect(ran).toBe(0);
-    await sleep(openMs + 20);
+    await sleep(shutMs + 20);
     let probes = 0;
     const slowProbe = async (): Promise<string> => {
       probes += 1;
@@ -249,7 +249,7 @@ d('resilience shared state on Redis (RE-04, RE-05)', () => {
     expect(probes).toBe(1);
     expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
     for (const outcome of outcomes.filter((o) => o.status === 'rejected')) {
-      expect(outcome.reason).toBeInstanceOf(CircuitOpenError);
+      expect(outcome.reason).toBeInstanceOf(ValveShutError);
     }
   });
 });

@@ -1,152 +1,161 @@
 import { randomInt } from 'node:crypto';
 import { Bulkhead } from './bulkhead';
 import { CircuitBreakers, type Admission, type BreakerTransition } from './circuit-breaker';
-import { fallbackTrigger, runFallback } from './fallback';
-import { ResilienceObserver } from './observability';
+import { planBTrigger, runPlanB } from './fallback';
+import { CareObserver } from './observability';
 import { RateLimiter } from './rate-limiter';
 import {
-  BulkheadFullError,
-  CircuitOpenError,
-  DeadlineExceededError,
-  RateLimitedError,
-  ResilienceError,
-  ResilienceKeyError,
-  type ResilienceKeyErrorReason,
+  CareError,
+  CareKeyError,
+  LanesFullError,
+  OutOfTimeError,
+  OverPaceError,
+  ValveShutError,
+  type CareKeyErrorReason,
 } from './resilience.errors';
-import { FAILURE_CLASSES, type ResiliencePlan } from './resilience.plan';
+import { FAILURE_CLASSES, type CarePlan } from './resilience.plan';
 import type {
+  CareClock,
+  CareContext,
+  CareEdge,
+  CareEvent,
   Classification,
   FailureClass,
-  ResilienceClock,
-  ResilienceContext,
-  ResilienceEdgeKind,
-  ResilienceEvent,
+  ValveStateView,
 } from './resilience.types';
-import {
-  parseRetryBudgetValue,
-  RETRY_BUDGET_MESSAGE_HEADER,
-  ResilienceScope,
-} from './retry-budget';
+import { CareScope, parseTriesLeftValue, TRIES_LEFT_MESSAGE_HEADER } from './retry-budget';
 import { StateSwitch } from './state-port';
-import { AttemptTimeout, systemResilienceClock, withAttemptTimeout } from './timeout';
+import { AttemptTimeout, systemCareClock, withAttemptTimeout } from './timeout';
 
-export { currentResilienceSignal } from './retry-budget';
+export { currentTrySignal } from './retry-budget';
 
 const MAX_KEY_LENGTH = 200;
 const SINK_KEY = /^[A-Za-z0-9:_.-]{1,128}$/;
 
 /** What an edge (REST, gRPC, SDK, activator, saga step, flow step, channel) gives the engine (RS-39). */
-export interface ResilienceEdgeAdapter {
-  readonly kind: ResilienceEdgeKind;
+export interface CareEdgeAdapter {
+  readonly kind: CareEdge;
   /** Edge default classifier (RS-14, RS-15, or defaultInProcessClassifier, RS-17a). */
-  classify(error: unknown, ctx: ResilienceContext): Classification;
+  classify(error: unknown, ctx: CareContext): Classification;
   /** RS-09: safe method, idempotency key present, or declared idempotent. */
-  repeatable(ctx: ResilienceContext): boolean;
-  /** Error for an expired per-attempt timeout (REST: OutboundTimeoutError). */
-  timeoutError(ctx: ResilienceContext, timeoutMs: number): Error;
-  /** Called per attempt with the budget to send downstream (undefined = send nothing). */
-  outgoingBudget?(budget: number | undefined): void;
-  /** RS-48: true for an operation that is safe without a key (REST GET, HEAD, OPTIONS). */
-  safe?(ctx: ResilienceContext): boolean;
+  repeatable(ctx: CareContext): boolean;
+  /** Error for a try that ran past `eachTryMs` (REST keeps its 0.9.0 error). */
+  overdueError(ctx: CareContext, eachTryMs: number): Error;
+  /** Called per try with the tries left to send downstream (undefined = send nothing). */
+  outgoingTriesLeft?(triesLeft: number | undefined): void;
+  /** RS-48: true for a call that is safe without a key (REST GET, HEAD, OPTIONS). */
+  safe?(ctx: CareContext): boolean;
   /** RS-48: the idempotency key of the call, when there is one. */
-  idempotencyKey?(ctx: ResilienceContext): string | undefined;
-  /** Breaker and rate-limit key when the policy sets none; default the binding name. */
-  defaultKey?(ctx: ResilienceContext): string;
-  /** Marker of this edge's own timeout errors on top of the engine timer (flow jumps). */
-  isTimeout?(error: unknown): boolean;
+  idempotencyKey?(ctx: CareContext): string | undefined;
+  /** Valve and pace key when the care sets none; default the binding name. */
+  defaultKey?(ctx: CareContext): string;
+  /** Marker of this edge's own overdue errors on top of the engine timer (flow jumps). */
+  isOverdue?(error: unknown): boolean;
 }
 
-export interface ResilienceAttempt {
-  attempt: number;
+/** One try handed to `run`. */
+export interface CareTry {
+  tryNumber: number;
   signal: AbortSignal | undefined;
-  /** Effective per-attempt timeout, 0 = none. */
-  timeoutMs: number;
-  /** Budget to send downstream on this attempt. */
-  budgetOut: number | undefined;
+  /** Effective longest wait of this try, 0 = no limit. */
+  eachTryMs: number;
+  /** Tries left to send downstream on this try. */
+  triesLeftOut: number | undefined;
 }
 
-export interface ResilienceResult<T> {
+/** Outcome of a call. */
+export interface CareResult<T> {
   value: T;
-  attempts: number;
-  fallback: boolean;
+  tries: number;
+  /** True when plan B answered. */
+  planB: boolean;
   durationMs: number;
 }
 
 /** Collaborators of an executor; every field has a default, so tests pass only what they need. */
-export interface ResilienceDeps {
-  clock?: ResilienceClock;
+export interface CareDeps {
+  clock?: CareClock;
   random?: (maxExclusive: number) => number;
-  observer?: ResilienceObserver;
-  /** Retry budget (RS-29): enabled only under forRoot({ resilience }). */
-  budget?: { enabled: boolean; initial?: number };
-  stateTimeoutMs?: number;
-  stateProbeMs?: number;
-  keyLabel?: (key: string, ctx: ResilienceContext) => string | undefined;
+  observer?: CareObserver;
+  /** Tries left along the call path (RS-29): enabled only under forRoot({ care }). */
+  triesLeft?: { enabled: boolean; initial?: number };
+  sharedStateWaitMs?: number;
+  sharedStateCheckMs?: number;
+  keyLabel?: (key: string, ctx: CareContext) => string | undefined;
   keyHasher?: (key: string) => string;
-  /** Runs a `fallback.channel` for this edge (request/reply, or a re-send on send steps). */
-  fallbackChannel?: (channel: string, ctx: ResilienceContext) => Promise<unknown>;
-  /** Static default key (registry lookups); default the binding name. */
+  /** Runs a `planB.channel` for this edge (request/reply, or a re-send on send steps). */
+  planBChannel?: (channel: string, ctx: CareContext) => Promise<unknown>;
+  /** Static default key (control lookups); default the binding name. */
   defaultKey?: string;
   /**
-   * Shutdown of a background caller (flow forget targets, RS-62): once aborted, a pending backoff
-   * sleep ends and the call fails with its last error instead of starting another attempt.
+   * Shutdown of a background caller (flow forget targets, RS-62): once aborted, a pending gap
+   * between tries ends and the call fails with its last error instead of starting another try.
    */
   shutdown?: AbortSignal;
 }
 
-export interface ExecuteOptions {
-  /** Per-call override of the per-attempt timeout (REST call or target `timeoutMs`). */
-  perAttemptMs?: number;
+/** Options of one engine run. */
+export interface CareExecuteOptions {
+  /** Per-call `eachTryMs` (REST call or target `timeoutMs`). */
+  eachTryMs?: number;
 }
 
 interface CallKeys {
-  breaker: string;
-  limiter: string;
+  valve: string;
+  pace: string;
 }
 
 interface CallState {
-  attempts: number;
+  tries: number;
   lastClass?: FailureClass;
+}
+
+interface FailedTry {
+  error: unknown;
+  cut: boolean;
+  admission: Admission;
+  extraTries: number;
+  endsAt: number;
 }
 
 const defaultRandom = (maxExclusive: number): number => randomInt(maxExclusive);
 
 /**
- * Runs one call under a resolved plan, composing the primitives in the fixed order of RS-02:
- * fallback > deadline > bulkhead > retry > breaker > rateLimit > per-attempt timeout > call.
- * Stateful primitives (breakers, bulkhead, buckets) live in the executor, so one executor is
- * created per edge and binding and reused for every call.
+ * Runs one call under a resolved plan, composing the parts in the fixed order of RS-02:
+ * planB > patience.total > lanes > tries > valve > pace > patience.eachTry > call.
+ * Stateful parts (valves, lanes, turns) live in the executor, so one executor is created per
+ * edge and binding and reused for every call.
  */
-export class ResilienceExecutor<T = unknown> {
-  private readonly clock: ResilienceClock;
+export class CareExecutor<T = unknown> {
+  private readonly clock: CareClock;
   private readonly random: (maxExclusive: number) => number;
-  private readonly observer: ResilienceObserver;
-  private readonly breakers?: CircuitBreakers;
-  private readonly bulkhead?: Bulkhead;
-  private readonly limiter?: RateLimiter;
+  private readonly observer: CareObserver;
+  private readonly valves?: CircuitBreakers;
+  private readonly lanes?: Bulkhead;
+  private readonly pacer?: RateLimiter;
   private readonly labels: Record<string, string>;
   readonly defaultKey: string;
 
   constructor(
-    readonly plan: ResiliencePlan,
-    private readonly adapter: ResilienceEdgeAdapter,
-    private readonly deps: ResilienceDeps = {},
+    readonly plan: CarePlan,
+    private readonly adapter: CareEdgeAdapter,
+    private readonly deps: CareDeps = {},
   ) {
-    this.clock = deps.clock ?? systemResilienceClock;
+    this.clock = deps.clock ?? systemCareClock;
     this.random = deps.random ?? defaultRandom;
-    this.observer = deps.observer ?? new ResilienceObserver({ clock: this.clock });
+    this.observer = deps.observer ?? new CareObserver({ clock: this.clock });
     this.defaultKey = deps.defaultKey ?? plan.binding;
     this.labels = { edge: plan.edge, binding: plan.binding };
-    if (plan.circuitBreaker !== undefined) {
+    if (plan.valve !== undefined) {
       const shared =
-        plan.circuitBreaker.state === undefined
+        plan.valve.state === undefined
           ? undefined
           : {
               switch: this.stateSwitch(),
-              stateKey: (key: string) => this.stateKey('breaker', key),
+              stateKey: (key: string) => this.stateKey('valve', key),
             };
-      this.breakers = new CircuitBreakers(
-        plan.circuitBreaker,
+      this.valves = new CircuitBreakers(
+        plan.valve,
         this.clock,
         {
           transition: (type, key) => this.onTransition(type, key),
@@ -155,16 +164,16 @@ export class ResilienceExecutor<T = unknown> {
         shared,
       );
     }
-    if (plan.bulkhead !== undefined) this.bulkhead = new Bulkhead(plan.bulkhead, this.clock);
-    if (plan.rateLimit !== undefined) {
+    if (plan.lanes !== undefined) this.lanes = new Bulkhead(plan.lanes, this.clock);
+    if (plan.pace !== undefined) {
       const shared =
-        plan.rateLimit.state === undefined
+        plan.pace.state === undefined
           ? undefined
           : {
               switch: this.stateSwitch(),
-              stateKey: (key: string) => this.stateKey('ratelimit', key),
+              stateKey: (key: string) => this.stateKey('pace', key),
             };
-      this.limiter = new RateLimiter(plan.rateLimit, this.clock, shared);
+      this.pacer = new RateLimiter(plan.pace, this.clock, shared);
     }
   }
 
@@ -172,49 +181,46 @@ export class ResilienceExecutor<T = unknown> {
     return this.plan.binding;
   }
 
-  breakerState(
-    key?: string,
-  ): { state: 'closed' | 'open' | 'half-open'; forcedBy?: 'quota' } | undefined {
-    return this.breakers?.stateOf(key ?? this.defaultKey);
+  valveState(key?: string): ValveStateView | undefined {
+    return this.valves?.stateOf(key ?? this.defaultKey);
   }
 
-  /** Closes the breaker of `key` and clears its shared markers; emits `breaker.closed` (RS-49). */
-  async resetBreaker(key?: string): Promise<void> {
-    if (this.breakers === undefined) return;
-    await this.breakers.reset(key ?? this.defaultKey);
+  /** Reopens the valve of `key` and clears its shared marks; emits `valve.flowing` (RS-49). */
+  async resume(key?: string): Promise<void> {
+    if (this.valves === undefined) return;
+    await this.valves.reset(key ?? this.defaultKey);
   }
 
-  /** Size of the local breaker and bucket maps (I11). */
-  get stateSizes(): { breakers: number; buckets: number } {
-    return { breakers: this.breakers?.size ?? 0, buckets: this.limiter?.bucketCount ?? 0 };
+  /** Size of the local valve and turn maps (I11). */
+  get stateSizes(): { valves: number; turns: number } {
+    return { valves: this.valves?.size ?? 0, turns: this.pacer?.bucketCount ?? 0 };
   }
 
   async execute(
-    input: Omit<ResilienceContext, 'attempt'>,
-    run: (attempt: ResilienceAttempt) => Promise<T>,
-    options: ExecuteOptions = {},
-  ): Promise<ResilienceResult<T>> {
+    input: Omit<CareContext, 'tryNumber'>,
+    run: (current: CareTry) => Promise<T>,
+    options: CareExecuteOptions = {},
+  ): Promise<CareResult<T>> {
     const started = this.clock.monotonic();
-    const ctx: ResilienceContext = { ...input, attempt: 0 };
-    if (this.plan.empty && options.perAttemptMs === undefined) {
-      const budgetOut = this.incomingBudget(ctx);
-      const value = await run({ attempt: 1, signal: undefined, timeoutMs: 0, budgetOut });
-      return { value, attempts: 1, fallback: false, durationMs: this.clock.monotonic() - started };
+    const ctx: CareContext = { ...input, tryNumber: 0 };
+    if (this.plan.empty && options.eachTryMs === undefined) {
+      const triesLeftOut = this.incomingTriesLeft(ctx);
+      const value = await run({ tryNumber: 1, signal: undefined, eachTryMs: 0, triesLeftOut });
+      return { value, tries: 1, planB: false, durationMs: this.clock.monotonic() - started };
     }
     this.assertIdempotencyKey(ctx);
     const keys = this.resolveKeys(ctx);
-    const deadlineAt =
-      this.plan.deadlineMs === undefined ? Infinity : started + this.plan.deadlineMs;
-    const state: CallState = { attempts: 0 };
+    const endsAt = this.plan.totalMs === undefined ? Infinity : started + this.plan.totalMs;
+    const state: CallState = { tries: 0 };
     try {
-      const value = await this.withBulkhead(ctx, deadlineAt, state, () =>
-        this.retryLoop(ctx, keys, deadlineAt, state, run, options),
+      const value = await this.withLanes(ctx, endsAt, state, () =>
+        this.tryLoop(ctx, keys, endsAt, state, run, options),
       );
       this.finish('success', started);
       return {
         value,
-        attempts: state.attempts,
-        fallback: false,
+        tries: state.tries,
+        planB: false,
         durationMs: this.clock.monotonic() - started,
       };
     } catch (error) {
@@ -224,15 +230,15 @@ export class ResilienceExecutor<T = unknown> {
 
   // ---------- Keys and preconditions ----------
 
-  private assertIdempotencyKey(ctx: ResilienceContext): void {
-    if (this.plan.retry?.requireIdempotencyKey !== true) return;
+  private assertIdempotencyKey(ctx: CareContext): void {
+    if (this.plan.tries?.requireIdempotencyKey !== true) return;
     if (this.adapter.safe?.(ctx) === true) return;
     if (this.adapter.idempotencyKey?.(ctx) !== undefined) return;
     throw this.keyError('idempotency-key-required');
   }
 
-  private keyError(reason: ResilienceKeyErrorReason, cause?: unknown): ResilienceKeyError {
-    return new ResilienceKeyError({
+  private keyError(reason: CareKeyErrorReason, cause?: unknown): CareKeyError {
+    return new CareKeyError({
       binding: this.plan.binding,
       edge: this.plan.edge,
       reason,
@@ -240,31 +246,21 @@ export class ResilienceExecutor<T = unknown> {
     });
   }
 
-  private resolveKeys(ctx: ResilienceContext): CallKeys {
-    const fallbackKey = this.adapter.defaultKey?.(ctx) ?? this.defaultKey;
-    const breaker = this.keyOf(
-      this.plan.circuitBreaker?.key,
-      ctx,
-      fallbackKey,
-      this.plan.circuitBreaker?.state,
-    );
-    const limiter = this.keyOf(
-      this.plan.rateLimit?.key,
-      ctx,
-      fallbackKey,
-      this.plan.rateLimit?.state,
-    );
-    return { breaker, limiter };
+  private resolveKeys(ctx: CareContext): CallKeys {
+    const baseKey = this.adapter.defaultKey?.(ctx) ?? this.defaultKey;
+    const valve = this.keyOf(this.plan.valve?.key, ctx, baseKey, this.plan.valve?.state);
+    const pace = this.keyOf(this.plan.pace?.key, ctx, baseKey, this.plan.pace?.state);
+    return { valve, pace };
   }
 
-  /** RS-20, RS-43: a custom key is validated, and hashed and labelled before any attempt. */
+  /** RS-20, RS-43: a custom key is validated, and hashed and labelled before any try. */
   private keyOf(
-    fn: ((ctx: ResilienceContext) => string) | undefined,
-    ctx: ResilienceContext,
-    fallbackKey: string,
+    fn: ((ctx: CareContext) => string) | undefined,
+    ctx: CareContext,
+    baseKey: string,
     shared: unknown,
   ): string {
-    if (fn === undefined) return fallbackKey;
+    if (fn === undefined) return baseKey;
     let key: unknown;
     try {
       key = fn(ctx);
@@ -293,7 +289,7 @@ export class ResilienceExecutor<T = unknown> {
   }
 
   /** `keyLabel(key)`; invalid output throws during key resolution, is omitted elsewhere. */
-  private labelOf(key: string, ctx: ResilienceContext, strict: boolean): string | undefined {
+  private labelOf(key: string, ctx: CareContext, strict: boolean): string | undefined {
     const keyLabel = this.deps.keyLabel;
     if (keyLabel === undefined) return undefined;
     try {
@@ -308,9 +304,9 @@ export class ResilienceExecutor<T = unknown> {
     return undefined;
   }
 
-  /** `estela:rs:<kind>:<binding>` for the default key, `...:<keyHasher(key)>` for a custom one. */
-  private stateKey(kind: 'breaker' | 'ratelimit', key: string): string {
-    const base = `estela:rs:${kind}:${this.plan.binding}`;
+  /** `estela:care:<part>:<binding>` for the default key, `...:<keyHasher(key)>` for a custom one. */
+  private stateKey(part: 'valve' | 'pace', key: string): string {
+    const base = `estela:care:${part}:${this.plan.binding}`;
     if (key === this.plan.binding) return base;
     if (key === this.defaultKey) return `${base}:${key}`;
     return `${base}:${this.hashKey(key)}`;
@@ -319,56 +315,56 @@ export class ResilienceExecutor<T = unknown> {
   private stateSwitch(): StateSwitch {
     return new StateSwitch(
       this.clock,
-      this.deps.stateTimeoutMs ?? 100,
-      this.deps.stateProbeMs ?? 5000,
+      this.deps.sharedStateWaitMs ?? 100,
+      this.deps.sharedStateCheckMs ?? 5000,
       {
         onDegraded: () => {
-          this.emit({ type: 'state.degraded' });
+          this.emit({ type: 'shared-state.lost' });
           this.observer.logger.warn(
-            `resilience state degraded for ${this.where()}; using local state`,
+            `care shared state lost for ${this.where()}; using local state`,
           );
-          this.observer.gauge('estela_resilience_state_degraded', this.labels, 1);
+          this.observer.gauge('estela_care_shared_state_lost', this.labels, 1);
         },
         onRecovered: () => {
-          this.emit({ type: 'state.recovered' });
-          this.observer.logger.log(`resilience state recovered for ${this.where()}`);
-          this.observer.gauge('estela_resilience_state_degraded', this.labels, 0);
+          this.emit({ type: 'shared-state.back' });
+          this.observer.logger.log(`care shared state back for ${this.where()}`);
+          this.observer.gauge('estela_care_shared_state_lost', this.labels, 0);
         },
       },
     );
   }
 
-  // ---------- Budget ----------
+  // ---------- Tries left ----------
 
-  private incomingBudget(ctx: ResilienceContext): number | undefined {
-    const budget = this.deps.budget;
-    if (budget?.enabled !== true) return undefined;
-    const raw = ctx.message?.headers[RETRY_BUDGET_MESSAGE_HEADER];
+  private incomingTriesLeft(ctx: CareContext): number | undefined {
+    const triesLeft = this.deps.triesLeft;
+    if (triesLeft?.enabled !== true) return undefined;
+    const raw = ctx.message?.headers[TRIES_LEFT_MESSAGE_HEADER];
     if (raw !== undefined) {
-      const parsed = parseRetryBudgetValue(raw);
+      const parsed = parseTriesLeftValue(raw);
       if (parsed.invalid) {
-        this.observer.counter('estela_resilience_budget_invalid_total', { edge: this.plan.edge });
+        this.observer.counter('estela_care_tries_left_invalid_total', { edge: this.plan.edge });
       }
-      if (parsed.budget !== undefined) return parsed.budget;
+      if (parsed.triesLeft !== undefined) return parsed.triesLeft;
     }
-    return ResilienceScope.current()?.budget ?? budget.initial;
+    return CareScope.current()?.triesLeft ?? triesLeft.initial;
   }
 
   // ---------- Composition ----------
 
-  private async withBulkhead<R>(
-    ctx: ResilienceContext,
-    deadlineAt: number,
+  private async withLanes<R>(
+    ctx: CareContext,
+    endsAt: number,
     state: CallState,
     fn: () => Promise<R>,
   ): Promise<R> {
-    if (this.bulkhead === undefined) return fn();
-    const slot = await this.bulkhead.acquire(deadlineAt);
+    if (this.lanes === undefined) return fn();
+    const slot = await this.lanes.acquire(endsAt);
     if (typeof slot !== 'function') {
-      if (slot.reason === 'queue-timeout' && slot.byDeadline)
-        throw this.deadline(ctx, state.attempts, undefined);
-      this.emit({ type: 'bulkhead.rejected', reason: 'bulkhead-full' }, ctx);
-      throw new BulkheadFullError({ ...this.meta(state.attempts), reason: slot.reason });
+      if (slot.reason === 'waitlist-expired' && slot.byDeadline)
+        throw this.outOfTime(ctx, state.tries, undefined);
+      this.emit({ type: 'lanes.full', reason: 'lanes-full' }, ctx);
+      throw new LanesFullError({ ...this.meta(state.tries), reason: slot.reason });
     }
     try {
       return await fn();
@@ -377,207 +373,202 @@ export class ResilienceExecutor<T = unknown> {
     }
   }
 
-  private async retryLoop(
-    ctx: ResilienceContext,
+  private async tryLoop(
+    ctx: CareContext,
     keys: CallKeys,
-    deadlineAt: number,
+    endsAt: number,
     state: CallState,
-    run: (attempt: ResilienceAttempt) => Promise<T>,
-    options: ExecuteOptions,
+    run: (current: CareTry) => Promise<T>,
+    options: CareExecuteOptions,
   ): Promise<T> {
-    const { retries, budgetOut } = this.retriesOf(ctx);
-    const perAttempt = options.perAttemptMs ?? this.plan.perAttemptMs;
-    const limit = perAttempt > 0 ? perAttempt : Infinity;
+    const { extraTries, triesLeftOut } = this.extraTriesOf(ctx);
+    const eachTry = options.eachTryMs ?? this.plan.eachTryMs;
+    const limit = eachTry > 0 ? eachTry : Infinity;
     let lastError: unknown;
-    for (let attempt = 1; ; attempt += 1) {
-      state.attempts = attempt;
-      const actx: ResilienceContext = { ...ctx, attempt };
-      const admission = await this.admit(actx, keys, deadlineAt, lastError);
-      const remaining = deadlineAt - this.clock.monotonic();
+    for (let tryNumber = 1; ; tryNumber += 1) {
+      state.tries = tryNumber;
+      const tctx: CareContext = { ...ctx, tryNumber };
+      const admission = await this.admit(tctx, keys, endsAt, lastError);
+      const remaining = endsAt - this.clock.monotonic();
       if (remaining <= 0) {
-        this.breakers?.release(admission);
-        throw this.deadline(actx, attempt - 1, lastError);
+        this.valves?.release(admission);
+        throw this.outOfTime(tctx, tryNumber - 1, lastError);
       }
       try {
-        const value = await this.attempt(actx, Math.min(limit, remaining), budgetOut, run);
-        this.breakers?.success(admission);
-        this.observer.counter('estela_resilience_attempts_total', {
-          ...this.labels,
-          class: 'success',
-        });
+        const value = await this.runTry(tctx, Math.min(limit, remaining), triesLeftOut, run);
+        this.valves?.success(admission);
+        this.observer.counter('estela_care_tries_total', { ...this.labels, class: 'success' });
         return value;
       } catch (raw) {
         const cut = raw instanceof AttemptTimeout && remaining < limit;
         lastError = raw instanceof AttemptTimeout ? raw.error : raw;
-        const failure = { error: lastError, cut, admission, retries, deadlineAt };
-        await this.backoffOrThrow(actx, state, failure);
+        await this.waitOrThrow(tctx, state, {
+          error: lastError,
+          cut,
+          admission,
+          extraTries,
+          endsAt,
+        });
       }
     }
   }
 
-  /** Records a failed attempt, then sleeps before the next one or throws the final error. */
-  private async backoffOrThrow(
-    ctx: ResilienceContext,
-    state: CallState,
-    failure: {
-      error: unknown;
-      cut: boolean;
-      admission: Admission;
-      retries: number;
-      deadlineAt: number;
-    },
-  ): Promise<void> {
+  /** Records a failed try, then waits before the next one or throws the final error. */
+  private async waitOrThrow(ctx: CareContext, state: CallState, failure: FailedTry): Promise<void> {
     const { error, admission } = failure;
     if (failure.cut) {
-      this.breakers?.release(admission);
-      throw this.deadline(ctx, ctx.attempt, error);
+      this.valves?.release(admission);
+      throw this.outOfTime(ctx, ctx.tryNumber, error);
     }
     const verdict = await this.afterFailure(error, ctx, admission, state);
-    const delay = await this.retryDelay(error, verdict, ctx, failure.retries, failure.deadlineAt);
+    const delay = await this.nextGap(error, verdict, ctx, failure.extraTries, failure.endsAt);
     if (delay === undefined) throw error;
-    this.emit({ type: 'retry', class: verdict.class, attempt: ctx.attempt, delayMs: delay }, ctx);
-    this.observer.counter('estela_resilience_retries_total', this.labels);
-    this.observer.logger.debug(`retry ${ctx.attempt} of ${this.where()} in ${delay}ms`);
+    this.emit(
+      { type: 'try.again', class: verdict.class, tryNumber: ctx.tryNumber, delayMs: delay },
+      ctx,
+    );
+    this.observer.counter('estela_care_extra_tries_total', this.labels);
+    this.observer.logger.debug(`try ${ctx.tryNumber + 1} of ${this.where()} in ${delay}ms`);
     const shutdown = this.deps.shutdown;
     if (aborted(shutdown)) throw error;
     await this.clock.sleep(delay, shutdown);
     if (aborted(shutdown)) throw error;
   }
 
-  /** RS-30: effective retries `min(maxAttempts - 1, budget)` and the budget sent downstream. */
-  private retriesOf(ctx: ResilienceContext): { retries: number; budgetOut: number | undefined } {
-    const retry = this.plan.retry;
-    if (retry === undefined) return { retries: 0, budgetOut: this.incomingBudget(ctx) };
-    const max = retry.maxAttempts;
-    const repeatable = retry.idempotent || this.adapter.repeatable(ctx);
-    if (retry.legacy !== undefined)
-      return { retries: repeatable ? max - 1 : 0, budgetOut: undefined };
-    const budgetIn = this.incomingBudget(ctx);
-    const retries = repeatable ? Math.min(max - 1, budgetIn ?? Infinity) : 0;
-    if (max > 1 && retries === 0) this.emit({ type: 'retry.suppressed' }, ctx);
-    return { retries, budgetOut: this.claims(retries, retry.propagate) ? 0 : budgetIn };
+  /** RS-30: effective extra tries `min(max - 1, tries left)` and the tries left sent downstream. */
+  private extraTriesOf(ctx: CareContext): {
+    extraTries: number;
+    triesLeftOut: number | undefined;
+  } {
+    const tries = this.plan.tries;
+    if (tries === undefined) return { extraTries: 0, triesLeftOut: this.incomingTriesLeft(ctx) };
+    const max = tries.max;
+    const repeatable = tries.idempotent || this.adapter.repeatable(ctx);
+    if (tries.legacy !== undefined)
+      return { extraTries: repeatable ? max - 1 : 0, triesLeftOut: undefined };
+    const incoming = this.incomingTriesLeft(ctx);
+    const extraTries = repeatable ? Math.min(max - 1, incoming ?? Infinity) : 0;
+    if (max > 1 && extraTries === 0) this.emit({ type: 'try.held' }, ctx);
+    return { extraTries, triesLeftOut: this.keeps(extraTries, tries.triesLeft) ? 0 : incoming };
   }
 
-  /** A retrying layer under an enabled budget sends budget 0 downstream (RS-30). */
-  private claims(retries: number, propagate: 'claim' | 'forward'): boolean {
-    return retries > 0 && propagate === 'claim' && this.deps.budget?.enabled === true;
+  /** An edge that tries again under enabled tries-left sends 0 downstream (RS-30). */
+  private keeps(extraTries: number, mode: 'keep' | 'forward'): boolean {
+    return extraTries > 0 && mode === 'keep' && this.deps.triesLeft?.enabled === true;
   }
 
-  /** Breaker admission, then a rate-limit token, for every attempt (I1). */
+  /** Valve admission, then a pace turn, for every try (I1). */
   private async admit(
-    ctx: ResilienceContext,
+    ctx: CareContext,
     keys: CallKeys,
-    deadlineAt: number,
+    endsAt: number,
     lastError: unknown,
   ): Promise<Admission> {
-    let admission: Admission = { key: keys.breaker, probe: false };
-    if (this.breakers !== undefined) {
-      const result = await this.breakers.admit(keys.breaker, deadlineAt);
+    let admission: Admission = { key: keys.valve, probe: false };
+    if (this.valves !== undefined) {
+      const result = await this.valves.admit(keys.valve, endsAt);
       if (!result.admitted) {
-        this.observer.counter('estela_resilience_rejected_total', {
+        this.observer.counter('estela_care_turned_away_total', {
           ...this.labels,
-          reason: 'circuit-open',
+          reason: 'valve-shut',
         });
-        const meta = { ...this.meta(ctx.attempt - 1), cause: lastError };
-        throw new CircuitOpenError({
+        const meta = { ...this.meta(ctx.tryNumber - 1), cause: lastError };
+        throw new ValveShutError({
           ...meta,
-          ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }),
+          ...(result.readyInMs === undefined ? {} : { readyInMs: result.readyInMs }),
           ...(result.forcedBy === undefined ? {} : { forcedBy: result.forcedBy }),
         });
       }
       admission = result.admission;
     }
-    if (this.limiter === undefined) return admission;
-    const outcome = await this.limiter.take(keys.limiter, deadlineAt);
+    if (this.pacer === undefined) return admission;
+    const outcome = await this.pacer.take(keys.pace, endsAt);
     if (outcome.granted) return admission;
-    this.breakers?.release(admission);
-    if (outcome.byDeadline) throw this.deadline(ctx, ctx.attempt - 1, lastError);
-    this.emit({ type: 'ratelimit.rejected', reason: 'rate-limited' }, ctx);
-    this.observer.counter('estela_resilience_rejected_total', {
+    this.valves?.release(admission);
+    if (outcome.byDeadline) throw this.outOfTime(ctx, ctx.tryNumber - 1, lastError);
+    this.emit({ type: 'pace.over', reason: 'over-pace' }, ctx);
+    this.observer.counter('estela_care_turned_away_total', {
       ...this.labels,
-      reason: 'rate-limited',
+      reason: 'over-pace',
     });
-    throw new RateLimitedError({
-      ...this.meta(ctx.attempt - 1),
+    throw new OverPaceError({
+      ...this.meta(ctx.tryNumber - 1),
       cause: lastError,
-      retryAfterMs: outcome.retryAfterMs,
+      readyInMs: outcome.readyInMs,
     });
   }
 
-  private attempt(
-    ctx: ResilienceContext,
-    timeoutMs: number,
-    budgetOut: number | undefined,
-    run: (attempt: ResilienceAttempt) => Promise<T>,
+  private runTry(
+    ctx: CareContext,
+    eachTryMs: number,
+    triesLeftOut: number | undefined,
+    run: (current: CareTry) => Promise<T>,
   ): Promise<T> {
-    this.adapter.outgoingBudget?.(budgetOut);
-    const scoped = { ...(budgetOut === undefined ? {} : { budget: budgetOut }) };
+    this.adapter.outgoingTriesLeft?.(triesLeftOut);
+    const scoped = { ...(triesLeftOut === undefined ? {} : { triesLeft: triesLeftOut }) };
     return withAttemptTimeout(
       this.clock,
-      timeoutMs,
+      eachTryMs,
       (signal) =>
-        ResilienceScope.run({ ...scoped, ...(signal === undefined ? {} : { signal }) }, () =>
+        CareScope.run({ ...scoped, ...(signal === undefined ? {} : { signal }) }, () =>
           run({
-            attempt: ctx.attempt,
+            tryNumber: ctx.tryNumber,
             signal,
-            timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 0,
-            budgetOut,
+            eachTryMs: Number.isFinite(eachTryMs) ? eachTryMs : 0,
+            triesLeftOut,
           }),
         ),
-      () => this.adapter.timeoutError(ctx, timeoutMs),
+      () => this.adapter.overdueError(ctx, eachTryMs),
     );
   }
 
-  /** Classifies the failure and records it: quota forces the breaker open (RS-16). */
+  /** Classifies the failure and records it: quota forces the valve shut (RS-16). */
   private async afterFailure(
     error: unknown,
-    ctx: ResilienceContext,
+    ctx: CareContext,
     admission: Admission,
     state: CallState,
   ): Promise<Classification> {
     const verdict = await this.classify(error, ctx);
     state.lastClass = verdict.class;
-    this.observer.counter('estela_resilience_attempts_total', {
-      ...this.labels,
-      class: verdict.class,
-    });
+    this.observer.counter('estela_care_tries_total', { ...this.labels, class: verdict.class });
     if (verdict.class === 'quota') {
-      this.breakers?.forceOpen(admission);
-      this.emit({ type: 'quota.exhausted', class: 'quota' }, ctx);
+      this.valves?.forceOpen(admission);
+      this.emit({ type: 'quota.used-up', class: 'quota' }, ctx);
       return verdict;
     }
-    if (this.plan.circuitBreaker?.recordOn.has(verdict.class) === true)
-      this.breakers?.failure(admission);
-    else this.breakers?.release(admission);
+    if (this.plan.valve?.countOn.has(verdict.class) === true) this.valves?.failure(admission);
+    else this.valves?.release(admission);
     return verdict;
   }
 
-  /** RS-08, RS-11: the delay before the next attempt, or undefined when the failure is final. */
-  private async retryDelay(
+  /** RS-08, RS-11: the gap before the next try, or undefined when the failure is final. */
+  private async nextGap(
     error: unknown,
     verdict: Classification,
-    ctx: ResilienceContext,
-    retries: number,
-    deadlineAt: number,
+    ctx: CareContext,
+    extraTries: number,
+    endsAt: number,
   ): Promise<number | undefined> {
-    const retry = this.plan.retry;
-    if (retry === undefined || ctx.attempt > retries || verdict.class === 'quota') return undefined;
-    if (retry.legacy !== undefined) {
-      if (!(await retry.legacy.retryOn(error, ctx))) return undefined;
-    } else if (!retry.retryOn.has(verdict.class)) {
+    const tries = this.plan.tries;
+    if (tries === undefined || ctx.tryNumber > extraTries || verdict.class === 'quota')
+      return undefined;
+    if (tries.legacy !== undefined) {
+      if (!(await tries.legacy.tryAgainOn(error, ctx))) return undefined;
+    } else if (!tries.on.has(verdict.class)) {
       return undefined;
     }
-    let delay = retry.delay(ctx.attempt, error, this.random);
-    if (retry.honorRetryAfter && verdict.retryAfterMs !== undefined) {
-      if (verdict.retryAfterMs > retry.maxRetryAfterMs) return undefined;
-      delay = Math.max(delay, verdict.retryAfterMs);
+    let delay = tries.delay(ctx.tryNumber, error, this.random);
+    if (tries.heedServerWait && verdict.readyInMs !== undefined) {
+      if (verdict.readyInMs > tries.maxServerWaitMs) return undefined;
+      delay = Math.max(delay, verdict.readyInMs);
     }
-    if (this.clock.monotonic() + delay >= deadlineAt) throw this.deadline(ctx, ctx.attempt, error);
+    if (this.clock.monotonic() + delay >= endsAt) throw this.outOfTime(ctx, ctx.tryNumber, error);
     return delay;
   }
 
   /** RS-13: app classifiers first (first defined wins), then the edge default, then 'unknown'. */
-  private classify(error: unknown, ctx: ResilienceContext): Promise<Classification> {
+  private classify(error: unknown, ctx: CareContext): Promise<Classification> {
     for (const fn of this.plan.classify) {
       let result: unknown;
       try {
@@ -585,7 +576,7 @@ export class ResilienceExecutor<T = unknown> {
       } catch {
         this.observer.errorOnce(
           `classify:${this.plan.binding}`,
-          `resilience classifier of ${this.where()} threw; class unknown`,
+          `care classifier of ${this.where()} threw; class unknown`,
         );
         return Promise.resolve({ class: 'unknown' });
       }
@@ -601,67 +592,57 @@ export class ResilienceExecutor<T = unknown> {
     }
   }
 
-  // ---------- Fallback and outcome ----------
+  // ---------- Plan B and outcome ----------
 
   private async recover(
     error: unknown,
-    ctx: ResilienceContext,
+    ctx: CareContext,
     state: CallState,
     started: number,
-  ): Promise<ResilienceResult<T>> {
-    const fallback = this.plan.fallback;
-    const trigger = fallbackTrigger(error, state.lastClass);
-    if (fallback === undefined || trigger === undefined || !fallback.on.has(trigger)) {
-      this.finish(error instanceof ResilienceError ? 'rejected' : 'failure', started);
+  ): Promise<CareResult<T>> {
+    const planB = this.plan.planB;
+    const trigger = planBTrigger(error, state.lastClass);
+    if (planB === undefined || trigger === undefined || !planB.on.has(trigger)) {
+      this.finish(error instanceof CareError ? 'turned-away' : 'failure', started);
       throw error;
     }
-    const fctx: ResilienceContext = { ...ctx, attempt: state.attempts };
+    const pctx: CareContext = { ...ctx, tryNumber: state.tries };
     try {
-      const value = (await runFallback(
-        fallback,
-        error,
-        fctx,
-        this.deps.fallbackChannel,
-        state.attempts,
-      )) as T;
-      this.emit({ type: 'fallback.used', ...classOrReason(trigger) }, fctx);
-      if (!fallback.cacheable) ResilienceScope.markDegraded();
-      this.finish('fallback', started);
+      const value = (await runPlanB(planB, error, pctx, this.deps.planBChannel, state.tries)) as T;
+      this.emit({ type: 'plan-b.used', ...classOrReason(trigger) }, pctx);
+      if (!planB.cacheable) CareScope.markPlanB();
+      this.finish('plan-b', started);
       return {
         value,
-        attempts: state.attempts,
-        fallback: true,
+        tries: state.tries,
+        planB: true,
         durationMs: this.clock.monotonic() - started,
       };
     } catch (failed) {
-      this.emit({ type: 'fallback.failed', ...classOrReason(trigger) }, fctx);
+      this.emit({ type: 'plan-b.failed', ...classOrReason(trigger) }, pctx);
       this.finish('failure', started);
       throw failed;
     }
   }
 
-  private deadline(
-    ctx: ResilienceContext,
-    attempts: number,
-    cause: unknown,
-  ): DeadlineExceededError {
-    this.emit({ type: 'deadline.exceeded', reason: 'deadline' }, ctx);
-    this.observer.counter('estela_resilience_rejected_total', {
+  private outOfTime(ctx: CareContext, tries: number, cause: unknown): OutOfTimeError {
+    this.emit({ type: 'patience.ran-out', reason: 'out-of-time' }, ctx);
+    this.observer.counter('estela_care_turned_away_total', {
       ...this.labels,
-      reason: 'deadline',
+      reason: 'out-of-time',
     });
-    return new DeadlineExceededError({
-      ...this.meta(attempts),
+    return new OutOfTimeError({
+      ...this.meta(tries),
       cause,
-      deadlineMs: this.plan.deadlineMs ?? 0,
+      totalMs: this.plan.totalMs ?? 0,
     });
   }
 
-  private finish(outcome: 'success' | 'failure' | 'fallback' | 'rejected', started: number): void {
+  private finish(outcome: 'success' | 'failure' | 'plan-b' | 'turned-away', started: number): void {
     const labels = { ...this.labels, outcome };
-    this.observer.counter('estela_resilience_calls_total', labels);
+    this.observer.counter('estela_care_calls_total', labels);
     this.observer.histogram(
-      'estela_resilience_call_seconds',
+      'estela_care_call_seconds',
       labels,
       (this.clock.monotonic() - started) / 1000,
     );
@@ -669,8 +650,8 @@ export class ResilienceExecutor<T = unknown> {
 
   // ---------- Events ----------
 
-  private meta(attempts: number): { binding: string; edge: ResilienceEdgeKind; attempts: number } {
-    return { binding: this.plan.binding, edge: this.plan.edge, attempts };
+  private meta(tries: number): { binding: string; edge: CareEdge; tries: number } {
+    return { binding: this.plan.binding, edge: this.plan.edge, tries };
   }
 
   private where(): string {
@@ -678,11 +659,11 @@ export class ResilienceExecutor<T = unknown> {
   }
 
   private emit(
-    event: Omit<ResilienceEvent, 'at' | 'edge' | 'binding'>,
-    ctx?: ResilienceContext,
+    event: Omit<CareEvent, 'at' | 'edge' | 'binding'>,
+    ctx?: CareContext,
     key?: string,
   ): void {
-    const full: Omit<ResilienceEvent, 'at'> = {
+    const full: Omit<CareEvent, 'at'> = {
       ...event,
       edge: this.plan.edge,
       binding: this.plan.binding,
@@ -707,25 +688,21 @@ export class ResilienceExecutor<T = unknown> {
   }
 
   private onTransition(type: BreakerTransition, key: string): void {
-    const ctx: ResilienceContext = { edge: this.plan.edge, binding: this.plan.binding, attempt: 0 };
+    const ctx: CareContext = { edge: this.plan.edge, binding: this.plan.binding, tryNumber: 0 };
     this.emit({ type }, ctx, key);
-    if (type === 'breaker.open' || type === 'breaker.forced-open') {
+    if (type === 'valve.shut' || type === 'valve.forced-shut') {
       this.observer.logger.warn(`${type} for ${this.where()}`);
-    } else if (type === 'breaker.closed') {
-      this.observer.logger.log(`breaker.closed for ${this.where()}`);
+    } else if (type === 'valve.flowing') {
+      this.observer.logger.log(`valve.flowing for ${this.where()}`);
     } else {
       this.observer.logger.debug(`${type} for ${this.where()}`);
     }
-    this.observer.gauge(
-      'estela_resilience_breakers_open',
-      this.labels,
-      this.breakers?.openCount ?? 0,
-    );
+    this.observer.gauge('estela_care_valves_shut', this.labels, this.valves?.openCount ?? 0);
   }
 
   private onCapacity(): void {
     if (this.observer.allowed(`capacity:${this.plan.binding}`))
-      this.emit({ type: 'breaker.capacity' });
+      this.emit({ type: 'valve.keys-full' });
   }
 }
 
@@ -743,13 +720,12 @@ function normalizeClassification(result: unknown): Classification | undefined {
   const value = result as Classification;
   if (!FAILURE_CLASSES.includes(value.class)) return undefined;
   const out: Classification = { class: value.class };
-  if (typeof value.retryAfterMs === 'number' && value.retryAfterMs >= 0)
-    out.retryAfterMs = value.retryAfterMs;
+  if (typeof value.readyInMs === 'number' && value.readyInMs >= 0) out.readyInMs = value.readyInMs;
   return out;
 }
 
-function classOrReason(trigger: string): Pick<ResilienceEvent, 'class' | 'reason'> {
+function classOrReason(trigger: string): Pick<CareEvent, 'class' | 'reason'> {
   return FAILURE_CLASSES.includes(trigger as FailureClass)
     ? { class: trigger as FailureClass }
-    : { reason: trigger as ResilienceEvent['reason'] & string };
+    : { reason: trigger as CareEvent['reason'] & string };
 }

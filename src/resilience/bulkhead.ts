@@ -1,11 +1,12 @@
-import type { BulkheadPlan } from './resilience.plan';
-import type { ResilienceClock, ResilienceTimer } from './resilience.types';
+import type { LanesPlan } from './resilience.plan';
+import type { CareClock, CareTimer } from './resilience.types';
 
-export type BulkheadDenial = { reason: 'full' } | { reason: 'queue-timeout'; byDeadline: boolean };
+export type BulkheadDenial =
+  { reason: 'full' } | { reason: 'waitlist-expired'; byDeadline: boolean };
 
 interface Waiter {
   grant(): void;
-  timer?: ResilienceTimer;
+  timer?: CareTimer;
 }
 
 /**
@@ -18,8 +19,8 @@ export class Bulkhead {
   private readonly queue: Waiter[] = [];
 
   constructor(
-    private readonly plan: BulkheadPlan,
-    private readonly clock: ResilienceClock,
+    private readonly plan: LanesPlan,
+    private readonly clock: CareClock,
   ) {}
 
   get inFlight(): number {
@@ -27,13 +28,13 @@ export class Bulkhead {
   }
 
   acquire(deadlineAt: number): Promise<(() => void) | BulkheadDenial> {
-    if (this.active < this.plan.maxConcurrent) {
+    if (this.active < this.plan.count) {
       this.active += 1;
       return Promise.resolve(this.releaser());
     }
-    if (this.queue.length >= this.plan.maxQueue) return Promise.resolve({ reason: 'full' });
+    if (this.queue.length >= this.plan.waitlist) return Promise.resolve({ reason: 'full' });
     const remaining = deadlineAt - this.clock.monotonic();
-    const limit = Math.min(this.plan.queueTimeoutMs ?? Infinity, remaining);
+    const limit = Math.min(this.plan.waitlistMs ?? Infinity, remaining);
     return new Promise((resolve) => {
       const waiter: Waiter = {
         grant: () => {
@@ -42,11 +43,11 @@ export class Bulkhead {
         },
       };
       if (Number.isFinite(limit)) {
-        const byDeadline = remaining <= (this.plan.queueTimeoutMs ?? Infinity);
+        const byDeadline = remaining <= (this.plan.waitlistMs ?? Infinity);
         waiter.timer = this.clock.setTimer(Math.max(0, limit), () => {
           const index = this.queue.indexOf(waiter);
           if (index !== -1) this.queue.splice(index, 1);
-          resolve({ reason: 'queue-timeout', byDeadline });
+          resolve({ reason: 'waitlist-expired', byDeadline });
         });
       }
       this.queue.push(waiter);

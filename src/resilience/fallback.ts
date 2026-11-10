@@ -1,38 +1,38 @@
-import { rejectionTrigger, FallbackFailedError } from './resilience.errors';
-import type { FallbackPlan } from './resilience.plan';
-import type { FailureClass, FallbackTrigger, ResilienceContext } from './resilience.types';
+import { turnedAwayTrigger, PlanBFailedError } from './resilience.errors';
+import type { PlanBPlan } from './resilience.plan';
+import type { FailureClass, PlanBTrigger, CareContext } from './resilience.types';
 
 /**
- * Trigger of a final failure (section 5.1): the engine rejection kind, `'quota'` for a
- * quota-forced open circuit, else the failure class. Key and definition errors have none.
+ * Plan B trigger of a final failure (section 5.1): the turned-away kind, `'quota'` for a
+ * quota-shut valve, else the failure class. Key and config errors have none.
  */
-export function fallbackTrigger(
+export function planBTrigger(
   error: unknown,
   lastClass: FailureClass | undefined,
-): FallbackTrigger | undefined {
-  const rejection = rejectionTrigger(error);
+): PlanBTrigger | undefined {
+  const rejection = turnedAwayTrigger(error);
   if (rejection === 'none') return undefined;
   if (rejection !== undefined) return rejection;
   return lastClass ?? 'unknown';
 }
 
-/** Runs the fallback (value or channel); a failure becomes `FallbackFailedError` (RS-26). */
-export async function runFallback(
-  plan: FallbackPlan,
+/** Runs plan B (value or channel); a failure becomes `PlanBFailedError` (RS-26). */
+export async function runPlanB(
+  plan: PlanBPlan,
   error: unknown,
-  ctx: ResilienceContext,
-  channelRunner: ((channel: string, ctx: ResilienceContext) => Promise<unknown>) | undefined,
-  attempts: number,
+  ctx: CareContext,
+  channelRunner: ((channel: string, ctx: CareContext) => Promise<unknown>) | undefined,
+  tries: number,
 ): Promise<unknown> {
   try {
     if (plan.value !== undefined) return await plan.value(error, ctx);
-    if (channelRunner === undefined) throw new Error('no fallback channel runner on this edge');
+    if (channelRunner === undefined) throw new Error('no plan B channel runner on this edge');
     return await channelRunner(plan.channel ?? '', ctx);
   } catch (cause) {
-    throw new FallbackFailedError({
+    throw new PlanBFailedError({
       binding: ctx.binding,
       edge: ctx.edge,
-      attempts,
+      tries,
       cause,
       original: error,
     });

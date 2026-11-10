@@ -1,52 +1,47 @@
-import { ResilienceScope } from './retry-budget';
-import type {
-  ResilienceClock,
-  ResilienceEvent,
-  ResilienceLogger,
-  ResilienceMetricsPort,
-} from './resilience.types';
+import { CareScope } from './retry-budget';
+import type { CareClock, CareEvent, CareLogger, CareMetricsPort } from './resilience.types';
 
 const ONE_MINUTE_MS = 60_000;
 
-export const noopResilienceLogger: ResilienceLogger = {
+export const noopCareLogger: CareLogger = {
   log: () => undefined,
   warn: () => undefined,
   error: () => undefined,
   debug: () => undefined,
 };
 
-export interface ResilienceObserverOptions {
-  clock: ResilienceClock;
-  logger?: ResilienceLogger;
-  metrics?: ResilienceMetricsPort;
-  onEvent?: (event: ResilienceEvent) => void;
+export interface CareObserverOptions {
+  clock: CareClock;
+  logger?: CareLogger;
+  metrics?: CareMetricsPort;
+  onEvent?: (event: CareEvent) => void;
   /** Fire-and-forget publisher of the events channel (RS-40). */
-  publish?: (event: ResilienceEvent) => Promise<void>;
+  publish?: (event: CareEvent) => Promise<void>;
 }
 
 /**
  * Event, metrics and log fan-out of the engine (RS-40, RS-41, RS-45). Nothing here is awaited on
  * the call path, and sink failures are swallowed with at most one warn line per minute (I7).
  */
-export class ResilienceObserver {
-  readonly logger: ResilienceLogger;
+export class CareObserver {
+  readonly logger: CareLogger;
   private readonly lastWarn = new Map<string, number>();
 
-  constructor(private readonly options: ResilienceObserverOptions) {
-    this.logger = options.logger ?? noopResilienceLogger;
+  constructor(private readonly options: CareObserverOptions) {
+    this.logger = options.logger ?? noopCareLogger;
   }
 
-  emit(event: Omit<ResilienceEvent, 'at'>): void {
-    if (ResilienceScope.current()?.fromEventsChannel === true) return;
-    const full: ResilienceEvent = { ...event, at: this.options.clock.wall() };
+  emit(event: Omit<CareEvent, 'at'>): void {
+    if (CareScope.current()?.fromEventsChannel === true) return;
+    const full: CareEvent = { ...event, at: this.options.clock.wall() };
     try {
       this.options.onEvent?.(full);
     } catch {
-      this.warnOnce('events', 'resilience event hook failed');
+      this.warnOnce('events', 'care event hook failed');
     }
     const publish = this.options.publish;
     if (publish === undefined) return;
-    const warn = (): void => this.warnOnce('events', 'resilience events channel publish failed');
+    const warn = (): void => this.warnOnce('events', 'care events channel publish failed');
     Promise.resolve()
       .then(() => publish(full))
       .catch(warn);
@@ -64,7 +59,7 @@ export class ResilienceObserver {
     this.metric(() => this.options.metrics?.gauge(name, labels, value));
   }
 
-  /** Error-level line, rate limited per topic (RS-13: a throwing classifier is logged). */
+  /** Error-level line, at most once a minute per topic (RS-13: a throwing classifier is logged). */
   errorOnce(topic: string, message: string): void {
     if (this.allowed(`error:${topic}`)) this.logger.error(message);
   }
@@ -86,7 +81,7 @@ export class ResilienceObserver {
     try {
       fn();
     } catch {
-      this.warnOnce('metrics', 'resilience metrics port failed');
+      this.warnOnce('metrics', 'care metrics port failed');
     }
   }
 }

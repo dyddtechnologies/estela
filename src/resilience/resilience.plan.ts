@@ -1,162 +1,172 @@
-import { backoffDelay, MAX_BACKOFF_MS, MAX_RETRY_ATTEMPTS, type JitterMode } from './backoff';
-import { ResilienceDefinitionError } from './resilience.errors';
+import {
+  backoffDelay,
+  MAX_BACKOFF_MS,
+  MAX_RETRY_ATTEMPTS,
+  type BackoffSettings,
+  type JitterMode,
+} from './backoff';
+import { CareConfigError } from './resilience.errors';
 import type {
-  BulkheadPolicy,
-  CircuitBreakerPolicy,
+  Care,
+  CareClassifierFn,
+  CareContext,
+  CareEdge,
+  CareKeyFn,
+  CareProfile,
+  CareRefOf,
+  CareStatePort,
   FailureClass,
-  FallbackPolicy,
-  FallbackTrigger,
-  RateLimitPolicy,
-  ResilienceClassifierFn,
-  ResilienceContext,
-  ResilienceEdgeKind,
-  ResilienceKeyFn,
-  ResiliencePolicy,
-  ResiliencePolicyRef,
-  ResilienceStatePort,
-  RetryPolicyOptions,
-  NamedResiliencePolicy,
-  TimeoutPolicy,
+  Lanes,
+  Pace,
+  Patience,
+  PlanB,
+  PlanBTrigger,
+  SpreadMode,
+  Tries,
+  Valve,
 } from './resilience.types';
 
 type MaybePromise<T> = T | Promise<T>;
 
 /**
- * Marks options built by a legacy alias (outbound REST `retry` / `timeoutMs`, section 1). The
- * primitive then keeps the 0.9.0 semantics and validation instead of the rules of section 5.6.
+ * Marks options built from a 0.9.0 spelling (outbound REST `retry` / `timeoutMs`, section 1). The
+ * part then keeps the 0.9.0 semantics and validation instead of the rules of section 5.6.
  */
-export const LEGACY_ALIAS = Symbol('estela.resilience.legacy');
+export const LEGACY_ALIAS = Symbol('estela.care.legacy');
 
-export interface LegacyRetryMark {
-  /** 0.9.0 boolean classifier (possibly async), called only when attempts are left. */
-  retryOn: (error: unknown, ctx: ResilienceContext) => MaybePromise<boolean>;
-  /** 0.9.0 backoff, clamped to >= 0. */
-  backoff: (attempt: number, error: unknown) => number;
+export interface LegacyTriesMark {
+  /** 0.9.0 boolean classifier (possibly async), called only when tries are left. */
+  tryAgainOn: (error: unknown, ctx: CareContext) => MaybePromise<boolean>;
+  /** 0.9.0 gap, clamped to >= 0. */
+  gap: (tryNumber: number, error: unknown) => number;
 }
 
-export type LegacyRetryOptions = RetryPolicyOptions & { [LEGACY_ALIAS]?: LegacyRetryMark };
-export type LegacyTimeoutPolicy = TimeoutPolicy & { [LEGACY_ALIAS]?: true };
+export type LegacyTries = Tries & { [LEGACY_ALIAS]?: LegacyTriesMark };
+export type LegacyPatience = Patience & { [LEGACY_ALIAS]?: true };
 
-export interface RetryPlan {
-  maxAttempts: number;
-  /** Delay before the next attempt; `random` is injected by the executor. */
-  delay(attempt: number, error: unknown, random: (maxExclusive: number) => number): number;
-  retryOn: ReadonlySet<FailureClass>;
-  honorRetryAfter: boolean;
-  maxRetryAfterMs: number;
+export interface TriesPlan {
+  max: number;
+  /** Gap before the next try; `random` is injected by the executor. */
+  delay(tryNumber: number, error: unknown, random: (maxExclusive: number) => number): number;
+  on: ReadonlySet<FailureClass>;
+  heedServerWait: boolean;
+  maxServerWaitMs: number;
   idempotent: boolean;
-  propagate: 'claim' | 'forward';
+  triesLeft: 'keep' | 'forward';
   requireIdempotencyKey: boolean;
-  /** Present when the effective retry is the 0.9.0 alias: no budget, boolean classifier. */
-  legacy?: LegacyRetryMark;
+  /** Present when the effective tries come from the 0.9.0 spelling: no tries left, boolean classifier. */
+  legacy?: LegacyTriesMark;
 }
 
-export interface BreakerPlan {
-  key?: ResilienceKeyFn;
-  failureRateThreshold: number;
-  minimumCalls: number;
-  window: { type: 'count'; size: number } | { type: 'time'; sizeMs: number };
-  openMs: number;
-  halfOpenCalls: number;
-  recordOn: ReadonlySet<FailureClass>;
-  quotaOpenMs: number | 'manual';
+export interface ValvePlan {
+  key?: CareKeyFn;
+  failPercent: number;
+  minCalls: number;
+  lookBack: { lastCalls: number } | { lastMs: number };
+  shutMs: number;
+  probes: number;
+  countOn: ReadonlySet<FailureClass>;
+  quotaShutMs: number | 'until-resumed';
   maxKeys: number;
-  state?: ResilienceStatePort;
+  state?: CareStatePort;
   syncMs: number;
 }
 
-export interface BulkheadPlan {
-  maxConcurrent: number;
-  maxQueue: number;
-  queueTimeoutMs?: number;
+export interface LanesPlan {
+  count: number;
+  waitlist: number;
+  waitlistMs?: number;
 }
 
-export interface RateLimitPlan {
-  limitPerSec: number;
+export interface PacePlan {
+  perSecond: number;
   burst: number;
-  key?: ResilienceKeyFn;
-  maxWaitMs: number;
-  state?: ResilienceStatePort;
-  degradedLimitPerSec: number;
-  degradedBurst: number;
+  key?: CareKeyFn;
+  waitMs: number;
+  state?: CareStatePort;
+  soloPerSecond: number;
+  soloBurst: number;
   maxKeys: number;
-  replicasHint: number;
+  replicas: number;
 }
 
-export interface FallbackPlan {
-  value?: (error: unknown, ctx: ResilienceContext) => unknown;
+export interface PlanBPlan {
+  value?: (error: unknown, ctx: CareContext) => unknown;
   channel?: string;
-  on: ReadonlySet<FallbackTrigger>;
+  on: ReadonlySet<PlanBTrigger>;
   cacheable: boolean;
 }
 
-/** Every primitive validated and defaulted; frozen. */
-export interface ResiliencePlan {
+/** Resolved, frozen care for one binding: every part validated and defaulted. */
+export interface CarePlan {
   readonly binding: string;
-  readonly edge: ResilienceEdgeKind;
-  readonly classify: readonly ResilienceClassifierFn[];
-  /** 0 = no per-attempt timeout. */
-  readonly perAttemptMs: number;
-  /** True when a layer configured the per-attempt timeout (shown in the graph summary). */
-  readonly timeoutExplicit: boolean;
-  readonly deadlineMs?: number;
-  readonly retry?: RetryPlan;
-  readonly circuitBreaker?: BreakerPlan;
-  readonly bulkhead?: BulkheadPlan;
-  readonly rateLimit?: RateLimitPlan;
-  readonly fallback?: FallbackPlan;
-  /** No primitive at all: the executor runs the call once, directly (RS-01). */
+  readonly edge: CareEdge;
+  readonly classify: readonly CareClassifierFn[];
+  /** Longest wait for one try; 0 = no limit. */
+  readonly eachTryMs: number;
+  /** True when a level set `eachTryMs` (shown in the graph summary). */
+  readonly patienceExplicit: boolean;
+  readonly totalMs?: number;
+  readonly tries?: TriesPlan;
+  readonly valve?: ValvePlan;
+  readonly lanes?: LanesPlan;
+  readonly pace?: PacePlan;
+  readonly planB?: PlanBPlan;
+  /** No part at all: the executor runs the call once, directly (RS-01). */
   readonly empty: boolean;
   /** Boot warnings that are not errors (section 5.6). */
   readonly warnings: readonly string[];
 }
 
-export type PrimitiveName =
-  'timeout' | 'retry' | 'circuitBreaker' | 'bulkhead' | 'rateLimit' | 'fallback';
+export type CarePartName = 'patience' | 'tries' | 'valve' | 'lanes' | 'pace' | 'planB';
 
-export const PRIMITIVES: readonly PrimitiveName[] = [
-  'timeout',
-  'retry',
-  'circuitBreaker',
-  'bulkhead',
-  'rateLimit',
-  'fallback',
+export const CARE_PARTS: readonly CarePartName[] = [
+  'patience',
+  'tries',
+  'valve',
+  'lanes',
+  'pace',
+  'planB',
 ];
 
 export interface ResolvePlanOptions {
-  /** Primitives allowed on this edge (section 5.5); default all. */
-  allowed?: readonly PrimitiveName[];
-  /** Named policies (RS-51). */
-  policies?: Readonly<Record<string, ResiliencePolicy>>;
-  /** Per-attempt timeout when no layer sets one (REST: 30000, jump: 10000). Not shown. */
-  defaultPerAttemptMs?: number;
+  /** Parts allowed on this edge (section 5.5); default all. */
+  allowed?: readonly CarePartName[];
+  /** Named profiles (RS-51). */
+  profiles?: Readonly<Record<string, Care>>;
+  /** `eachTryMs` when no level sets one (REST: 30000, jump: 10000). Not shown. */
+  defaultEachTryMs?: number;
 }
 
 export const FAILURE_CLASSES: readonly FailureClass[] = [
   'transient',
-  'throttled',
+  'busy',
   'rejected',
   'quota',
   'unknown',
 ];
-const TRIGGERS: readonly FallbackTrigger[] = [
+const TRIGGERS: readonly PlanBTrigger[] = [
   ...FAILURE_CLASSES,
-  'circuit-open',
-  'bulkhead-full',
-  'rate-limited',
-  'deadline',
+  'valve-shut',
+  'lanes-full',
+  'over-pace',
+  'out-of-time',
 ];
-const DEFAULT_FALLBACK_ON: readonly FallbackTrigger[] = [
+const DEFAULT_PLAN_B_ON: readonly PlanBTrigger[] = [
   'transient',
-  'throttled',
-  'circuit-open',
-  'bulkhead-full',
-  'rate-limited',
-  'deadline',
+  'busy',
+  'valve-shut',
+  'lanes-full',
+  'over-pace',
+  'out-of-time',
 ];
-const JITTERS: readonly JitterMode[] = ['full', 'equal', 'none'];
-const STATE_METHODS = ['takeToken', 'markOpen', 'openUntil', 'tryProbeLease', 'clearOpen'];
-const DEFAULT_BACKOFF = { initialMs: 200, factor: 2, maxMs: 10_000, jitter: 'full' as JitterMode };
+const SPREADS: Readonly<Record<SpreadMode, JitterMode>> = {
+  full: 'full',
+  half: 'equal',
+  none: 'none',
+};
+const STATE_METHODS = ['takeTurn', 'markShut', 'shutUntil', 'claimProbe', 'clearShut'];
+const DEFAULT_SPACING = { firstMs: 200, growth: 2, capMs: 10_000, spread: 'full' as SpreadMode };
 
 // ---------- Layering ----------
 
@@ -165,9 +175,9 @@ type Layerable = Record<string, unknown> & { enabled?: boolean };
 interface Layered {
   options: Layerable;
   enabled: boolean;
-  /** True when any layer configured the primitive. */
+  /** True when any level configured the part. */
   explicit: boolean;
-  /** Options object of the highest layer that set the primitive (legacy marks live there). */
+  /** Options object of the highest level that set the part (legacy marks live there). */
   top?: Layerable;
 }
 
@@ -177,14 +187,10 @@ function defined(options: object): Layerable {
 }
 
 /**
- * Field-by-field merge of one primitive over layers given highest first (RS-04): `enabled` comes
- * from the highest layer that sets the primitive, `false` turns it off.
+ * RS-04 (amended): across levels (highest first) the highest level that sets a part owns it
+ * whole; there is no field merge across levels. `false` turns the part off.
  */
-/**
- * RS-04 (amended): across levels (highest first) the highest level that sets a primitive owns it
- * whole; there is no field merge across levels. `false` turns the primitive off.
- */
-function layerPrimitive(values: readonly unknown[]): Layered {
+function layerPart(values: readonly unknown[]): Layered {
   for (const value of values) {
     if (value === undefined) continue;
     if (value === false) return { options: { enabled: false }, enabled: false, explicit: true };
@@ -204,78 +210,68 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Deep merge used once inside a reference (`use`, `extends`): arrays, functions and `false` replace. */
-export function deepMergePolicy<T>(base: T, over: unknown): T {
+export function deepMergeCare<T>(base: T, over: unknown): T {
   if (!isPlainObject(base) || !isPlainObject(over)) return over as T;
   const out: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(over)) {
-    if (value !== undefined) out[key] = deepMergePolicy(base[key], value);
+    if (value !== undefined) out[key] = deepMergeCare(base[key], value);
   }
   return out as T;
 }
 
-function definitionError(
-  binding: string,
-  path: string,
-  rule: string,
-  code: string,
-): ResilienceDefinitionError {
-  return new ResilienceDefinitionError(binding, path, rule, code);
+function configError(binding: string, path: string, rule: string, code: string): CareConfigError {
+  return new CareConfigError(binding, path, rule, code);
 }
 
 /** RS-53: a named profile with its `extends` chain applied (parent first, child over it). */
 export function resolveProfile(
   binding: string,
   name: unknown,
-  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
-): ResiliencePolicy {
+  profiles: Readonly<Record<string, CareProfile>> | undefined,
+): Care {
   const chain: string[] = [];
   let current: unknown = name;
   while (current !== undefined) {
     if (typeof current !== 'string' || !PROFILE_NAME.test(current)) {
-      throw definitionError(binding, 'use', 'must be a profile name', 'UNKNOWN_PROFILE');
+      throw configError(binding, 'use', 'must be a profile name', 'UNKNOWN_PROFILE');
     }
     if (chain.includes(current)) {
-      throw definitionError(
+      throw configError(
         binding,
         'use',
         `profiles ${describeChain([...chain, current])} form a cycle`,
         'PROFILE_CYCLE',
       );
     }
-    const policy =
-      policies !== undefined && Object.hasOwn(policies, current) ? policies[current] : undefined;
-    if (policy === undefined) {
-      throw definitionError(
-        binding,
-        'use',
-        `names an unknown policy '${current}'`,
-        'UNKNOWN_PROFILE',
-      );
+    const profile =
+      profiles !== undefined && Object.hasOwn(profiles, current) ? profiles[current] : undefined;
+    if (profile === undefined) {
+      throw configError(binding, 'use', `unknown profile '${current}'`, 'UNKNOWN_PROFILE');
     }
-    if (Object.hasOwn(policy, 'use')) {
-      throw definitionError(
+    if (Object.hasOwn(profile, 'use')) {
+      throw configError(
         binding,
         'use',
-        `policy '${current}' must not itself use another`,
+        `profile '${current}' must not itself use another`,
         'UNKNOWN_PROFILE',
       );
     }
     chain.push(current);
     if (chain.length - 1 > MAX_EXTENDS_HOPS) {
-      throw definitionError(
+      throw configError(
         binding,
         'use',
         `profile '${String(name)}' extends more than ${MAX_EXTENDS_HOPS} hops`,
         'PROFILE_DEPTH',
       );
     }
-    current = policy.extends;
+    current = profile.extends;
   }
   let merged: Record<string, unknown> = {};
-  for (const profile of [...chain].reverse()) {
-    const own: Record<string, unknown> = { ...policies?.[profile] };
+  for (const name of [...chain].reverse()) {
+    const own: Record<string, unknown> = { ...profiles?.[name] };
     delete own.extends;
-    merged = deepMergePolicy(merged, own);
+    merged = deepMergeCare(merged, own);
   }
   return merged;
 }
@@ -284,53 +280,53 @@ function describeChain(names: readonly string[]): string {
   return names.map((name) => `'${name}'`).join(' -> ');
 }
 
-/** RS-51, RS-52: expands one reference; `false` means no policy at this level and below. */
-// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to a policy, false (cut) or nothing
-export function expandPolicyRef<P extends object = ResiliencePolicy>(
+/** RS-51, RS-52: expands one reference; `false` means nothing at this level and below. */
+// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to care, false (cut) or nothing
+export function expandCareRef<C extends object = Care>(
   binding: string,
-  ref: ResiliencePolicyRef<P> | undefined,
-  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
-): ResiliencePolicy | false | undefined {
+  ref: CareRefOf<C> | undefined,
+  profiles: Readonly<Record<string, CareProfile>> | undefined,
+): Care | false | undefined {
   if (ref === undefined || ref === false) return ref;
-  if (typeof ref === 'string') return resolveProfile(binding, ref, policies);
+  if (typeof ref === 'string') return resolveProfile(binding, ref, profiles);
   const raw: unknown = ref;
   if (typeof raw !== 'object' || raw === null) {
-    throw new ResilienceDefinitionError(binding, 'use', 'must be a policy name or a policy object');
+    throw new CareConfigError(binding, 'use', 'must be a profile name or a care object');
   }
   if (!Object.hasOwn(ref, 'use')) return ref;
-  const { use, ...inline } = ref as P & { use?: string };
-  return deepMergePolicy(resolveProfile(binding, use, policies), inline);
+  const { use, ...inline } = ref as C & { use?: string };
+  return deepMergeCare(resolveProfile(binding, use, profiles), inline);
 }
 
 /** Expanded layers, cut at the first `false` (highest first). */
 export function expandLayers(
   binding: string,
-  layers: readonly (ResiliencePolicyRef | undefined)[],
-  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
-): ResiliencePolicy[] {
-  const out: ResiliencePolicy[] = [];
+  layers: readonly (CareRefOf | undefined)[],
+  profiles: Readonly<Record<string, CareProfile>> | undefined,
+): Care[] {
+  const out: Care[] = [];
   for (const layer of layers) {
-    const expanded = expandPolicyRef(binding, layer, policies);
+    const expanded = expandCareRef(binding, layer, profiles);
     if (expanded === false) break;
     if (expanded !== undefined) out.push(expanded);
   }
   return out;
 }
 
-/** RS-53: validates every profile name, `extends` chain and the reserved `defaults.inbound`. */
+/** RS-53: validates every profile name and `extends` chain. */
 export function validateProfiles(
-  policies: Readonly<Record<string, NamedResiliencePolicy>> | undefined,
+  profiles: Readonly<Record<string, CareProfile>> | undefined,
 ): void {
-  for (const name of Object.keys(policies ?? {})) {
+  for (const name of Object.keys(profiles ?? {})) {
     if (!PROFILE_NAME.test(name)) {
-      throw definitionError(
-        'resilience',
-        `policies.${name}`,
+      throw configError(
+        'care',
+        `profiles.${name}`,
         'is not a valid profile name',
         'UNKNOWN_PROFILE',
       );
     }
-    resolveProfile(`policy '${name}'`, name, policies);
+    resolveProfile(`profile '${name}'`, name, profiles);
   }
 }
 
@@ -340,7 +336,7 @@ class Checker {
   constructor(readonly binding: string) {}
 
   fail(path: string, rule: string): never {
-    throw new ResilienceDefinitionError(this.binding, path, rule);
+    throw new CareConfigError(this.binding, path, rule);
   }
 
   int(path: string, value: unknown, min: number, max = MAX_BACKOFF_MS): number {
@@ -374,7 +370,7 @@ class Checker {
     return value as F;
   }
 
-  state(path: string, value: unknown): ResilienceStatePort | undefined {
+  state(path: string, value: unknown): CareStatePort | undefined {
     if (value === undefined || value === 'local') return undefined;
     const port = value as Record<string, unknown> | null;
     if (typeof port !== 'object' || port === null)
@@ -382,266 +378,255 @@ class Checker {
     for (const method of STATE_METHODS) {
       if (typeof port[method] !== 'function') this.fail(path, `state port has no ${method}()`);
     }
-    return value as ResilienceStatePort;
+    return value as CareStatePort;
   }
 }
 
-// ---------- Primitive resolution ----------
+// ---------- Part resolution ----------
 
-function resolveTimeout(
+function resolvePatience(
   c: Checker,
   layered: Layered,
-  defaultPerAttemptMs: number,
-): Pick<ResiliencePlan, 'perAttemptMs' | 'deadlineMs' | 'timeoutExplicit'> {
+  defaultEachTryMs: number,
+): Pick<CarePlan, 'eachTryMs' | 'totalMs' | 'patienceExplicit'> {
   if (!layered.explicit || !layered.enabled) {
-    return { perAttemptMs: defaultPerAttemptMs, timeoutExplicit: false };
+    return { eachTryMs: defaultEachTryMs, patienceExplicit: false };
   }
-  const { perAttemptMs, deadlineMs } = layered.options as TimeoutPolicy;
-  const legacy = (layered.top as LegacyTimeoutPolicy | undefined)?.[LEGACY_ALIAS] === true;
-  const out: { perAttemptMs: number; deadlineMs?: number; timeoutExplicit: boolean } = {
-    perAttemptMs: defaultPerAttemptMs,
-    timeoutExplicit: perAttemptMs !== undefined,
+  const { eachTryMs, totalMs } = layered.options as Patience;
+  const legacy = (layered.top as LegacyPatience | undefined)?.[LEGACY_ALIAS] === true;
+  const out: { eachTryMs: number; totalMs?: number; patienceExplicit: boolean } = {
+    eachTryMs: defaultEachTryMs,
+    patienceExplicit: eachTryMs !== undefined,
   };
-  // The legacy alias keeps the 0.9.0 rule (any finite number >= 0), validated by its edge.
-  if (perAttemptMs !== undefined) {
-    out.perAttemptMs = legacy
-      ? perAttemptMs
-      : c.int('timeout.perAttemptMs', perAttemptMs, 0, MAX_BACKOFF_MS);
+  // The 0.9.0 spelling keeps the 0.9.0 rule (any finite number >= 0), validated by its edge.
+  if (eachTryMs !== undefined) {
+    out.eachTryMs = legacy ? eachTryMs : c.int('patience.eachTryMs', eachTryMs, 0, MAX_BACKOFF_MS);
   }
-  if (deadlineMs !== undefined) {
-    out.deadlineMs = c.int('timeout.deadlineMs', deadlineMs, 1, MAX_BACKOFF_MS);
+  if (totalMs !== undefined) {
+    out.totalMs = c.int('patience.totalMs', totalMs, 1, MAX_BACKOFF_MS);
   }
   return out;
 }
 
 interface DelaySource {
-  delay: RetryPlan['delay'];
-  maxMs: number;
+  delay: TriesPlan['delay'];
+  capMs: number;
 }
 
-function resolveBackoff(c: Checker, option: RetryPolicyOptions['backoff']): DelaySource {
+function resolveSpacing(c: Checker, option: Tries['spacing']): DelaySource {
   if (typeof option === 'function') {
     const fn = option;
     return {
-      delay: (attempt, error) => Math.min(MAX_BACKOFF_MS, Math.max(0, fn(attempt, error))),
-      maxMs: DEFAULT_BACKOFF.maxMs,
+      delay: (tryNumber, error) => Math.min(MAX_BACKOFF_MS, Math.max(0, fn(tryNumber, error))),
+      capMs: DEFAULT_SPACING.capMs,
     };
   }
   if (typeof option === 'number') {
-    const ms = c.int('retry.backoff', option, 0, MAX_BACKOFF_MS);
-    return { delay: () => ms, maxMs: ms };
+    const ms = c.int('tries.spacing', option, 0, MAX_BACKOFF_MS);
+    return { delay: () => ms, capMs: ms };
   }
   const raw: unknown = option;
   if (raw !== undefined && (typeof raw !== 'object' || raw === null)) {
-    c.fail('retry.backoff', 'must be a number, an object or a function');
+    c.fail('tries.spacing', 'must be a number, an object or a function');
   }
-  const settings = { ...DEFAULT_BACKOFF, ...defined(option ?? {}) };
-  const initialMs = c.int('retry.backoff.initialMs', settings.initialMs, 0, MAX_BACKOFF_MS);
+  const settings = { ...DEFAULT_SPACING, ...defined(option ?? {}) };
+  const firstMs = c.int('tries.spacing.firstMs', settings.firstMs, 0, MAX_BACKOFF_MS);
   if (
-    typeof settings.factor !== 'number' ||
-    !Number.isFinite(settings.factor) ||
-    settings.factor < 1
+    typeof settings.growth !== 'number' ||
+    !Number.isFinite(settings.growth) ||
+    settings.growth < 1
   ) {
-    c.fail('retry.backoff.factor', 'must be a number >= 1');
+    c.fail('tries.spacing.growth', 'must be a number >= 1');
   }
-  const maxMs = c.int('retry.backoff.maxMs', settings.maxMs, initialMs, MAX_BACKOFF_MS);
-  if (!JITTERS.includes(settings.jitter))
-    c.fail('retry.backoff.jitter', 'must be full, equal or none');
-  const resolved = { ...settings, initialMs, maxMs };
-  return { delay: (attempt, _error, random) => backoffDelay(resolved, attempt, random), maxMs };
+  const capMs = c.int('tries.spacing.capMs', settings.capMs, firstMs, MAX_BACKOFF_MS);
+  if (!Object.hasOwn(SPREADS, settings.spread))
+    c.fail('tries.spacing.spread', 'must be full, half or none');
+  const resolved: BackoffSettings = {
+    initialMs: firstMs,
+    factor: settings.growth,
+    maxMs: capMs,
+    jitter: SPREADS[settings.spread],
+  };
+  return {
+    delay: (tryNumber, _error, random) => backoffDelay(resolved, tryNumber, random),
+    capMs,
+  };
 }
 
-function resolveRetry(c: Checker, layered: Layered): RetryPlan | undefined {
+function resolveTries(c: Checker, layered: Layered): TriesPlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
-  const options = layered.options as LegacyRetryOptions;
-  const legacy = (layered.top as LegacyRetryOptions | undefined)?.[LEGACY_ALIAS];
-  if (legacy !== undefined) return legacyRetryPlan(options, legacy);
-  const maxAttempts = c.int('retry.maxAttempts', options.maxAttempts ?? 3, 1, MAX_RETRY_ATTEMPTS);
-  const backoff = resolveBackoff(c, options.backoff);
-  const retryOn = c.classes(
-    'retry.retryOn',
-    options.retryOn ?? ['transient', 'throttled'],
-    FAILURE_CLASSES,
-  );
-  if (retryOn.has('quota'))
-    c.fail('retry.retryOn', "must not list 'quota' (quota is never retried)");
+  const options = layered.options as LegacyTries;
+  const legacy = (layered.top as LegacyTries | undefined)?.[LEGACY_ALIAS];
+  if (legacy !== undefined) return legacyTriesPlan(options, legacy);
+  const max = c.int('tries.max', options.max ?? 3, 1, MAX_RETRY_ATTEMPTS);
+  const spacing = resolveSpacing(c, options.spacing);
+  const on = c.classes('tries.on', options.on ?? ['transient', 'busy'], FAILURE_CLASSES);
+  if (on.has('quota')) c.fail('tries.on', "must not list 'quota' (quota is never tried again)");
   return {
-    maxAttempts,
-    delay: backoff.delay,
-    retryOn,
-    honorRetryAfter: options.honorRetryAfter ?? true,
-    maxRetryAfterMs: retryAfterCap(c, options, backoff.maxMs),
+    max,
+    delay: spacing.delay,
+    on,
+    heedServerWait: options.heedServerWait ?? true,
+    maxServerWaitMs: serverWaitCap(c, options, spacing.capMs),
     idempotent: options.idempotent === true,
-    propagate: retryPropagation(c, options),
+    triesLeft: triesLeftMode(c, options),
     requireIdempotencyKey: options.requireIdempotencyKey === true,
   };
 }
 
-function retryAfterCap(c: Checker, options: RetryPolicyOptions, backoffMaxMs: number): number {
-  if (options.maxRetryAfterMs === undefined) return backoffMaxMs;
-  return c.int('retry.maxRetryAfterMs', options.maxRetryAfterMs, 0, MAX_BACKOFF_MS);
+function serverWaitCap(c: Checker, options: Tries, capMs: number): number {
+  if (options.maxServerWaitMs === undefined) return capMs;
+  return c.int('tries.maxServerWaitMs', options.maxServerWaitMs, 0, MAX_BACKOFF_MS);
 }
 
-function retryPropagation(c: Checker, options: RetryPolicyOptions): 'claim' | 'forward' {
-  const propagate: unknown = options.propagate ?? 'claim';
-  if (propagate !== 'claim' && propagate !== 'forward')
-    c.fail('retry.propagate', 'must be claim or forward');
-  return propagate;
+function triesLeftMode(c: Checker, options: Tries): 'keep' | 'forward' {
+  const mode: unknown = options.triesLeft ?? 'keep';
+  if (mode !== 'keep' && mode !== 'forward') c.fail('tries.triesLeft', 'must be keep or forward');
+  return mode;
 }
 
-/** The 0.9.0 alias: no jitter, no Retry-After, no budget, boolean classifier (section 1). */
-function legacyRetryPlan(options: RetryPolicyOptions, legacy: LegacyRetryMark): RetryPlan {
+/** The 0.9.0 spelling: no spread, no server wait, no tries left, boolean classifier (section 1). */
+function legacyTriesPlan(options: Tries, legacy: LegacyTriesMark): TriesPlan {
   return {
-    maxAttempts: options.maxAttempts ?? 3,
-    delay: (attempt, error) => legacy.backoff(attempt, error),
-    retryOn: new Set(),
-    honorRetryAfter: false,
-    maxRetryAfterMs: 0,
+    max: options.max ?? 3,
+    delay: (tryNumber, error) => legacy.gap(tryNumber, error),
+    on: new Set(),
+    heedServerWait: false,
+    maxServerWaitMs: 0,
     idempotent: false,
-    propagate: 'forward',
+    triesLeft: 'forward',
     requireIdempotencyKey: false,
     legacy,
   };
 }
 
-/** Optional key function and shared state of the breaker and the rate limiter. */
+/** Optional key function and shared state of the valve and the pace. */
 function keyAndState(
   c: Checker,
-  prefix: 'circuitBreaker' | 'rateLimit',
+  prefix: 'valve' | 'pace',
   options: { key?: unknown; state?: unknown },
-): { key?: ResilienceKeyFn; state?: ResilienceStatePort } {
-  const out: { key?: ResilienceKeyFn; state?: ResilienceStatePort } = {};
-  const key = c.fn<ResilienceKeyFn>(`${prefix}.key`, options.key);
+): { key?: CareKeyFn; state?: CareStatePort } {
+  const out: { key?: CareKeyFn; state?: CareStatePort } = {};
+  const key = c.fn<CareKeyFn>(`${prefix}.key`, options.key);
   if (key !== undefined) out.key = key;
   const state = c.state(`${prefix}.state`, options.state);
   if (state !== undefined) out.state = state;
   return out;
 }
 
-function resolveWindow(
-  c: Checker,
-  options: CircuitBreakerPolicy,
-  minimumCalls: number,
-): BreakerPlan['window'] {
-  const window = options.window ?? { type: 'count', size: 20 };
-  if (window.type === 'count') {
-    return { type: 'count', size: c.int('circuitBreaker.window.size', window.size, minimumCalls) };
+function resolveLookBack(c: Checker, options: Valve, minCalls: number): ValvePlan['lookBack'] {
+  const lookBack: unknown = options.lookBack ?? { lastCalls: 20 };
+  if (typeof lookBack !== 'object' || lookBack === null) {
+    c.fail('valve.lookBack', 'must be { lastCalls } or { lastMs }');
   }
-  if ((window as { type: unknown }).type !== 'time')
-    c.fail('circuitBreaker.window.type', 'must be count or time');
-  return { type: 'time', sizeMs: c.int('circuitBreaker.window.sizeMs', window.sizeMs, 1) };
+  const hasCalls = Object.hasOwn(lookBack, 'lastCalls');
+  const hasMs = Object.hasOwn(lookBack, 'lastMs');
+  if (hasCalls === hasMs) c.fail('valve.lookBack', 'must set exactly one of lastCalls or lastMs');
+  if (hasCalls) {
+    const { lastCalls } = lookBack as { lastCalls: unknown };
+    return { lastCalls: c.int('valve.lookBack.lastCalls', lastCalls, minCalls) };
+  }
+  const { lastMs } = lookBack as { lastMs: unknown };
+  return { lastMs: c.int('valve.lookBack.lastMs', lastMs, 1) };
 }
 
-function resolveBreaker(c: Checker, layered: Layered): BreakerPlan | undefined {
+function resolveValve(c: Checker, layered: Layered): ValvePlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
-  const options = layered.options as CircuitBreakerPolicy;
-  const minimumCalls = c.int('circuitBreaker.minimumCalls', options.minimumCalls ?? 10, 1);
-  const openMs = c.int('circuitBreaker.openMs', options.openMs ?? 30_000, 1);
-  const plan: BreakerPlan = {
-    failureRateThreshold: c.int(
-      'circuitBreaker.failureRateThreshold',
-      options.failureRateThreshold ?? 50,
-      1,
-      100,
-    ),
-    minimumCalls,
-    window: resolveWindow(c, options, minimumCalls),
-    openMs,
-    halfOpenCalls: c.int('circuitBreaker.halfOpenCalls', options.halfOpenCalls ?? 1, 1),
-    recordOn: c.classes(
-      'circuitBreaker.recordOn',
-      options.recordOn ?? ['transient'],
-      FAILURE_CLASSES,
-    ),
-    quotaOpenMs: quotaOpening(c, options.quotaOpenMs, openMs),
-    maxKeys: c.int('circuitBreaker.maxKeys', options.maxKeys ?? 1000, 1),
-    syncMs: c.int('circuitBreaker.syncMs', options.syncMs ?? 1000, 1),
-    ...keyAndState(c, 'circuitBreaker', options),
+  const options = layered.options as Valve;
+  const minCalls = c.int('valve.minCalls', options.minCalls ?? 10, 1);
+  const shutMs = c.int('valve.shutMs', options.shutMs ?? 30_000, 1);
+  const plan: ValvePlan = {
+    failPercent: c.int('valve.failPercent', options.failPercent ?? 50, 1, 100),
+    minCalls,
+    lookBack: resolveLookBack(c, options, minCalls),
+    shutMs,
+    probes: c.int('valve.probes', options.probes ?? 1, 1),
+    countOn: c.classes('valve.countOn', options.countOn ?? ['transient'], FAILURE_CLASSES),
+    quotaShutMs: quotaShut(c, options.quotaShutMs, shutMs),
+    maxKeys: c.int('valve.maxKeys', options.maxKeys ?? 1000, 1),
+    syncMs: c.int('valve.syncMs', options.syncMs ?? 1000, 1),
+    ...keyAndState(c, 'valve', options),
   };
   return plan;
 }
 
-function quotaOpening(
+function quotaShut(
   c: Checker,
-  quota: number | 'manual' | undefined,
-  openMs: number,
-): number | 'manual' {
-  return quota === 'manual' ? 'manual' : c.int('circuitBreaker.quotaOpenMs', quota ?? openMs, 1);
+  quota: number | 'until-resumed' | undefined,
+  shutMs: number,
+): number | 'until-resumed' {
+  return quota === 'until-resumed'
+    ? 'until-resumed'
+    : c.int('valve.quotaShutMs', quota ?? shutMs, 1);
 }
 
-function resolveBulkhead(c: Checker, layered: Layered): BulkheadPlan | undefined {
+function resolveLanes(c: Checker, layered: Layered): LanesPlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
-  const options = layered.options as Partial<BulkheadPolicy>;
-  const plan: BulkheadPlan = {
-    maxConcurrent: c.int('bulkhead.maxConcurrent', options.maxConcurrent, 1),
-    maxQueue: c.int('bulkhead.maxQueue', options.maxQueue ?? 0, 0),
+  const options = layered.options as Partial<Lanes>;
+  const plan: LanesPlan = {
+    count: c.int('lanes.count', options.count, 1),
+    waitlist: c.int('lanes.waitlist', options.waitlist ?? 0, 0),
   };
-  if (options.queueTimeoutMs !== undefined) {
-    plan.queueTimeoutMs = c.int('bulkhead.queueTimeoutMs', options.queueTimeoutMs, 1);
+  if (options.waitlistMs !== undefined) {
+    plan.waitlistMs = c.int('lanes.waitlistMs', options.waitlistMs, 1);
   }
   return plan;
 }
 
-function resolveRateLimit(c: Checker, layered: Layered): RateLimitPlan | undefined {
+function resolvePace(c: Checker, layered: Layered): PacePlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
-  const options = layered.options as Partial<RateLimitPolicy>;
-  const limitPerSec = c.positive('rateLimit.limitPerSec', options.limitPerSec);
-  const burst = c.int('rateLimit.burst', options.burst ?? Math.ceil(limitPerSec), 1);
-  const replicasHint = c.int('rateLimit.replicasHint', options.replicasHint ?? 1, 1);
-  const plan: RateLimitPlan = {
-    limitPerSec,
+  const options = layered.options as Partial<Pace>;
+  const perSecond = c.positive('pace.perSecond', options.perSecond);
+  const burst = c.int('pace.burst', options.burst ?? Math.ceil(perSecond), 1);
+  const replicas = c.int('pace.replicas', options.replicas ?? 1, 1);
+  const plan: PacePlan = {
+    perSecond,
     burst,
-    maxWaitMs: c.int('rateLimit.maxWaitMs', options.maxWaitMs ?? 0, 0),
-    degradedLimitPerSec: c.positive(
-      'rateLimit.degradedLimitPerSec',
-      options.degradedLimitPerSec ?? limitPerSec / replicasHint,
-    ),
-    degradedBurst: Math.max(1, Math.floor(burst / replicasHint)),
-    maxKeys: c.int('rateLimit.maxKeys', options.maxKeys ?? 1000, 1),
-    replicasHint,
+    waitMs: c.int('pace.waitMs', options.waitMs ?? 0, 0),
+    soloPerSecond: c.positive('pace.soloPerSecond', options.soloPerSecond ?? perSecond / replicas),
+    soloBurst: Math.max(1, Math.floor(burst / replicas)),
+    maxKeys: c.int('pace.maxKeys', options.maxKeys ?? 1000, 1),
+    replicas,
   };
-  return { ...plan, ...keyAndState(c, 'rateLimit', options) };
+  return { ...plan, ...keyAndState(c, 'pace', options) };
 }
 
-function resolveFallback(c: Checker, layered: Layered): FallbackPlan | undefined {
+function resolvePlanB(c: Checker, layered: Layered): PlanBPlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
-  const options = layered.options as FallbackPolicy;
+  const options = layered.options as PlanB;
   const hasValue = options.value !== undefined;
   const hasChannel = options.channel !== undefined;
-  if (hasValue === hasChannel) c.fail('fallback', 'must set exactly one of value or channel');
-  const plan: FallbackPlan = {
-    on: c.classes('fallback.on', options.on ?? DEFAULT_FALLBACK_ON, TRIGGERS),
+  if (hasValue === hasChannel) c.fail('planB', 'must set exactly one of value or channel');
+  const plan: PlanBPlan = {
+    on: c.classes('planB.on', options.on ?? DEFAULT_PLAN_B_ON, TRIGGERS),
     cacheable: options.cacheable === true,
   };
-  const value = c.fn<FallbackPlan['value']>('fallback.value', options.value);
+  const value = c.fn<PlanBPlan['value']>('planB.value', options.value);
   if (value !== undefined) plan.value = value;
   if (hasChannel) {
     if (typeof options.channel !== 'string' || options.channel.length === 0) {
-      c.fail('fallback.channel', 'must be a non-empty channel name');
+      c.fail('planB.channel', 'must be a non-empty channel name');
     }
     plan.channel = options.channel;
   }
   return plan;
 }
 
-function resolveClassify(
-  c: Checker,
-  layers: readonly ResiliencePolicy[],
-): readonly ResilienceClassifierFn[] {
+function resolveClassify(c: Checker, layers: readonly Care[]): readonly CareClassifierFn[] {
   const option = layers.find((layer) => layer.classify !== undefined)?.classify;
   if (option === undefined) return [];
   const list = (Array.isArray(option) ? option : [option]) as unknown[];
   list.forEach((fn, index) => c.fn(`classify[${index}]`, fn));
-  return list as ResilienceClassifierFn[];
+  return list as CareClassifierFn[];
 }
 
 function assertAllowed(
   c: Checker,
-  layers: readonly ResiliencePolicy[],
-  allowed: readonly PrimitiveName[],
+  layers: readonly Care[],
+  allowed: readonly CarePartName[],
 ): void {
   for (const layer of layers) {
-    for (const name of PRIMITIVES) {
+    for (const name of CARE_PARTS) {
       const value = layer[name];
       if (value !== undefined && value !== false && !allowed.includes(name)) {
         c.fail(name, 'is not allowed on this edge');
@@ -650,82 +635,68 @@ function assertAllowed(
   }
 }
 
-function warningsOf(plan: Omit<ResiliencePlan, 'warnings' | 'empty'>): string[] {
+function warningsOf(plan: Omit<CarePlan, 'warnings' | 'empty'>): string[] {
   const warnings: string[] = [];
-  if (plan.deadlineMs !== undefined && plan.perAttemptMs > plan.deadlineMs) {
+  if (plan.totalMs !== undefined && plan.eachTryMs > plan.totalMs) {
     warnings.push(
-      `${plan.binding}: resilience.timeout.deadlineMs is shorter than perAttemptMs; attempts are capped by the deadline`,
+      `${plan.binding}: care.patience.totalMs is shorter than eachTryMs; each try is capped by totalMs`,
     );
   }
   return warnings;
 }
 
 /**
- * Merges `layers` (highest first: call, binding, module default), validates every primitive
- * (section 5.6) and applies the defaults. Throws `ResilienceDefinitionError` naming the binding
- * and the option path (RS-03).
+ * Merges `layers` (highest first: call, binding, module default), validates every part
+ * (section 5.6) and applies the defaults. Throws `CareConfigError` naming the binding and the
+ * option path (RS-03).
  */
-export function resolveResiliencePlan(
+export function resolveCarePlan(
   binding: string,
-  layers: readonly (ResiliencePolicyRef | undefined)[],
-  edge: ResilienceEdgeKind,
+  layers: readonly (CareRefOf | undefined)[],
+  edge: CareEdge,
   options: ResolvePlanOptions = {},
-): ResiliencePlan {
+): CarePlan {
   const checker = new Checker(binding);
-  const expanded = expandLayers(binding, layers, options.policies);
-  assertAllowed(checker, expanded, options.allowed ?? PRIMITIVES);
-  const of = (name: PrimitiveName): Layered => layerPrimitive(expanded.map((layer) => layer[name]));
+  const expanded = expandLayers(binding, layers, options.profiles);
+  assertAllowed(checker, expanded, options.allowed ?? CARE_PARTS);
+  const of = (name: CarePartName): Layered => layerPart(expanded.map((layer) => layer[name]));
   const base = {
     binding,
     edge,
     classify: resolveClassify(checker, expanded),
-    ...resolveTimeout(checker, of('timeout'), options.defaultPerAttemptMs ?? 0),
+    ...resolvePatience(checker, of('patience'), options.defaultEachTryMs ?? 0),
   };
-  const plan: Omit<ResiliencePlan, 'warnings' | 'empty'> = { ...base };
-  const assign = <K extends keyof ResiliencePlan>(
-    key: K,
-    value: ResiliencePlan[K] | undefined,
-  ): void => {
+  const plan: Omit<CarePlan, 'warnings' | 'empty'> = { ...base };
+  const assign = <K extends keyof CarePlan>(key: K, value: CarePlan[K] | undefined): void => {
     if (value !== undefined) (plan as Record<string, unknown>)[key] = value;
   };
-  assign('retry', resolveRetry(checker, of('retry')));
-  assign('circuitBreaker', resolveBreaker(checker, of('circuitBreaker')));
-  assign('bulkhead', resolveBulkhead(checker, of('bulkhead')));
-  assign('rateLimit', resolveRateLimit(checker, of('rateLimit')));
-  assign('fallback', resolveFallback(checker, of('fallback')));
+  assign('tries', resolveTries(checker, of('tries')));
+  assign('valve', resolveValve(checker, of('valve')));
+  assign('lanes', resolveLanes(checker, of('lanes')));
+  assign('pace', resolvePace(checker, of('pace')));
+  assign('planB', resolvePlanB(checker, of('planB')));
   return Object.freeze({ ...plan, empty: isEmpty(plan), warnings: warningsOf(plan) });
 }
 
-function isEmpty(plan: Omit<ResiliencePlan, 'warnings' | 'empty'>): boolean {
-  const primitives = [
-    plan.retry,
-    plan.circuitBreaker,
-    plan.bulkhead,
-    plan.rateLimit,
-    plan.fallback,
-  ];
-  return (
-    plan.perAttemptMs === 0 &&
-    plan.deadlineMs === undefined &&
-    primitives.every((p) => p === undefined)
-  );
+function isEmpty(plan: Omit<CarePlan, 'warnings' | 'empty'>): boolean {
+  const parts = [plan.tries, plan.valve, plan.lanes, plan.pace, plan.planB];
+  return plan.eachTryMs === 0 && plan.totalMs === undefined && parts.every((p) => p === undefined);
 }
 
 function formatMs(ms: number): string {
   return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
 }
 
-/** Compact summary for the graph and boot logs (RS-42): kinds, timeouts and attempts only. */
-export function describePolicy(plan: ResiliencePlan): string | undefined {
+/** Compact summary for the graph and boot logs (RS-42): part names, waits and tries only. */
+export function describeCare(plan: CarePlan): string | undefined {
   const parts: string[] = [];
-  if (plan.timeoutExplicit && plan.perAttemptMs > 0)
-    parts.push(`timeout ${formatMs(plan.perAttemptMs)}`);
-  if (plan.deadlineMs !== undefined) parts.push(`deadline ${formatMs(plan.deadlineMs)}`);
-  if (plan.retry !== undefined && plan.retry.maxAttempts > 1)
-    parts.push(`retry x${plan.retry.maxAttempts}`);
-  if (plan.circuitBreaker !== undefined) parts.push('breaker');
-  if (plan.bulkhead !== undefined) parts.push('bulkhead');
-  if (plan.rateLimit !== undefined) parts.push('ratelimit');
-  if (plan.fallback !== undefined) parts.push('fallback');
+  if (plan.patienceExplicit && plan.eachTryMs > 0)
+    parts.push(`patience ${formatMs(plan.eachTryMs)}`);
+  if (plan.totalMs !== undefined) parts.push(`total ${formatMs(plan.totalMs)}`);
+  if (plan.tries !== undefined && plan.tries.max > 1) parts.push(`tries x${plan.tries.max}`);
+  if (plan.valve !== undefined) parts.push('valve');
+  if (plan.lanes !== undefined) parts.push('lanes');
+  if (plan.pace !== undefined) parts.push('pace');
+  if (plan.planB !== undefined) parts.push('plan-b');
   return parts.length === 0 ? undefined : parts.join(' · ');
 }

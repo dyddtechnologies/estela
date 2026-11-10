@@ -7,13 +7,9 @@ import {
   type NestInterceptor,
 } from '@nestjs/common';
 import { finalize, mergeMap, type Observable } from 'rxjs';
-import {
-  DEGRADED_HEADER,
-  RETRY_BUDGET_MESSAGE_HEADER,
-  ResilienceScope,
-} from '../resilience/retry-budget';
-import type { ResilienceRuntime } from '../resilience/runtime';
-import { inboundBudget, inboundShedder, overloaded, shedContext } from './inbound.resilience';
+import { PLAN_B_HEADER, TRIES_LEFT_MESSAGE_HEADER, CareScope } from '../resilience/retry-budget';
+import type { CareEngine } from '../resilience/runtime';
+import { busy, inboundShedder, inboundTriesLeft, shedContext } from './inbound.resilience';
 import type { ChannelRegistry } from '../channel-registry';
 import {
   AmqpHeaderMapper,
@@ -70,8 +66,8 @@ export interface InboundInterceptorDeps {
   defaults?: InboundDefaults;
   /** Resolves `{ useExisting }` strategies; without it only functions and instances work. */
   resolver?: InboundProviderResolver;
-  /** Resilience runtime: load shedding, retry budget and the degraded mark (RS-27, RS-29, RS-37). */
-  resilience?: ResilienceRuntime;
+  /** Care engine: inbound lanes and pace, tries left and the plan B mark (RS-27, RS-29, RS-37). */
+  care?: CareEngine;
 }
 
 /** Request/reply port that also returns the reply headers (ReplyGateway). */
@@ -139,7 +135,7 @@ export class InboundInterceptor implements NestInterceptor {
           return this.dispatch({ spec, ...extraction, handlerResult, context, receivedAt });
         }),
       );
-    const runtime = this.deps.resilience;
+    const runtime = this.deps.care;
     const shedder =
       runtime === undefined ? undefined : inboundShedder(spec, this.deps.defaults, runtime);
     if (shedder === undefined) return Promise.resolve(handle());
@@ -147,29 +143,29 @@ export class InboundInterceptor implements NestInterceptor {
     return shedder.admit(shedContext(context, spec, strategy)).then(
       (release) => handle().pipe(finalize(release)),
       (error: unknown) => {
-        throw overloaded(error, context, spec);
+        throw busy(error, context, spec);
       },
     );
   }
 
   private dispatch(request: InboundRequestContext): Promise<unknown> {
-    const runtime = this.deps.resilience;
+    const runtime = this.deps.care;
     if (runtime === undefined) return this.dispatchIn(request, undefined, undefined);
-    const budget = inboundBudget(request.rawHeaders, runtime);
-    const value = { root: true, ...(budget === undefined ? {} : { budget }) };
-    return ResilienceScope.runMessage(value, (frame) => this.dispatchIn(request, frame, budget));
+    const triesLeft = inboundTriesLeft(request.rawHeaders, runtime);
+    const value = { root: true, ...(triesLeft === undefined ? {} : { triesLeft }) };
+    return CareScope.runMessage(value, (frame) => this.dispatchIn(request, frame, triesLeft));
   }
 
   private async dispatchIn(
     request: InboundRequestContext,
-    frame: { degraded(): boolean } | undefined,
-    budget: number | undefined,
+    frame: { planB(): boolean } | undefined,
+    triesLeft: number | undefined,
   ): Promise<unknown> {
     const { spec } = request;
     const mapper = this.mappers.get(spec.transport);
     if (mapper === undefined) throw new InboundError(`sin header-mapper para '${spec.transport}'`);
     const headersInit = mapper.mapIn(request.rawHeaders as never);
-    if (budget !== undefined) headersInit[RETRY_BUDGET_MESSAGE_HEADER] = budget;
+    if (triesLeft !== undefined) headersInit[TRIES_LEFT_MESSAGE_HEADER] = triesLeft;
     const plan = this.planFor(spec);
     const clientKey =
       plan.clientKey === undefined ? headersInit.idempotencyKey : plan.clientKey(request);
@@ -188,7 +184,7 @@ export class InboundInterceptor implements NestInterceptor {
     request: InboundKeyContext,
     claim: InboundClaim,
     headersInit: MessageHeadersInit,
-    frame: { degraded(): boolean } | undefined,
+    frame: { planB(): boolean } | undefined,
   ): Promise<InboundReplyOutcome> {
     const { spec, payload } = request;
     const storageKey = claim.status === 'acquired' ? claim.at.key : undefined;
@@ -196,12 +192,12 @@ export class InboundInterceptor implements NestInterceptor {
     const headers = forwardedHeaders(rule, headersInit, request.clientKey, storageKey);
     const msg: IntegrationMessage = createMessage(payload, headers);
     let result: unknown;
-    let degradedReply = false;
+    let planBReply = false;
     try {
       if (spec.requestReply === true) {
         const reply = await this.requestReplyViaGateway(spec, payload, headers);
         result = reply.payload;
-        degradedReply = reply.degraded;
+        planBReply = reply.planB;
       } else {
         await this.deps.registry.send(spec.channel, payload, headers);
       }
@@ -209,13 +205,13 @@ export class InboundInterceptor implements NestInterceptor {
       await this.gate.failed(claim, error, request);
       throw error;
     }
-    const degraded = degradedReply || frame?.degraded() === true;
-    if (degraded) await this.gate.discard(claim);
+    const planB = planBReply || frame?.planB() === true;
+    if (planB) await this.gate.discard(claim);
     if (spec.requestReply === true) {
-      if (!degraded) await this.gate.succeed(claim, { cachedResult: result });
+      if (!planB) await this.gate.succeed(claim, { cachedResult: result });
       return replyOutcome(msg, result);
     }
-    if (!degraded) await this.gate.succeed(claim, { accepted: true, id: msg.headers.id });
+    if (!planB) await this.gate.succeed(claim, { accepted: true, id: msg.headers.id });
     return acceptedOutcome(msg, request.handlerResult);
   }
 
@@ -223,21 +219,21 @@ export class InboundInterceptor implements NestInterceptor {
     spec: InboundSpec,
     payload: unknown,
     headersInit: MessageHeadersInit,
-  ): Promise<{ payload: unknown; degraded: boolean }> {
+  ): Promise<{ payload: unknown; planB: boolean }> {
     const gateway = this.deps.replyGateway;
     if (gateway === undefined) {
       throw new InboundError('requestReply requiere ReplyGateway');
     }
-    if (this.deps.resilience !== undefined && hasMessageReply(gateway)) {
+    if (this.deps.care !== undefined && hasMessageReply(gateway)) {
       const reply = await gateway.sendAndReceiveMessage(
         spec.channel,
         payload,
         headersInit,
         spec.timeoutMs,
       );
-      return { payload: reply.payload, degraded: reply.headers[DEGRADED_HEADER] === true };
+      return { payload: reply.payload, planB: reply.headers[PLAN_B_HEADER] === true };
     }
     const result = await gateway.sendAndReceive(spec.channel, payload, headersInit, spec.timeoutMs);
-    return { payload: result, degraded: false };
+    return { payload: result, planB: false };
   }
 }

@@ -3,14 +3,11 @@ import * as oneShot from '../channels/one-shot';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
 import type { IntegrationMessage, MessageHeadersInit } from '../message';
-import { ResilienceDefinitionError, ResilienceKeyError } from '../resilience/resilience.errors';
-import type { ResilienceEvent, ResilienceModuleOptions } from '../resilience/resilience.types';
-import { ResilienceRuntime } from '../resilience/runtime';
+import { CareConfigError, CareKeyError } from '../resilience/resilience.errors';
+import type { CareEvent, CareModuleOptions } from '../resilience/resilience.types';
+import { CareEngine } from '../resilience/runtime';
 import { recordingLogger, type Lines } from '../resilience/test-kit.spec-helper';
-import {
-  manualResilienceClock,
-  type ManualResilienceClock,
-} from '../testing/manual-resilience-clock';
+import { manualCareClock, type ManualCareClock } from '../testing/manual-resilience-clock';
 import { bindFlow } from '../testing';
 import type { HopLogger } from '../trace/hop-logger';
 import { TraceContext } from '../trace/trace-context';
@@ -23,10 +20,10 @@ const flaky = (message = 'flaky'): Error => Object.assign(new Error(message), { 
 const named = (name: string): Error => Object.assign(new Error(name), { name });
 
 interface World {
-  runtime: ResilienceRuntime;
+  runtime: CareEngine;
   registry: ChannelRegistry;
-  clock: ManualResilienceClock;
-  events: ResilienceEvent[];
+  clock: ManualCareClock;
+  events: CareEvent[];
   lines: Lines;
   errors: Record<string, unknown>[];
   bind(name: string, flow: IntegrationFlow, extra?: Parameters<typeof bindFlow>[2]): FlowExecutor;
@@ -35,11 +32,11 @@ interface World {
   send(channel: string, payload: unknown, headers?: MessageHeadersInit): Promise<void>;
 }
 
-function world(options: ResilienceModuleOptions = {}, enabled = true): World {
-  const clock = manualResilienceClock();
-  const events: ResilienceEvent[] = [];
+function world(options: CareModuleOptions = {}, enabled = true): World {
+  const clock = manualCareClock();
+  const events: CareEvent[] = [];
   const { logger, lines } = recordingLogger();
-  const runtime = new ResilienceRuntime(
+  const runtime = new CareEngine(
     {
       clock,
       random: (max) => max - 1,
@@ -67,7 +64,7 @@ function world(options: ResilienceModuleOptions = {}, enabled = true): World {
     lines,
     errors,
     bind: (name, flow, extra = {}) =>
-      bindFlow(definition(name, flow), registry, { resilience: runtime, ...extra }),
+      bindFlow(definition(name, flow), registry, { care: runtime, ...extra }),
     resolve: (name, flow) => [
       ...(new FlowParameterResolver(runtime, registry).resolve([definition(name, flow)]).flows[0]
         ?.described ?? []),
@@ -93,30 +90,29 @@ async function settle(promise: Promise<unknown>): Promise<unknown> {
   }
 }
 
-describe('flow resilience (SPI-445 section 2.13)', () => {
+describe('flow care (SPI-445 section 2.13)', () => {
   afterEach(() => jest.restoreAllMocks());
 
   describe('resolution (RS-51, RS-52, RS-55, RS-57)', () => {
-    it('RU-51 resolves each primitive from the highest level that sets it, with the destination channel as L2 for send steps', async () => {
+    it('RU-51 resolves each part from the highest level that sets it, with the destination channel as L2 for send steps', async () => {
       const w = world({
-        policies: { p1: { timeout: { perAttemptMs: 1000 }, retry: { maxAttempts: 2 } } },
+        profiles: { p1: { patience: { eachTryMs: 1000 }, tries: { max: 2 } } },
         defaults: { 'flow-send': 'p1' },
       });
       w.runtime.declareChannels([
-        { name: 'c', resilience: { retry: { maxAttempts: 4, idempotent: true, backoff: 0 } } },
+        { name: 'c', care: { tries: { max: 4, idempotent: true, spacing: 0 } } },
       ]);
       const flow = (): IntegrationFlow =>
-        IntegrationFlow.from('in', { resilience: { send: { timeout: { perAttemptMs: 500 } } } }).to(
-          'c',
-          { resilience: { bulkhead: { maxConcurrent: 1 } } },
-        );
+        IntegrationFlow.from('in', { care: { send: { patience: { eachTryMs: 500 } } } }).to('c', {
+          care: { lanes: { count: 1 } },
+        });
       expect(w.resolve('f', flow())).toEqual([
         {
           kind: 'to',
           id: 'to#0',
           channel: 'c',
-          policy: 'timeout 500ms · retry x4 · bulkhead',
-          retryGate: 'declared',
+          care: 'patience 500ms · tries x4 · lanes',
+          repeatableBy: 'declared',
         },
       ]);
       let calls = 0;
@@ -125,32 +121,32 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         throw flaky();
       });
       w.bind('f', flow());
-      // An incoming budget of 0 caps the resolved retry x4 at run time (runtime cap, not a level).
-      await expect(w.send('in', 'x', { retryBudget: 0 })).rejects.toThrow('flaky');
+      // An incoming budget of 0 caps the resolved tries x4 at run time (runtime cap, not a level).
+      await expect(w.send('in', 'x', { triesLeft: 0 })).rejects.toThrow('flaky');
       expect(calls).toBe(1);
     });
 
-    it('RU-52 deep-merges inline fields over a named profile once and replaces whole primitives across levels', () => {
+    it('RU-52 deep-merges inline fields over a named profile once and replaces whole parts across levels', () => {
       const w = world({
-        policies: {
-          p: { retry: { maxAttempts: 5, backoff: 100 }, timeout: { perAttemptMs: 2000 } },
+        profiles: {
+          p: { tries: { max: 5, spacing: 100 }, patience: { eachTryMs: 2000 } },
         },
       });
       const merged = w.resolve(
         'f1',
-        IntegrationFlow.from('in').to('out', { resilience: { use: 'p', retry: { backoff: 50 } } }),
+        IntegrationFlow.from('in').to('out', { care: { use: 'p', tries: { spacing: 50 } } }),
       );
-      expect(merged[0]).toMatchObject({ policy: 'timeout 2s · retry x5' });
+      expect(merged[0]).toMatchObject({ care: 'patience 2s · tries x5' });
       const replaced = w.resolve(
         'f2',
-        IntegrationFlow.from('in', { resilience: { send: 'p' } }).to('out', {
-          resilience: { retry: { backoff: 50 } },
+        IntegrationFlow.from('in', { care: { send: 'p' } }).to('out', {
+          care: { tries: { spacing: 50 } },
         }),
       );
-      expect(replaced[0]).toMatchObject({ policy: 'timeout 2s · retry x3' });
+      expect(replaced[0]).toMatchObject({ care: 'patience 2s · tries x3' });
       const cut = w.resolve(
         'f3',
-        IntegrationFlow.from('in', { resilience: { send: 'p' } }).to('out', { resilience: false }),
+        IntegrationFlow.from('in', { care: { send: 'p' } }).to('out', { care: false }),
       );
       expect(cut).toEqual([{ kind: 'to', channel: 'out' }]);
     });
@@ -160,10 +156,10 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       const described = w.resolve(
         'f',
         IntegrationFlow.from('in', {
-          resilience: {
-            send: { retry: { maxAttempts: 2 } },
-            handle: { timeout: { perAttemptMs: 100 } },
-            jump: { timeout: { perAttemptMs: 300 } },
+          care: {
+            send: { tries: { max: 2 } },
+            handle: { patience: { eachTryMs: 100 } },
+            jump: { patience: { eachTryMs: 300 } },
           },
         })
           .wireTap('tap')
@@ -178,84 +174,81 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         { kind: 'wireTap', channel: 'tap' },
         { kind: 'filter' },
         { kind: 'transform' },
-        { kind: 'handle', id: 'handle#3', policy: 'timeout 100ms', retryGate: 'none' },
+        { kind: 'handle', id: 'handle#3', care: 'patience 100ms', repeatableBy: 'none' },
         {
           kind: 'jump',
           id: 'jump#4',
-          dests: [{ channel: 'svc', policy: 'timeout 300ms', retryGate: 'none' }],
+          dests: [{ channel: 'svc', care: 'patience 300ms', repeatableBy: 'none' }],
         },
         { kind: 'reply', payload: 'current' },
-        { kind: 'to', id: 'to#6', channel: 'out', policy: 'retry x2', retryGate: 'key' },
+        { kind: 'to', id: 'to#6', channel: 'out', care: 'tries x2', repeatableBy: 'key' },
       ]);
     });
 
-    it('RU-57 a target policy replaces the step policy per primitive for that target', () => {
+    it('RU-57 a target care replaces the step care per part for that target', () => {
       const w = world({
-        policies: { p: { retry: { maxAttempts: 3 }, timeout: { perAttemptMs: 700 } } },
+        profiles: { p: { tries: { max: 3 }, patience: { eachTryMs: 700 } } },
       });
       const described = w.resolve(
         'f',
-        IntegrationFlow.from('in').jumpTo(['a', { channel: 'b', resilience: { retry: false } }], {
-          resilience: 'p',
+        IntegrationFlow.from('in').jumpTo(['a', { channel: 'b', care: { tries: false } }], {
+          care: 'p',
         }),
       );
       expect(described[0]?.dests).toEqual([
-        { channel: 'a', policy: 'timeout 700ms · retry x3', retryGate: 'key' },
-        { channel: 'b', policy: 'timeout 700ms', retryGate: 'none' },
+        { channel: 'a', care: 'patience 700ms · tries x3', repeatableBy: 'key' },
+        { channel: 'b', care: 'patience 700ms', repeatableBy: 'none' },
       ]);
     });
   });
 
   describe('edge rules (RS-58, RS-59, RS-62)', () => {
-    it('RU-58 wireTap skips channel defaults, is sent once and strips retryBudget from the copy', async () => {
+    it('RU-58 wireTap skips channel defaults, is sent once and strips triesLeft from the copy', async () => {
       const w = world();
       w.runtime.declareChannels([
-        { name: 't', resilience: { retry: { maxAttempts: 3, idempotent: true, backoff: 0 } } },
+        { name: 't', care: { tries: { max: 3, idempotent: true, spacing: 0 } } },
       ]);
       const taps = w.inbox('t', () => {
         throw flaky();
       });
       const out = w.inbox('out');
       w.bind('f', IntegrationFlow.from('in').wireTap('t').to('out'));
-      await w.send('in', 'x', { retryBudget: 2, idempotencyKey: 'k' });
+      await w.send('in', 'x', { triesLeft: 2, idempotencyKey: 'k' });
       await w.clock.flush();
       expect(taps).toHaveLength(1);
-      expect(taps[0]?.headers).not.toHaveProperty('retryBudget');
-      expect(out[0]?.headers.retryBudget).toBe(2);
+      expect(taps[0]?.headers).not.toHaveProperty('triesLeft');
+      expect(out[0]?.headers.triesLeft).toBe(2);
     });
 
-    it('RU-59 drops primitives inherited from L1..L3 that an edge refuses and fails boot when L4 sets them', async () => {
-      const w = world({ defaults: { 'flow-send': { fallback: { value: () => 1 } } } });
+    it('RU-59 drops parts inherited from L1..L3 that an edge refuses and fails boot when L4 sets them', async () => {
+      const w = world({ defaults: { 'flow-send': { planB: { value: () => 1 } } } });
       expect(() =>
         w.resolve(
           'bad',
           IntegrationFlow.from('in').fanoutTo(['a'], {
-            resilience: { fallback: { value: () => 1 } },
+            care: { planB: { value: () => 1 } },
           }),
         ),
-      ).toThrow(expect.objectContaining({ code: 'PRIMITIVE_NOT_ALLOWED' }) as Error);
+      ).toThrow(expect.objectContaining({ code: 'CARE_PART_NOT_ALLOWED' }) as Error);
       const described = w.resolve('ok', IntegrationFlow.from('in').publish('a').to('b'));
       expect(described).toEqual([
         { kind: 'publish', channel: 'a', routingKey: undefined },
         { kind: 'to', channel: 'b' },
       ]);
-      expect(w.lines.warn.filter((line) => line.startsWith('PRIMITIVE_DROPPED'))).toHaveLength(2);
+      expect(w.lines.warn.filter((line) => line.startsWith('CARE_PART_DROPPED'))).toHaveLength(2);
 
       const v = world();
       v.inbox('a', () => {
         throw flaky();
       });
       const fallback = v.inbox('b');
-      v.bind(
-        'f',
-        IntegrationFlow.from('in').to('a', { resilience: { fallback: { channel: 'b' } } }),
-      );
+      v.bind('f', IntegrationFlow.from('in').to('a', { care: { planB: { channel: 'b' } } }));
       await v.send('in', 'x', { replyChannel: 'caller' });
       expect(fallback).toHaveLength(1);
       expect(fallback[0]?.headers.replyChannel).toBe('caller');
     });
 
-    it('RU-62a a jump attempt opens a fresh reply channel, always unregisters it, and drops late replies', async () => {
+    it('RU-62a a jump try opens a fresh reply channel, always unregisters it, and drops late replies', async () => {
       const w = world();
       const baseline = w.registry.list().length;
       let attempt = 0;
@@ -275,9 +268,9 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         'f',
         IntegrationFlow.from('in')
           .jump('svc', {
-            resilience: {
-              timeout: { perAttemptMs: 100 },
-              retry: { maxAttempts: 2, idempotent: true, backoff: 0 },
+            care: {
+              patience: { eachTryMs: 100 },
+              tries: { max: 2, idempotent: true, spacing: 0 },
             },
           })
           .to('out'),
@@ -292,14 +285,14 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       expect(w.registry.list()).toHaveLength(baseline + 3);
     });
 
-    it('RU-62b legacy jump timeoutMs aliases perAttemptMs, both on one target fail boot, and the wait is never unbounded', async () => {
+    it('RU-62b legacy jump timeoutMs aliases eachTryMs, both on one target fail boot, and the wait is never unbounded', async () => {
       const w = world();
       expect(() =>
         w.resolve(
           'both',
           IntegrationFlow.from('in').jump('svc', {
             timeoutMs: 50,
-            resilience: { timeout: { perAttemptMs: 80 } },
+            care: { patience: { eachTryMs: 80 } },
           }),
         ),
       ).toThrow(expect.objectContaining({ code: 'LEGACY_AND_NEW_SAME_LAYER' }) as Error);
@@ -311,40 +304,40 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         return original(channel, options);
       });
       w.inbox('svc', (msg) => w.registry.send(String(msg.headers.replyChannel), 'ok'));
-      w.bind('a', IntegrationFlow.from('in.a').jump('svc', { resilience: { timeout: false } }));
+      w.bind('a', IntegrationFlow.from('in.a').jump('svc', { care: { patience: false } }));
       w.bind(
         'b',
         IntegrationFlow.from('in.b').jump('svc', {
-          resilience: { retry: { maxAttempts: 2, idempotent: true } },
+          care: { tries: { max: 2, idempotent: true } },
         }),
       );
       w.bind(
         'c',
         IntegrationFlow.from('in.c').jump('svc', {
           timeoutMs: 40,
-          resilience: { retry: { maxAttempts: 2, idempotent: true } },
+          care: { tries: { max: 2, idempotent: true } },
         }),
       );
       w.bind(
         'd',
         IntegrationFlow.from('in.d').jump('svc', {
-          resilience: { timeout: { perAttemptMs: 0, deadlineMs: 3000 }, retry: false },
+          care: { patience: { eachTryMs: 0, totalMs: 3000 }, tries: false },
         }),
       );
       for (const source of ['in.a', 'in.b', 'in.c', 'in.d']) await w.send(source, 'x');
       expect(waits).toEqual([10_000, 10_000, 40, 3000]);
     });
 
-    it('RU-62c wait:false targets retry in the background, refuse fallback, report one final failure, and start no attempt after shutdown begins', async () => {
+    it('RU-62c wait:false targets extra try in the background, refuse plan B, report one final failure, and start no try after shutdown begins', async () => {
       const w = world();
       expect(() =>
         w.resolve(
           'fb',
           IntegrationFlow.from('in').jumpTo([{ channel: 'svc', wait: false }], {
-            resilience: { fallback: { value: () => 1 } },
+            care: { planB: { value: () => 1 } },
           }),
         ),
-      ).toThrow(expect.objectContaining({ code: 'PRIMITIVE_NOT_ALLOWED' }) as Error);
+      ).toThrow(expect.objectContaining({ code: 'CARE_PART_NOT_ALLOWED' }) as Error);
 
       let calls = 0;
       w.inbox('svc', () => {
@@ -354,7 +347,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'f',
         IntegrationFlow.from('in').jumpTo([{ channel: 'svc', wait: false }], {
-          resilience: { retry: { maxAttempts: 3, idempotent: true, backoff: 0 } },
+          care: { tries: { max: 3, idempotent: true, spacing: 0 } },
         }),
       );
       await w.send('in', 'x');
@@ -373,7 +366,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       s.bind(
         'g',
         IntegrationFlow.from('in').fanoutTo([{ channel: 'svc', wait: false }], {
-          resilience: { retry: { maxAttempts: 3, idempotent: true, backoff: 1000 } },
+          care: { tries: { max: 3, idempotent: true, spacing: 1000 } },
         }),
       );
       await s.send('in', 'x');
@@ -386,8 +379,8 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
     });
   });
 
-  describe('retry gate, attempts and classification (RS-60, RS-61, RS-63)', () => {
-    it('RU-60a a flow step retries only under a message key, a key resolver or idempotent: true', async () => {
+  describe('extra try gate, tries and classification (RS-60, RS-61, RS-63)', () => {
+    it('RU-60a a flow step extra tries only under a message key, a key resolver or idempotent: true', async () => {
       const w = world();
       let calls = 0;
       const fn = (): never => {
@@ -397,12 +390,12 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'keyed',
         IntegrationFlow.from('in').handle(fn, {
-          resilience: { retry: { maxAttempts: 3, backoff: 0 } },
+          care: { tries: { max: 3, spacing: 0 } },
         }),
       );
       await settle(w.send('in', 'x'));
       expect(calls).toBe(1);
-      expect(w.events.filter((e) => e.type === 'retry.suppressed')).toHaveLength(1);
+      expect(w.events.filter((e) => e.type === 'try.held')).toHaveLength(1);
       calls = 0;
       await settle(w.send('in', 'x', { idempotencyKey: 'k1' }));
       expect(calls).toBe(3);
@@ -410,14 +403,14 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'declared',
         IntegrationFlow.from('in.d').handle(fn, {
-          resilience: { retry: { maxAttempts: 2, backoff: 0, idempotent: true } },
+          care: { tries: { max: 2, spacing: 0, idempotent: true } },
         }),
       );
       await settle(w.send('in.d', 'x'));
       expect(calls).toBe(2);
     });
 
-    it('RU-60b logs no RETRY_WITHOUT_KEY_GATE under the default flow claim and honours requireIdempotencyKey', async () => {
+    it('RU-60b logs no TRIES_WITHOUT_KEY under the default flow claim and honours requireIdempotencyKey', async () => {
       const w = world();
       let calls = 0;
       w.bind(
@@ -427,16 +420,16 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
             calls += 1;
             return 'never';
           },
-          { resilience: { retry: { maxAttempts: 3, requireIdempotencyKey: true } } },
+          { care: { tries: { max: 3, requireIdempotencyKey: true } } },
         ),
       );
-      expect(w.lines.warn.some((line) => line.includes('RETRY_WITHOUT_KEY_GATE'))).toBe(false);
+      expect(w.lines.warn.some((line) => line.includes('TRIES_WITHOUT_KEY'))).toBe(false);
       const error = await settle(w.send('in', 'x'));
-      expect(error).toBeInstanceOf(ResilienceKeyError);
+      expect(error).toBeInstanceOf(CareKeyError);
       expect(calls).toBe(0);
     });
 
-    it('RU-61 a send attempt resends an identical hop copy, route runs its function once, one flow hop pair per run', async () => {
+    it('RU-61 a send try resends an identical hop copy, route runs its function once, one flow hop pair per run', async () => {
       const w = world();
       let failures = 1;
       const seen = w.inbox('c', () => {
@@ -451,7 +444,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         name: 'f',
         build: () =>
           IntegrationFlow.from('in').to('c', {
-            resilience: { retry: { maxAttempts: 2, backoff: 0 } },
+            care: { tries: { max: 2, spacing: 0 } },
           }),
       };
       const resolved = new FlowParameterResolver(w.runtime, w.registry).resolve([definition])
@@ -461,8 +454,8 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         registry: w.registry,
         trace: w.registry.trace,
         errorChannel: 'error.channel',
-        resilience: w.runtime,
-        policies: resolved!.policies,
+        care: w.runtime,
+        stepCare: resolved!.stepCare,
         logger,
       }).attachTo(w.registry);
       await w.send('in', 'x', { idempotencyKey: 'k' });
@@ -481,7 +474,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
             routed += 1;
             throw flaky('route');
           },
-          { resilience: { retry: { maxAttempts: 3, backoff: 0, idempotent: true } } },
+          { care: { tries: { max: 3, spacing: 0, idempotent: true } } },
         ),
       );
       const before = w.events.length;
@@ -494,8 +487,8 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       const rows: [string, 'flow-send' | 'flow-jump' | 'flow-handle', string][] = [
         ['JumpTimeoutError', 'flow-jump', 'transient'],
         ['JumpTimeoutError', 'flow-send', 'unknown'],
-        ['CapacityExceededError', 'flow-send', 'throttled'],
-        ['CapacityExceededError', 'flow-jump', 'throttled'],
+        ['CapacityExceededError', 'flow-send', 'busy'],
+        ['CapacityExceededError', 'flow-jump', 'busy'],
         ['NoSubscriberError', 'flow-send', 'rejected'],
         ['ChannelNotFoundError', 'flow-jump', 'rejected'],
         ['FanoutCycleError', 'flow-send', 'rejected'],
@@ -519,8 +512,8 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'f',
         IntegrationFlow.from('in').to('full', {
-          resilience: {
-            retry: { maxAttempts: 3, backoff: 0, retryOn: ['transient', 'throttled'] },
+          care: {
+            tries: { max: 3, spacing: 0, on: ['transient', 'busy'] },
           },
         }),
       );
@@ -530,18 +523,20 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'g',
         IntegrationFlow.from('in.g').to('nosub', {
-          resilience: { retry: { maxAttempts: 3, backoff: 0 } },
+          care: { tries: { max: 3, spacing: 0 } },
         }),
       );
       w.registry.create({ name: 'nosub', type: 'direct' });
       const error = await settle(w.send('in.g', 'x', { idempotencyKey: 'k' }));
       expect((error as Error).name).toBe('NoSubscriberError');
-      expect(w.events.filter((e) => e.type === 'retry' && e.channel === 'nosub')).toHaveLength(0);
+      expect(w.events.filter((e) => e.type === 'try.again' && e.channel === 'nosub')).toHaveLength(
+        0,
+      );
     });
   });
 
-  describe('degraded runs and the retry budget (RS-64, RS-65)', () => {
-    it('RU-64a a jump fallback lands in jumpReplies with jumpDegraded and the flow claim is not completed', async () => {
+  describe('plan-B-marked runs and the tries left (RS-64, RS-65)', () => {
+    it('RU-64a a jump plan B lands in jumpReplies with jumpPlanB and the flow claim is not completed', async () => {
       const w = world();
       const store = new MemoryIdempotencyStore();
       const idempotency = new IdempotencyService({ store });
@@ -555,7 +550,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'loan',
         IntegrationFlow.from('in')
-          .jump('svc', { resilience: { fallback: { value: () => ({ status: 'unknown' }) } } })
+          .jump('svc', { care: { planB: { value: () => ({ status: 'unknown' }) } } })
           .to('out'),
         { idempotency },
       );
@@ -563,7 +558,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       await w.send('in', 'x', { idempotencyKey: 'k' });
       expect(runs).toBe(2);
       expect(out[0]?.headers.jumpReplies).toEqual({ svc: { status: 'unknown' } });
-      expect(out[0]?.headers.jumpDegraded).toEqual({ svc: true });
+      expect(out[0]?.headers.jumpPlanB).toEqual({ svc: true });
       expect((await store.get('flow:loan', 'k'))?.status).not.toBe('completed');
 
       const failing = {
@@ -574,7 +569,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       w.bind(
         'nostore',
         IntegrationFlow.from('in.n').jump('svc', {
-          resilience: { fallback: { value: () => 'fb' } },
+          care: { planB: { value: () => 'fb' } },
         }),
         { idempotency: failing },
       );
@@ -583,7 +578,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       expect(failing.fail).toHaveBeenCalledTimes(1);
     });
 
-    it('RU-64b a handle fallback becomes the payload, a degraded jump reply header marks the flow scope, and a degraded flow reply step sets degraded: true', async () => {
+    it('RU-64b a handle plan B becomes the payload, a plan-B-marked jump reply header marks the flow scope, and a plan-B-marked flow reply step sets planB: true', async () => {
       const w = world();
       const replies = w.inbox('caller');
       w.bind(
@@ -593,49 +588,46 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
             () => {
               throw flaky();
             },
-            { resilience: { fallback: { value: () => 'fallback-payload' } } },
+            { care: { planB: { value: () => 'fallback-payload' } } },
           )
           .reply(),
       );
       await w.send('inner.in', 'x', { replyChannel: 'caller' });
       expect(replies[0]?.payload).toBe('fallback-payload');
-      expect(replies[0]?.headers.degraded).toBe(true);
+      expect(replies[0]?.headers.planB).toBe(true);
 
       const store = new MemoryIdempotencyStore();
       w.bind('outer', IntegrationFlow.from('outer.in').jump('inner.in').reply(), {
         idempotency: new IdempotencyService({ store }),
       });
       await w.send('outer.in', 'y', { replyChannel: 'caller', idempotencyKey: 'k' });
-      expect(replies[1]?.headers.degraded).toBe(true);
+      expect(replies[1]?.headers.planB).toBe(true);
       expect(await store.get('flow:outer', 'k')).toBeUndefined();
 
       w.bind('plain', IntegrationFlow.from('plain.in').reply());
       await w.send('plain.in', 'z', { replyChannel: 'caller' });
-      expect(replies[2]?.headers).not.toHaveProperty('degraded');
+      expect(replies[2]?.headers).not.toHaveProperty('planB');
     });
 
-    it('RU-65 a retrying flow step stamps retryBudget 0 on its hops and a non-retrying step forwards the budget', async () => {
+    it('RU-65 a trying-again flow step stamps triesLeft 0 on its hops and a non-trying-again step forwards the tries left', async () => {
       const w = world();
       const c = w.inbox('c');
       const d = w.inbox('d');
       w.bind(
         'f',
         IntegrationFlow.from('in')
-          .publish('c', { resilience: { retry: { maxAttempts: 3, backoff: 0 } } })
+          .publish('c', { care: { tries: { max: 3, spacing: 0 } } })
           .to('d'),
       );
-      await w.send('in', 'x', { retryBudget: 2, idempotencyKey: 'k' });
-      expect(c[0]?.headers.retryBudget).toBe(0);
-      expect(d[0]?.headers.retryBudget).toBe(2);
+      await w.send('in', 'x', { triesLeft: 2, idempotencyKey: 'k' });
+      expect(c[0]?.headers.triesLeft).toBe(0);
+      expect(d[0]?.headers.triesLeft).toBe(2);
 
       const off = world({}, false);
       const e = off.inbox('e');
-      off.bind(
-        'g',
-        IntegrationFlow.from('in').to('e', { resilience: { retry: { maxAttempts: 3 } } }),
-      );
+      off.bind('g', IntegrationFlow.from('in').to('e', { care: { tries: { max: 3 } } }));
       await off.send('in', 'x', { idempotencyKey: 'k' });
-      expect(e[0]?.headers).not.toHaveProperty('retryBudget');
+      expect(e[0]?.headers).not.toHaveProperty('triesLeft');
     });
   });
 
@@ -650,13 +642,13 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         'orders',
         IntegrationFlow.from('in').to('c', {
           id: 'persist',
-          resilience: { retry: { maxAttempts: 2, backoff: 0 } },
+          care: { tries: { max: 2, spacing: 0 } },
         }),
       );
       await w.send('in', { card: 'secret-123' }, { idempotencyKey: 'k' });
       expect(w.events).toEqual([
         expect.objectContaining({
-          type: 'retry',
+          type: 'try.again',
           edge: 'flow-send',
           binding: 'flow:orders#persist:c',
           channel: 'c',
@@ -665,7 +657,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       expect(JSON.stringify(w.events)).not.toContain('secret-123');
     });
 
-    it('RU-70 flows without any resilience configuration behave as in 0.9.0', async () => {
+    it('RU-70 flows without any care configuration behave as in 0.9.0', async () => {
       const shapes = async (withRuntime: boolean): Promise<unknown[]> => {
         const w = world();
         const out = w.inbox('out');
@@ -681,7 +673,7 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
         w.registry.create({ name: 'tap', type: 'pubsub' });
         if (withRuntime) w.bind('f', flow);
         else bindFlow({ name: 'f', build: () => flow }, w.registry);
-        await w.send('in', 'x', { retryBudget: 1 });
+        await w.send('in', 'x', { triesLeft: 1 });
         await w.clock.flush();
         expect(w.events).toEqual([]);
         if (withRuntime) {
@@ -698,12 +690,12 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
     });
 
     it('RU-67 the resolver collects every finding of every flow before it throws once', () => {
-      const w = world({ policies: { known: { retry: { maxAttempts: 2 } } } });
+      const w = world({ profiles: { known: { tries: { max: 2 } } } });
       const definitions: FlowDefinition[] = [
-        { name: 'a', build: () => IntegrationFlow.from('a').to('x', { resilience: 'jump-slo' }) },
+        { name: 'a', build: () => IntegrationFlow.from('a').to('x', { care: 'jump-slo' }) },
         {
           name: 'b',
-          build: () => IntegrationFlow.from('b').handle((p) => p, { id: 'h', resilience: 'nope' }),
+          build: () => IntegrationFlow.from('b').handle((p) => p, { id: 'h', care: 'nope' }),
         },
       ];
       let error: unknown;
@@ -712,13 +704,13 @@ describe('flow resilience (SPI-445 section 2.13)', () => {
       } catch (caught) {
         error = caught;
       }
-      expect(error).toBeInstanceOf(ResilienceDefinitionError);
-      const findings = (error as ResilienceDefinitionError).findings;
+      expect(error).toBeInstanceOf(CareConfigError);
+      const findings = (error as CareConfigError).findings;
       expect(findings.map((f) => [f.code, f.subject])).toEqual([
         ['UNKNOWN_PROFILE', "flow 'a' step 'to#0' target 'x'"],
         ['UNKNOWN_PROFILE', "flow 'b' step 'h'"],
       ]);
-      expect((error as Error).message).toContain("flow 'a' step 'to#0' target 'x': resilience.use");
+      expect((error as Error).message).toContain("flow 'a' step 'to#0' target 'x': care.use");
     });
   });
 });

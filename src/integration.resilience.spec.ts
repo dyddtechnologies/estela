@@ -6,9 +6,9 @@ import { ChannelRegistry } from './channel-registry';
 import { ServiceActivator } from './decorators';
 import { ChannelGraph } from './graph/channel-graph';
 import { IntegrationModule, type IntegrationModuleOptions } from './integration.module';
-import { ResilienceRegistry } from './resilience/registry';
-import { ResilienceDefinitionError } from './resilience/resilience.errors';
-import { collectResilienceEvents } from './testing/resilience-events';
+import { CareControl } from './resilience/registry';
+import { CareConfigError } from './resilience/resilience.errors';
+import { collectCareEvents } from './testing/resilience-events';
 import type { OutboundFetch } from './outbound/outbound.types';
 
 const flaky = (): Error => Object.assign(new Error('flaky'), { retryable: true });
@@ -18,9 +18,9 @@ class QuotaActivator {
   calls = 0;
 
   @ServiceActivator('quota.in', {
-    resilience: {
+    care: {
       classify: () => 'quota',
-      circuitBreaker: { quotaOpenMs: 'manual' },
+      valve: { quotaShutMs: 'until-resumed' },
     },
   })
   run(): string {
@@ -54,7 +54,7 @@ async function boot(
   return moduleRef;
 }
 
-describe('IntegrationModule.forRoot({ resilience })', () => {
+describe('IntegrationModule.forRoot({ care })', () => {
   beforeEach(() => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -63,57 +63,57 @@ describe('IntegrationModule.forRoot({ resilience })', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it('RE-07 an invalid resilience option fails module boot', async () => {
+  it('RE-07 an invalid care option fails module boot', async () => {
     await expect(
       boot({
-        resilience: {},
+        care: {},
         outbound: {
           rest: {
             bindings: [
               {
                 name: 'pay',
                 url: 'https://pay.example/x',
-                resilience: { retry: { maxAttempts: 0 } },
+                care: { tries: { max: 0 } },
               },
             ],
           },
         },
       }),
-    ).rejects.toThrow(ResilienceDefinitionError);
+    ).rejects.toThrow(CareConfigError);
     await expect(
       boot({
-        resilience: {},
+        care: {},
         outbound: {
           rest: {
-            bindings: [{ name: 'pay', url: 'https://pay.example/x', resilience: 'unknown' }],
+            bindings: [{ name: 'pay', url: 'https://pay.example/x', care: 'unknown' }],
           },
         },
       }),
-    ).rejects.toThrow("pay: resilience.use names an unknown policy 'unknown'");
+    ).rejects.toThrow("pay: care.use unknown profile 'unknown'");
   });
 
-  it('RU-49 resetBreaker closes a manual quota opening through the injectable registry', async () => {
-    const moduleRef = await boot({ resilience: {} });
+  it('RU-49 resume closes a manual quota opening through the injectable registry', async () => {
+    const moduleRef = await boot({ care: {} });
     const registry = moduleRef.get(ChannelRegistry);
-    const events = collectResilienceEvents(moduleRef);
+    const events = collectCareEvents(moduleRef);
     const activator = moduleRef.get(QuotaActivator);
     await expect(registry.send('quota.in', {})).rejects.toThrow('flaky');
-    await expect(registry.send('quota.in', {})).rejects.toThrow('circuit open');
-    const resilience = moduleRef.get(ResilienceRegistry);
+    await expect(registry.send('quota.in', {})).rejects.toThrow('valve shut');
+    const resilience = moduleRef.get(CareControl);
     const binding = 'activator:QuotaActivator.run';
-    expect(resilience.breakerState(binding)).toEqual({ state: 'open', forcedBy: 'quota' });
-    await resilience.resetBreaker(binding);
-    expect(resilience.breakerState(binding)).toEqual({ state: 'closed' });
+    expect(resilience.valveState(binding)).toEqual({ state: 'shut', forcedBy: 'quota' });
+    await resilience.resume(binding);
+    expect(resilience.valveState(binding)).toEqual({ state: 'flowing' });
     await registry.send('quota.in', {});
     expect(activator.calls).toBe(2);
     await new Promise((resolve) => setImmediate(resolve));
-    expect(events.types()).toEqual(['breaker.forced-open', 'quota.exhausted', 'breaker.closed']);
-    expect(resilience.breakerState('unknown')).toBeUndefined();
-    await expect(resilience.resetBreaker('unknown', 'k')).resolves.toBeUndefined();
+    expect(events.types()).toEqual(['valve.forced-shut', 'quota.used-up', 'valve.flowing']);
+    expect(resilience.valveState('unknown')).toBeUndefined();
+    await expect(resilience.resume('unknown', 'k')).resolves.toBeUndefined();
     await moduleRef.close();
   });
 
-  it('provides ResilienceRegistry only under forRoot({ resilience }) and keeps the graph unchanged without policies', async () => {
+  it('provides CareControl only under forRoot({ care }) and keeps the graph unchanged without profiles', async () => {
     const plain = await boot(
       {
         outbound: {
@@ -124,16 +124,16 @@ describe('IntegrationModule.forRoot({ resilience })', () => {
       },
       [],
     );
-    expect(() => plain.get(ResilienceRegistry)).toThrow();
+    expect(() => plain.get(CareControl)).toThrow();
     const snapshot = plain.get(ChannelGraph).snapshot(plain.get(ChannelRegistry));
     expect(JSON.stringify(snapshot)).not.toContain('policy');
-    expect(plain.get(ChannelRegistry).tryGet('estela.resilience.events')).toBeUndefined();
+    expect(plain.get(ChannelRegistry).tryGet('estela.care.events')).toBeUndefined();
     await plain.close();
   });
 
-  it('RU-42 graph shows the policy summary on outbound refs and activator labels', async () => {
+  it('RU-42 graph shows the care summary on outbound refs and activator labels', async () => {
     const moduleRef = await boot({
-      resilience: { events: { channel: false } },
+      care: { events: { channel: false } },
       outbound: {
         rest: {
           bindings: [
@@ -141,10 +141,10 @@ describe('IntegrationModule.forRoot({ resilience })', () => {
               channel: 'pay.out',
               url: 'https://pay.example/charges?token=s',
               fetchFn: okFetch,
-              resilience: {
-                timeout: { perAttemptMs: 2000 },
-                retry: { maxAttempts: 3 },
-                circuitBreaker: {},
+              care: {
+                patience: { eachTryMs: 2000 },
+                tries: { max: 3 },
+                valve: {},
               },
             },
           ],
@@ -157,14 +157,14 @@ describe('IntegrationModule.forRoot({ resilience })', () => {
       {
         transport: 'rest',
         target: 'POST https://pay.example/charges',
-        policy: 'timeout 2s · retry x3 · breaker',
+        care: 'patience 2s · tries x3 · valve',
       },
     ]);
     const quota = graph.nodes.find((node) => node.channel === 'quota.in');
-    expect(quota?.activators).toEqual(['QuotaActivator.run [breaker]']);
-    expect(graph.mermaid).toContain('[timeout 2s · retry x3 · breaker]');
+    expect(quota?.activators).toEqual(['QuotaActivator.run [valve]']);
+    expect(graph.mermaid).toContain('[patience 2s · tries x3 · valve]');
     expect(graph.mermaid).not.toContain('token');
-    expect(moduleRef.get(ChannelRegistry).tryGet('estela.resilience.events')).toBeUndefined();
+    expect(moduleRef.get(ChannelRegistry).tryGet('estela.care.events')).toBeUndefined();
     await moduleRef.close();
   });
 });

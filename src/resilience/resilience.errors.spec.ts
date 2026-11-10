@@ -1,61 +1,61 @@
 import {
-  BulkheadFullError,
-  CircuitOpenError,
-  DeadlineExceededError,
-  FallbackFailedError,
-  RateLimitedError,
-  ResilienceDefinitionError,
-  ResilienceError,
-  ResilienceKeyError,
+  LanesFullError,
+  ValveShutError,
+  OutOfTimeError,
+  PlanBFailedError,
+  OverPaceError,
+  CareConfigError,
+  CareError,
+  CareKeyError,
 } from './resilience.errors';
 import { ChannelError } from '../channel';
 
-describe('resilience errors', () => {
-  it('RU-44 error messages carry binding, kind and attempts only', () => {
+describe('care errors', () => {
+  it('RU-44 error messages carry binding, kind and tries only', () => {
     const meta = {
       binding: 'orders.http',
       edge: 'outbound-rest' as const,
-      attempts: 3,
+      tries: 3,
       cause: new Error('https://h/p?token=secret +50255501234'),
     };
     const errors = [
-      new CircuitOpenError(meta),
-      new BulkheadFullError({ ...meta, reason: 'full' }),
-      new RateLimitedError({ ...meta, retryAfterMs: 5 }),
-      new DeadlineExceededError({ ...meta, deadlineMs: 5 }),
-      new FallbackFailedError({ ...meta, original: new Error('x') }),
-      new ResilienceKeyError({ ...meta, reason: 'key-fn' }),
+      new ValveShutError(meta),
+      new LanesFullError({ ...meta, reason: 'full' }),
+      new OverPaceError({ ...meta, readyInMs: 5 }),
+      new OutOfTimeError({ ...meta, totalMs: 5 }),
+      new PlanBFailedError({ ...meta, original: new Error('x') }),
+      new CareKeyError({ ...meta, reason: 'key-fn' }),
     ];
     expect(errors.map((e) => e.message)).toEqual([
-      "circuit open for outbound rest 'orders.http' after 3 attempt(s)",
-      "bulkhead full for outbound rest 'orders.http' after 3 attempt(s)",
-      "rate limited for outbound rest 'orders.http' after 3 attempt(s)",
-      "deadline exceeded for outbound rest 'orders.http' after 3 attempt(s)",
-      "fallback failed for outbound rest 'orders.http' after 3 attempt(s)",
-      "resilience key error (key-fn) for outbound rest 'orders.http' after 3 attempt(s)",
+      "valve shut for outbound rest 'orders.http' after 3 try(ies)",
+      "lanes full for outbound rest 'orders.http' after 3 try(ies)",
+      "over pace for outbound rest 'orders.http' after 3 try(ies)",
+      "out of time for outbound rest 'orders.http' after 3 try(ies)",
+      "plan B failed for outbound rest 'orders.http' after 3 try(ies)",
+      "care key error (key-fn) for outbound rest 'orders.http' after 3 try(ies)",
     ]);
     for (const error of errors) {
       expect(error.message).not.toContain('secret');
       expect(error.message).not.toContain('50255501234');
       expect(error.cause).toBe(meta.cause);
-      expect(error).toBeInstanceOf(ResilienceError);
+      expect(error).toBeInstanceOf(CareError);
       expect(error).toBeInstanceOf(ChannelError);
       expect(error.name).toBe(error.constructor.name);
     }
-    expect(new ResilienceDefinitionError('b', 'retry.maxAttempts', 'must be x').message).toBe(
-      'b: resilience.retry.maxAttempts must be x',
+    expect(new CareConfigError('b', 'tries.max', 'must be x').message).toBe(
+      'b: care.tries.max must be x',
     );
   });
 
   it('keeps instanceof for branded foreign copies and plain subclasses', () => {
     const foreign = Object.assign(Object.create(Error.prototype) as object, {
-      kind: 'circuit-open',
-      [Symbol.for('@estela/nest.ResilienceError')]: true,
+      kind: 'valve-shut',
+      [Symbol.for('@estela/nest.CareError')]: true,
     });
-    expect(foreign).toBeInstanceOf(CircuitOpenError);
-    expect(foreign).toBeInstanceOf(ResilienceError);
-    expect(foreign).not.toBeInstanceOf(BulkheadFullError);
-    class Custom extends CircuitOpenError {}
-    expect(new CircuitOpenError({ binding: 'b' })).not.toBeInstanceOf(Custom);
+    expect(foreign).toBeInstanceOf(ValveShutError);
+    expect(foreign).toBeInstanceOf(CareError);
+    expect(foreign).not.toBeInstanceOf(LanesFullError);
+    class Custom extends ValveShutError {}
+    expect(new ValveShutError({ binding: 'b' })).not.toBeInstanceOf(Custom);
   });
 });

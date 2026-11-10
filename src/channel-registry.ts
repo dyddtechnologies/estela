@@ -9,7 +9,7 @@ import type { ChannelDeps } from './channels/channel-deps';
 import type { FanoutChannel } from './channels/fanout.channel';
 import { MessageDispatcher } from './message-dispatcher';
 import type { IntegrationMessage, MessageHeadersInit } from './message';
-import { RETRY_BUDGET_MESSAGE_HEADER, ResilienceScope } from './resilience/retry-budget';
+import { TRIES_LEFT_MESSAGE_HEADER, CareScope } from './resilience/retry-budget';
 import type { TraceContext } from './trace/trace-context';
 
 /**
@@ -19,7 +19,7 @@ import type { TraceContext } from './trace/trace-context';
 export class ChannelRegistry implements ChannelResolver {
   private readonly channels = new Map<string, MessageChannel>();
   readonly dispatcher: MessageDispatcher;
-  private budgetFromScope = false;
+  private triesLeftFromScope = false;
 
   constructor(
     private readonly deps: ChannelDeps,
@@ -77,17 +77,17 @@ export class ChannelRegistry implements ChannelResolver {
     return this.dispatcher.send(
       channelName,
       payload,
-      this.budgetFromScope ? withScopeBudget(headers) : headers,
+      this.triesLeftFromScope ? withScopeTriesLeft(headers) : headers,
     );
   }
 
   /**
-   * Internal (RS-29), set by `IntegrationModule` under `forRoot({ resilience })`: from then on a
-   * message created by `send` takes the retry budget of the active `ResilienceScope` when its
+   * Internal (RS-29), set by `IntegrationModule` under `forRoot({ care })`: from then on a
+   * message created by `send` takes the tries left of the active `CareScope` when its
    * headers carry none, as `OutboundRestGateway.request` does. Off by default.
    */
-  inheritRetryBudget(): void {
-    this.budgetFromScope = true;
+  inheritTriesLeft(): void {
+    this.triesLeftFromScope = true;
   }
 
   sendMessage(channelName: string, msg: IntegrationMessage): Promise<void> {
@@ -95,9 +95,11 @@ export class ChannelRegistry implements ChannelResolver {
   }
 }
 
-function withScopeBudget(headers: MessageHeadersInit | undefined): MessageHeadersInit | undefined {
-  if (headers?.[RETRY_BUDGET_MESSAGE_HEADER] !== undefined) return headers;
-  const budget = ResilienceScope.current()?.budget;
-  if (budget === undefined) return headers;
-  return { ...headers, [RETRY_BUDGET_MESSAGE_HEADER]: budget };
+function withScopeTriesLeft(
+  headers: MessageHeadersInit | undefined,
+): MessageHeadersInit | undefined {
+  if (headers?.[TRIES_LEFT_MESSAGE_HEADER] !== undefined) return headers;
+  const triesLeft = CareScope.current()?.triesLeft;
+  if (triesLeft === undefined) return headers;
+  return { ...headers, [TRIES_LEFT_MESSAGE_HEADER]: triesLeft };
 }

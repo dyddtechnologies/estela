@@ -1,17 +1,9 @@
-import {
-  manualResilienceClock,
-  type ManualResilienceClock,
-} from '../testing/manual-resilience-clock';
+import { manualCareClock, type ManualCareClock } from '../testing/manual-resilience-clock';
 import { defaultInProcessClassifier } from './classifiers';
-import { ResilienceExecutor, type ResilienceDeps, type ResilienceEdgeAdapter } from './executor';
-import { ResilienceObserver } from './observability';
-import { resolveResiliencePlan } from './resilience.plan';
-import type {
-  ResilienceEvent,
-  ResilienceLogger,
-  ResilienceMetricsPort,
-  ResiliencePolicyRef,
-} from './resilience.types';
+import { CareExecutor, type CareDeps, type CareEdgeAdapter } from './executor';
+import { CareObserver } from './observability';
+import { resolveCarePlan } from './resilience.plan';
+import type { CareEvent, CareLogger, CareMetricsPort, CareRefOf } from './resilience.types';
 
 export class TestTimeoutError extends Error {
   constructor(readonly timeoutMs: number) {
@@ -24,7 +16,7 @@ export const transient = (message = 'transient'): Error =>
 export const rejected = (message = 'rejected'): Error =>
   Object.assign(new Error(message), { retryable: false });
 
-export function fakeAdapter(over: Partial<ResilienceEdgeAdapter> = {}): ResilienceEdgeAdapter {
+export function fakeAdapter(over: Partial<CareEdgeAdapter> = {}): CareEdgeAdapter {
   return {
     kind: 'activator',
     classify: (error) => {
@@ -32,7 +24,7 @@ export function fakeAdapter(over: Partial<ResilienceEdgeAdapter> = {}): Resilien
       return defaultInProcessClassifier(error);
     },
     repeatable: () => true,
-    timeoutError: (_ctx, ms) => new TestTimeoutError(ms),
+    overdueError: (_ctx, ms) => new TestTimeoutError(ms),
     ...over,
   };
 }
@@ -44,7 +36,7 @@ export interface Lines {
   debug: string[];
 }
 
-export function recordingLogger(): { logger: ResilienceLogger; lines: Lines } {
+export function recordingLogger(): { logger: CareLogger; lines: Lines } {
   const lines: Lines = { log: [], warn: [], error: [], debug: [] };
   return {
     lines,
@@ -64,7 +56,7 @@ export interface MetricCall {
   value: number;
 }
 
-export function recordingMetrics(): { port: ResilienceMetricsPort; calls: MetricCall[] } {
+export function recordingMetrics(): { port: CareMetricsPort; calls: MetricCall[] } {
   const calls: MetricCall[] = [];
   return {
     calls,
@@ -77,39 +69,39 @@ export function recordingMetrics(): { port: ResilienceMetricsPort; calls: Metric
 }
 
 export interface Harness<T> {
-  exec: ResilienceExecutor<T>;
-  clock: ManualResilienceClock;
-  events: ResilienceEvent[];
+  exec: CareExecutor<T>;
+  clock: ManualCareClock;
+  events: CareEvent[];
   lines: Lines;
   metrics: MetricCall[];
 }
 
 export function harness<T = unknown>(
-  policy: ResiliencePolicyRef,
+  policy: CareRefOf,
   options: {
-    adapter?: Partial<ResilienceEdgeAdapter>;
-    deps?: Partial<ResilienceDeps>;
-    clock?: ManualResilienceClock;
+    adapter?: Partial<CareEdgeAdapter>;
+    deps?: Partial<CareDeps>;
+    clock?: ManualCareClock;
     binding?: string;
-    defaultPerAttemptMs?: number;
+    defaultEachTryMs?: number;
   } = {},
 ): Harness<T> {
-  const clock = options.clock ?? manualResilienceClock();
-  const events: ResilienceEvent[] = [];
+  const clock = options.clock ?? manualCareClock();
+  const events: CareEvent[] = [];
   const { logger, lines } = recordingLogger();
   const metrics = recordingMetrics();
-  const observer = new ResilienceObserver({
+  const observer = new CareObserver({
     clock,
     logger,
     metrics: metrics.port,
     onEvent: (event) => events.push(event),
   });
-  const plan = resolveResiliencePlan(options.binding ?? 'b', [policy], 'activator', {
-    ...(options.defaultPerAttemptMs === undefined
+  const plan = resolveCarePlan(options.binding ?? 'b', [policy], 'activator', {
+    ...(options.defaultEachTryMs === undefined
       ? {}
-      : { defaultPerAttemptMs: options.defaultPerAttemptMs }),
+      : { defaultEachTryMs: options.defaultEachTryMs }),
   });
-  const exec = new ResilienceExecutor<T>(plan, fakeAdapter(options.adapter), {
+  const exec = new CareExecutor<T>(plan, fakeAdapter(options.adapter), {
     clock,
     random: (max) => max - 1,
     observer,

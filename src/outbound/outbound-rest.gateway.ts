@@ -3,11 +3,11 @@ import type { ChannelRegistry } from '../channel-registry';
 import { createMessage, type IntegrationMessage, type MessageHeadersInit } from '../message';
 import type { HopLogger } from '../trace/hop-logger';
 import type { TraceContext } from '../trace/trace-context';
-import { RETRY_BUDGET_MESSAGE_HEADER, ResilienceScope } from '../resilience/retry-budget';
-import { ResilienceRuntime } from '../resilience/runtime';
+import { TRIES_LEFT_MESSAGE_HEADER, CareScope } from '../resilience/retry-budget';
+import { CareEngine } from '../resilience/runtime';
 import { executeOutboundRest } from './outbound.call';
 import { OutboundError } from './outbound.errors';
-import { ResilienceDefinitionError } from '../resilience/resilience.errors';
+import { CareConfigError } from '../resilience/resilience.errors';
 import { resolveOutboundRestPlan, type OutboundRestPlan } from './outbound.plan';
 import type {
   OutboundFetch,
@@ -36,14 +36,14 @@ export interface OutboundRestGatewayDeps {
   fetchFn?: OutboundFetch;
   /** Waits between retry attempts; replaceable in tests. */
   sleep?: (ms: number) => Promise<void>;
-  /** Resilience runtime (the module's); a standalone gateway creates one on first use. */
-  resilience?: ResilienceRuntime;
+  /** Care engine (the module's); a standalone gateway creates one on first use. */
+  care?: CareEngine;
 }
 
 const globalFetch: OutboundFetch = (url, init) => globalThis.fetch(url, init);
 
 function describeBinding(plan: OutboundRestPlan): OutboundRestBindingInfo {
-  const summary = plan.resilience?.summary;
+  const summary = plan.care?.summary;
   const line = `outbound rest: ${plan.name} -> ${plan.description}`;
   const info: OutboundRestBindingInfo = {
     name: plan.name,
@@ -51,7 +51,7 @@ function describeBinding(plan: OutboundRestPlan): OutboundRestBindingInfo {
     line: summary === undefined ? line : `${line} [${summary}]`,
   };
   if (plan.channel !== undefined) info.channel = plan.channel;
-  if (summary !== undefined) info.policy = summary;
+  if (summary !== undefined) info.care = summary;
   return info;
 }
 
@@ -64,18 +64,18 @@ export class OutboundRestGateway {
   private readonly plans = new Map<string, OutboundRestPlan>();
   private readonly adHoc = new WeakMap<OutboundRestRequestOptions, OutboundRestPlan>();
 
-  private standalone: ResilienceRuntime | undefined;
+  private standalone: CareEngine | undefined;
 
   constructor(private readonly deps: OutboundRestGatewayDeps = {}) {}
 
-  private readonly runtime = (): ResilienceRuntime => {
-    if (this.deps.resilience !== undefined) return this.deps.resilience;
-    this.standalone ??= new ResilienceRuntime({}, { enabled: false });
+  private readonly runtime = (): CareEngine => {
+    if (this.deps.care !== undefined) return this.deps.care;
+    this.standalone ??= new CareEngine({}, { enabled: false });
     return this.standalone;
   };
 
   private planDeps(adHoc: boolean): Parameters<typeof resolveOutboundRestPlan>[1] {
-    return { ...this.deps, resilience: this.runtime, adHoc };
+    return { ...this.deps, care: this.runtime, adHoc };
   }
 
   /**
@@ -85,7 +85,7 @@ export class OutboundRestGateway {
    */
   bind(binding: OutboundRestBinding): Unsubscribe {
     const plan = resolveOutboundRestPlan(binding, this.planDeps(false));
-    this.assertFallbackChannel(plan);
+    this.assertPlanBChannel(plan);
     if (this.plans.has(plan.name)) {
       throw new OutboundError(`outbound rest '${plan.name}' is already declared`);
     }
@@ -143,24 +143,19 @@ export class OutboundRestGateway {
             correlationId: ambient.correlationId,
             parentSpanId: ambient.spanId,
           };
-    // RS-29: under forRoot({ resilience }) a call inherits the budget of its scope.
-    const budget =
-      this.deps.resilience?.enabled === true ? ResilienceScope.current()?.budget : undefined;
-    if (budget !== undefined) inherited[RETRY_BUDGET_MESSAGE_HEADER] = budget;
+    // RS-29: under forRoot({ care }) a call inherits the tries left of its scope.
+    const triesLeft = this.deps.care?.enabled === true ? CareScope.current()?.triesLeft : undefined;
+    if (triesLeft !== undefined) inherited[TRIES_LEFT_MESSAGE_HEADER] = triesLeft;
     return createMessage(input.payload, { ...inherited, ...input.headers });
   }
 
-  /** A `fallback.channel` must exist when the binding is declared (section 5.6). */
-  private assertFallbackChannel(plan: OutboundRestPlan): void {
-    const channel = plan.resilience?.plan.fallback?.channel;
+  /** A `planB.channel` must exist when the binding is declared (section 5.6). */
+  private assertPlanBChannel(plan: OutboundRestPlan): void {
+    const channel = plan.care?.plan.planB?.channel;
     const registry = this.deps.registry;
     if (channel === undefined || registry === undefined || registry.tryGet(channel) !== undefined)
       return;
-    throw new ResilienceDefinitionError(
-      plan.name,
-      'fallback.channel',
-      `names an unknown channel '${channel}'`,
-    );
+    throw new CareConfigError(plan.name, 'planB.channel', `names an unknown channel '${channel}'`);
   }
 
   private run(

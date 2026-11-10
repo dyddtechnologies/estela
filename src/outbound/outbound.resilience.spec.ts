@@ -1,9 +1,9 @@
 import { createMessage } from '../message';
-import { ResilienceDefinitionError, ResilienceKeyError } from '../resilience/resilience.errors';
-import type { ResilienceClock, ResilienceModuleOptions } from '../resilience/resilience.types';
-import { ResilienceScope } from '../resilience/retry-budget';
-import { ResilienceRuntime } from '../resilience/runtime';
-import { manualResilienceClock } from '../testing/manual-resilience-clock';
+import { CareConfigError, CareKeyError } from '../resilience/resilience.errors';
+import type { CareClock, CareModuleOptions } from '../resilience/resilience.types';
+import { CareScope } from '../resilience/retry-budget';
+import { CareEngine } from '../resilience/runtime';
+import { manualCareClock } from '../testing/manual-resilience-clock';
 import { HopLogger } from '../trace/hop-logger';
 import { OutboundRestGateway, type OutboundRestGatewayDeps } from './outbound-rest.gateway';
 import { OutboundHttpError, OutboundNetworkError, OutboundTimeoutError } from './outbound.errors';
@@ -46,7 +46,7 @@ function fakeFetch(...replies: Reply[]): { fetchFn: OutboundFetch; calls: Call[]
 }
 
 /** Clock whose sleeps resolve at once and are recorded; its timers never fire. */
-function recordingClock(): { clock: ResilienceClock; sleeps: number[] } {
+function recordingClock(): { clock: CareClock; sleeps: number[] } {
   const sleeps: number[] = [];
   return {
     sleeps,
@@ -67,19 +67,19 @@ const URL_ORDERS = 'https://erp.example/orders';
 function setup(
   replies: Reply[],
   options: {
-    resilience?: ResilienceModuleOptions;
+    care?: CareModuleOptions;
     enabled?: boolean;
     deps?: Partial<OutboundRestGatewayDeps>;
   } = {},
 ) {
   const { fetchFn, calls } = fakeFetch(...replies);
   const sleeps: number[] = [];
-  const runtime = new ResilienceRuntime(options.resilience ?? {}, {
+  const runtime = new CareEngine(options.care ?? {}, {
     enabled: options.enabled ?? true,
   });
   const gateway = new OutboundRestGateway({
     fetchFn,
-    resilience: runtime,
+    care: runtime,
     sleep: async (ms) => {
       sleeps.push(ms);
     },
@@ -88,8 +88,8 @@ function setup(
   return { gateway, calls, sleeps, runtime };
 }
 
-describe('outbound REST under resilience', () => {
-  it('RU-34 legacy retry and timeoutMs aliases produce identical attempts, delays, errors and headers', async () => {
+describe('outbound REST under care', () => {
+  it('RU-34 the 0.9.0 retry and timeoutMs spellings produce identical tries, delays, errors and headers', async () => {
     const legacy: OutboundRestBinding = {
       name: 'orders.http',
       url: URL_ORDERS,
@@ -109,9 +109,9 @@ describe('outbound REST under resilience', () => {
       const before = setup(script);
       before.gateway.bind(legacy);
       const { clock, sleeps } = recordingClock();
-      const after = setup(script, { resilience: { clock } });
-      // `resilience: {}` routes the same legacy options through the executor as aliases.
-      after.gateway.bind({ ...legacy, resilience: {} });
+      const after = setup(script, { care: { clock } });
+      // `care: {}` routes the same legacy options through the executor as aliases.
+      after.gateway.bind({ ...legacy, care: {} });
       const message = { payload: { a: 1 }, headers: { idempotencyKey: 'k-1' } };
       const outcome = (gateway: OutboundRestGateway) =>
         gateway.request('orders.http', message).then(
@@ -131,40 +131,40 @@ describe('outbound REST under resilience', () => {
           headers: { ...c.init.headers, 'x-trace-id': '', 'x-span-id': '', 'x-correlation-id': '' },
         }));
       expect(strip(after.calls)).toEqual(strip(before.calls));
-      expect(after.calls.every((c) => !('x-retry-budget' in c.init.headers))).toBe(true);
+      expect(after.calls.every((c) => !('x-tries-left' in c.init.headers))).toBe(true);
     }
   });
 
-  it('RU-35 refuses legacy and resilience options for the same primitive on one layer', () => {
+  it('RU-35 refuses legacy and care options for the same part on one layer', () => {
     const { gateway } = setup([]);
     expect(() =>
-      gateway.bind({ name: 'a', url: URL_ORDERS, retry: {}, resilience: { retry: {} } }),
-    ).toThrow(ResilienceDefinitionError);
+      gateway.bind({ name: 'a', url: URL_ORDERS, retry: {}, care: { tries: {} } }),
+    ).toThrow(CareConfigError);
     expect(() =>
       gateway.bind({
         name: 'b',
         url: URL_ORDERS,
         timeoutMs: 10,
-        resilience: { timeout: { perAttemptMs: 10 } },
+        care: { patience: { eachTryMs: 10 } },
       }),
-    ).toThrow(ResilienceDefinitionError);
+    ).toThrow(CareConfigError);
     // Across layers the higher layer wins whichever spelling it uses.
     const layered = setup([], { deps: { defaults: { retry: { maxAttempts: 5 } } } });
     expect(() =>
       layered.gateway.bind({
         name: 'c',
         url: URL_ORDERS,
-        resilience: { retry: { maxAttempts: 2 } },
+        care: { tries: { max: 2 } },
       }),
     ).not.toThrow();
   });
 
-  it('RU-48 requireIdempotencyKey rejects a non-safe call without a key before any attempt', async () => {
+  it('RU-48 requireIdempotencyKey rejects a non-safe call without a key before any try', async () => {
     const { gateway, calls } = setup([answer(200)]);
     gateway.bind({
       name: 'pay',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 1, requireIdempotencyKey: true } },
+      care: { tries: { max: 1, requireIdempotencyKey: true } },
     });
     await expect(gateway.request('pay', { payload: {} })).rejects.toMatchObject({
       reason: 'idempotency-key-required',
@@ -177,22 +177,22 @@ describe('outbound REST under resilience', () => {
         name: 'pay2',
         url: URL_ORDERS,
         idempotency: false,
-        resilience: { retry: { requireIdempotencyKey: true } },
+        care: { tries: { requireIdempotencyKey: true } },
       }),
-    ).toThrow(ResilienceDefinitionError);
+    ).toThrow(CareConfigError);
     const get = setup([answer(200)]);
     get.gateway.bind({
       name: 'read',
       url: URL_ORDERS,
       method: 'GET',
-      resilience: { retry: { requireIdempotencyKey: true } },
+      care: { tries: { requireIdempotencyKey: true } },
     });
     await expect(get.gateway.request('read', { payload: {} })).resolves.toMatchObject({
       status: 200,
     });
   });
 
-  it('RU-14 response mapper errors propagate unclassified and never reach mapError or the fallback', async () => {
+  it('RU-14 response mapper errors triesLeft unclassified and never reach mapError or the plan B', async () => {
     const mapError = jest.fn();
     const { gateway, calls } = setup([answer(200)]);
     gateway.bind({
@@ -202,9 +202,9 @@ describe('outbound REST under resilience', () => {
         throw new Error('mapper');
       },
       mapError,
-      resilience: {
-        retry: { maxAttempts: 3, idempotent: true },
-        fallback: { value: () => 'fb', on: ['unknown'] },
+      care: {
+        tries: { max: 3, idempotent: true },
+        planB: { value: () => 'fb', on: ['unknown'] },
       },
     });
     await expect(gateway.request('m', { payload: {} })).rejects.toThrow('mapper');
@@ -212,14 +212,14 @@ describe('outbound REST under resilience', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('RU-09b sends the same idempotency key on every attempt and never retries a timed-out POST without one', async () => {
-    const clock = manualResilienceClock();
+  it('RU-09b sends the same idempotency key on every try and never extra tries a overdue POST without one', async () => {
+    const clock = manualCareClock();
     const hang = () => new Promise<OutboundFetchResponse>(() => undefined);
-    const keyed = setup([hang, answer(200)], { resilience: { clock } });
+    const keyed = setup([hang, answer(200)], { care: { clock } });
     keyed.gateway.bind({
       name: 'k',
       url: URL_ORDERS,
-      resilience: { timeout: { perAttemptMs: 50 }, retry: { maxAttempts: 2, backoff: 0 } },
+      care: { patience: { eachTryMs: 50 }, tries: { max: 2, spacing: 0 } },
     });
     const result = keyed.gateway.request('k', {
       payload: {},
@@ -229,11 +229,11 @@ describe('outbound REST under resilience', () => {
     await expect(result).resolves.toMatchObject({ status: 200 });
     expect(keyed.calls.map((c) => c.init.headers['Idempotency-Key'])).toEqual(['key-1', 'key-1']);
     expect(keyed.calls[0]!.init.signal?.aborted).toBe(true);
-    const unkeyed = setup([hang, answer(200)], { resilience: { clock } });
+    const unkeyed = setup([hang, answer(200)], { care: { clock } });
     unkeyed.gateway.bind({
       name: 'u',
       url: URL_ORDERS,
-      resilience: { timeout: { perAttemptMs: 50 }, retry: { maxAttempts: 2, backoff: 0 } },
+      care: { patience: { eachTryMs: 50 }, tries: { max: 2, spacing: 0 } },
     });
     const failed = unkeyed.gateway.request('u', { payload: {} }).catch((e: unknown) => e);
     await clock.advance(50);
@@ -241,7 +241,7 @@ describe('outbound REST under resilience', () => {
     expect(unkeyed.calls).toHaveLength(1);
   });
 
-  it('RS-33 retries 503s, calls mapError once with the last error and logs one hop', async () => {
+  it('RS-33 extra tries 503s, calls mapError once with the last error and logs one hop', async () => {
     const lines: string[] = [];
     const logger = new HopLogger('log');
     jest.spyOn(logger, 'hopStart').mockImplementation(() => lines.push('start'));
@@ -250,14 +250,14 @@ describe('outbound REST under resilience', () => {
       (error: unknown) => new Error(`mapped ${(error as OutboundHttpError).attempts}`),
     );
     const { clock } = recordingClock();
-    const { gateway, calls } = setup([answer(503)], { resilience: { clock }, deps: { logger } });
+    const { gateway, calls } = setup([answer(503)], { care: { clock }, deps: { logger } });
     gateway.bind({
       name: 'h',
       url: URL_ORDERS,
       mapError,
-      resilience: {
-        retry: { maxAttempts: 3, idempotent: true },
-        circuitBreaker: { minimumCalls: 10 },
+      care: {
+        tries: { max: 3, idempotent: true },
+        valve: { minCalls: 10 },
       },
     });
     await expect(gateway.request('h', { payload: {} })).rejects.toThrow('mapped 3');
@@ -267,11 +267,11 @@ describe('outbound REST under resilience', () => {
     expect(lines).toEqual(['start', 'end']);
   });
 
-  it('honours Retry-After and returns a fallback value without the response mapper or mapError', async () => {
+  it('honours Retry-After and returns a plan B value without the response mapper or mapError', async () => {
     const { clock, sleeps } = recordingClock();
     const mapError = jest.fn();
     const { gateway, calls } = setup([answer(429, {}, { 'retry-after': '2' }), new Error('down')], {
-      resilience: { clock },
+      care: { clock },
     });
     gateway.bind({
       name: 'f',
@@ -279,9 +279,9 @@ describe('outbound REST under resilience', () => {
       method: 'GET',
       response: 'body',
       mapError,
-      resilience: {
-        retry: { maxAttempts: 2, backoff: { initialMs: 10, jitter: 'none' } },
-        fallback: { value: () => ({ cached: true }) },
+      care: {
+        tries: { max: 2, spacing: { firstMs: 10, spread: 'none' } },
+        planB: { value: () => ({ cached: true }) },
       },
     });
     await expect(gateway.request('f', { payload: {} })).resolves.toEqual({ cached: true });
@@ -292,60 +292,60 @@ describe('outbound REST under resilience', () => {
     expect(OutboundNetworkError).toBeDefined();
   });
 
-  it('RU-29a reads the budget from header, message and scope only when resilience is enabled', async () => {
+  it('RU-29a reads the tries left from header, message and scope only when care is enabled', async () => {
     const { clock } = recordingClock();
-    const on = setup([answer(503)], { resilience: { clock } });
+    const on = setup([answer(503)], { care: { clock } });
     on.gateway.bind({
       name: 'r',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 3, idempotent: true } },
+      care: { tries: { max: 3, idempotent: true } },
     });
     await on.gateway.request('r', { payload: {} }).catch(() => undefined);
-    expect(on.calls.map((c) => c.init.headers['x-retry-budget'])).toEqual(['0', '0', '0']);
-    const zero = setup([answer(503)], { resilience: { clock } });
+    expect(on.calls.map((c) => c.init.headers['x-tries-left'])).toEqual(['0', '0', '0']);
+    const zero = setup([answer(503)], { care: { clock } });
     zero.gateway.bind({
       name: 'r',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 3, idempotent: true } },
+      care: { tries: { max: 3, idempotent: true } },
     });
     await zero.gateway
-      .request('r', { payload: {}, headers: { retryBudget: 0 } })
+      .request('r', { payload: {}, headers: { triesLeft: 0 } })
       .catch(() => undefined);
     expect(zero.calls).toHaveLength(1);
-    const scoped = setup([answer(503)], { resilience: { clock } });
+    const scoped = setup([answer(503)], { care: { clock } });
     scoped.gateway.bind({
       name: 'r',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 3, idempotent: true } },
+      care: { tries: { max: 3, idempotent: true } },
     });
-    await ResilienceScope.run({ budget: 1 }, () =>
+    await CareScope.run({ triesLeft: 1 }, () =>
       scoped.gateway.request('r', { payload: {} }).catch(() => undefined),
     );
     expect(scoped.calls).toHaveLength(2);
-    const off = setup([answer(503)], { resilience: { clock }, enabled: false });
+    const off = setup([answer(503)], { care: { clock }, enabled: false });
     off.gateway.bind({
       name: 'r',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 3, idempotent: true } },
+      care: { tries: { max: 3, idempotent: true } },
     });
     await off.gateway
-      .request('r', { payload: {}, headers: { retryBudget: 0 } })
+      .request('r', { payload: {}, headers: { triesLeft: 0 } })
       .catch(() => undefined);
     expect(off.calls).toHaveLength(3);
-    expect(off.calls.every((c) => !('x-retry-budget' in c.init.headers))).toBe(true);
+    expect(off.calls.every((c) => !('x-tries-left' in c.init.headers))).toBe(true);
   });
 
-  it('refuses stateful primitives on ad-hoc options and skips the module ones', async () => {
+  it('refuses stateful parts on ad-hoc options and skips the module ones', async () => {
     const warn = jest.fn();
     const { gateway, calls } = setup([answer(200)], {
-      resilience: {
+      care: {
         logger: { log: () => undefined, warn, error: () => undefined, debug: () => undefined },
       },
-      deps: { defaults: { resilience: { circuitBreaker: {}, bulkhead: { maxConcurrent: 1 } } } },
+      deps: { defaults: { care: { valve: {}, lanes: { count: 1 } } } },
     });
     await expect(
-      gateway.request({ url: URL_ORDERS, resilience: { circuitBreaker: {} } }, { payload: {} }),
-    ).rejects.toBeInstanceOf(ResilienceDefinitionError);
+      gateway.request({ url: URL_ORDERS, care: { valve: {} } }, { payload: {} }),
+    ).rejects.toBeInstanceOf(CareConfigError);
     const options = { name: 'adhoc', url: URL_ORDERS };
     await gateway.request(options, { payload: {} });
     await gateway.request(options, { payload: {} });
@@ -353,44 +353,44 @@ describe('outbound REST under resilience', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it('RU-42 adds the policy summary to the boot line and the binding info', () => {
+  it('RU-42 adds the care summary to the boot line and the binding info', () => {
     const { gateway } = setup([]);
     gateway.bind({
       name: 'p',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 3 }, circuitBreaker: {} },
+      care: { tries: { max: 3 }, valve: {} },
     });
     gateway.bind({ name: 'q', url: URL_ORDERS });
     expect(gateway.bindings()).toEqual([
       {
         name: 'p',
         target: `POST ${URL_ORDERS}`,
-        policy: 'retry x3 · breaker',
-        line: `outbound rest: p -> POST ${URL_ORDERS} [retry x3 · breaker]`,
+        care: 'tries x3 · valve',
+        line: `outbound rest: p -> POST ${URL_ORDERS} [tries x3 · valve]`,
       },
       { name: 'q', target: `POST ${URL_ORDERS}`, line: `outbound rest: q -> POST ${URL_ORDERS}` },
     ]);
   });
 
-  it('resolves named policies from the runtime', async () => {
+  it('resolves named profiles from the runtime', async () => {
     const { clock } = recordingClock();
     const { gateway, calls } = setup([answer(503)], {
-      resilience: { clock, policies: { erp: { retry: { maxAttempts: 2, idempotent: true } } } },
+      care: { clock, profiles: { erp: { tries: { max: 2, idempotent: true } } } },
     });
-    gateway.bind({ name: 'n', url: URL_ORDERS, resilience: 'erp' });
+    gateway.bind({ name: 'n', url: URL_ORDERS, care: 'erp' });
     await gateway.request('n', { payload: {} }).catch(() => undefined);
     expect(calls).toHaveLength(2);
-    expect(() => gateway.bind({ name: 'x', url: URL_ORDERS, resilience: 'nope' })).toThrow(
-      ResilienceDefinitionError,
+    expect(() => gateway.bind({ name: 'x', url: URL_ORDERS, care: 'nope' })).toThrow(
+      CareConfigError,
     );
-    expect(ResilienceKeyError).toBeDefined();
+    expect(CareKeyError).toBeDefined();
     expect(createMessage).toBeDefined();
   });
 
-  it('RU-04 keeps the 0.9.0 field merge for legacy aliases and applies resilience.defaults per edge kind', async () => {
+  it('RU-04 keeps the 0.9.0 field merge for legacy aliases and applies care.defaults per edge kind', async () => {
     const { clock, sleeps } = recordingClock();
     const legacy = setup([answer(503)], {
-      resilience: { clock },
+      care: { clock },
       deps: { defaults: { retry: { maxAttempts: 5 } } },
     });
     legacy.gateway.bind({
@@ -398,22 +398,22 @@ describe('outbound REST under resilience', () => {
       url: URL_ORDERS,
       method: 'GET',
       retry: { backoff: 50 },
-      resilience: {},
+      care: {},
     });
     await legacy.gateway.request('l', { payload: {} }).catch(() => undefined);
     expect(legacy.calls).toHaveLength(5);
     expect(sleeps).toEqual([50, 50, 50, 50]);
 
     const byKind = setup([answer(503)], {
-      resilience: {
+      care: {
         clock,
-        defaults: { 'outbound-rest': { retry: { maxAttempts: 5, idempotent: true } } },
+        defaults: { 'outbound-rest': { tries: { max: 5, idempotent: true } } },
       },
     });
     byKind.gateway.bind({
       name: 'k',
       url: URL_ORDERS,
-      resilience: { retry: { maxAttempts: 2, idempotent: true } },
+      care: { tries: { max: 2, idempotent: true } },
     });
     byKind.gateway.bind({ name: 'd', url: URL_ORDERS });
     await byKind.gateway.request('k', { payload: {} }).catch(() => undefined);
@@ -422,11 +422,9 @@ describe('outbound REST under resilience', () => {
     expect(byKind.calls).toHaveLength(7);
 
     const both = setup([], {
-      resilience: { defaults: { 'outbound-rest': {} } },
-      deps: { defaults: { resilience: {} } },
+      care: { defaults: { 'outbound-rest': {} } },
+      deps: { defaults: { care: {} } },
     });
-    expect(() => both.gateway.bind({ name: 'x', url: URL_ORDERS })).toThrow(
-      ResilienceDefinitionError,
-    );
+    expect(() => both.gateway.bind({ name: 'x', url: URL_ORDERS })).toThrow(CareConfigError);
   });
 });

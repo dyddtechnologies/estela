@@ -1,15 +1,15 @@
 import { defaultRestClassifier } from '../resilience/classifiers';
-import type { ResilienceEdgeAdapter, ResilienceExecutor } from '../resilience/executor';
-import { ResilienceDefinitionError } from '../resilience/resilience.errors';
+import type { CareEdgeAdapter, CareExecutor } from '../resilience/executor';
+import { CareConfigError } from '../resilience/resilience.errors';
 import {
-  describePolicy,
-  expandPolicyRef,
+  describeCare,
+  expandCareRef,
   LEGACY_ALIAS,
-  type LegacyRetryMark,
-  type ResiliencePlan,
+  type LegacyTriesMark,
+  type CarePlan,
 } from '../resilience/resilience.plan';
-import type { ResilienceContext, ResiliencePolicy } from '../resilience/resilience.types';
-import { ResilienceRuntime } from '../resilience/runtime';
+import type { CareContext, Care } from '../resilience/resilience.types';
+import { CareEngine } from '../resilience/runtime';
 import { OutboundTimeoutError } from './outbound.errors';
 import type {
   OutboundCallContext,
@@ -22,46 +22,46 @@ import type {
   OutboundBackoffFn,
 } from './outbound.types';
 
-/** One expanded level: a policy, `false` (no policy here and below) or nothing. */
-type PolicyLayer = ResiliencePolicy | false | undefined;
+/** One expanded level: care, `false` (no care here and below) or nothing. */
+type CareLayer = Care | false | undefined;
 
 export const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-const STATEFUL = ['circuitBreaker', 'bulkhead', 'rateLimit'] as const;
+const STATEFUL = ['valve', 'lanes', 'pace'] as const;
 
-/** Per-call data the REST adapter reads from `ResilienceContext.data`. */
+/** Per-call data the REST adapter reads from `CareContext.data`. */
 export interface RestAttemptData {
   ctx: OutboundCallContext;
   request: OutboundRestRequest;
   startedAt: number;
 }
 
-export interface OutboundResiliencePlan {
-  plan: ResiliencePlan;
-  executor: ResilienceExecutor<unknown>;
+export interface OutboundCarePlan {
+  plan: CarePlan;
+  executor: CareExecutor<unknown>;
   summary?: string;
-  /** Header that carries the retry budget downstream. */
-  budgetHeader: string;
+  /** Header that carries the tries left downstream. */
+  triesLeftHeader: string;
 }
 
-/** 0.9.0 retry plan resolved by `outbound.plan.ts`, used to build the legacy alias mark. */
-export interface LegacyRetrySource {
+/** 0.9.0 `retry` plan resolved by `outbound.plan.ts`, used to build the legacy mark. */
+export interface LegacyTriesSource {
   maxAttempts: number;
   backoff: OutboundBackoffFn;
   retryOn: OutboundRetryClassifierFn;
   methods: ReadonlySet<string>;
 }
 
-export interface OutboundResilienceInput {
+export interface OutboundCareInput {
   binding: OutboundRestBinding;
   defaults: OutboundRestDefaults | undefined;
-  runtime: ResilienceRuntime;
-  legacyRetry: LegacyRetrySource | undefined;
+  runtime: CareEngine;
+  legacyTries: LegacyTriesSource | undefined;
   idempotencyEnabled: boolean;
   adHoc: boolean;
 }
 
-export function dataOf(ctx: ResilienceContext): RestAttemptData {
+export function dataOf(ctx: CareContext): RestAttemptData {
   return ctx.data as RestAttemptData;
 }
 
@@ -69,127 +69,115 @@ function exchangeOf(data: RestAttemptData, attempts: number): OutboundExchangeCo
   return { ...data.ctx, request: data.request, attempts, durationMs: Date.now() - data.startedAt };
 }
 
-/** True when a binding or its module default opts into the resilience executor. */
-export function usesResilience(
+/** True when a binding or its module default opts into the care engine. */
+export function usesCare(
   binding: OutboundRestOptions,
   defaults: OutboundRestDefaults | undefined,
-  runtime?: ResilienceRuntime,
+  runtime?: CareEngine,
 ): boolean {
   return (
-    usesOwnResilience(binding, defaults) ||
-    runtime?.options.defaults?.['outbound-rest'] !== undefined
+    usesOwnCare(binding, defaults) || runtime?.options.defaults?.['outbound-rest'] !== undefined
   );
 }
 
-function usesOwnResilience(
+function usesOwnCare(
   binding: OutboundRestOptions,
   defaults: OutboundRestDefaults | undefined,
 ): boolean {
-  return binding.resilience !== undefined || defaults?.resilience !== undefined;
+  return binding.care !== undefined || defaults?.care !== undefined;
 }
 
-function legacyMark(source: LegacyRetrySource): LegacyRetryMark {
+function legacyMark(source: LegacyTriesSource): LegacyTriesMark {
   return {
-    retryOn: (error, ctx) => source.retryOn(error as never, exchangeOf(dataOf(ctx), ctx.attempt)),
-    backoff: (attempt, error) => Math.max(0, source.backoff(attempt, error as never)),
+    tryAgainOn: (error, ctx) =>
+      source.retryOn(error as never, exchangeOf(dataOf(ctx), ctx.tryNumber)),
+    gap: (tryNumber, error) => Math.max(0, source.backoff(tryNumber, error as never)),
   };
 }
 
 /**
- * One layer of the plan: the `resilience` policy plus the legacy `retry` / `timeoutMs` of the same
- * options as aliases. The same primitive in both spellings on one layer is refused (RS-35).
+ * One layer of the plan: `care` plus the 0.9.0 `retry` / `timeoutMs` of the same options as
+ * their 0.9.0 spellings. The same part in both spellings on one layer is refused (RS-35).
  */
-// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to a policy, false (cut) or nothing
+// eslint-disable-next-line sonarjs/function-return-type -- a reference expands to care, false (cut) or nothing
 function layerOf(
   name: string,
   options: OutboundRestOptions,
-  input: OutboundResilienceInput,
-  moduleDefault?: OutboundRestOptions['resilience'],
-): PolicyLayer {
-  if (options.resilience !== undefined && moduleDefault !== undefined) {
-    throw new ResilienceDefinitionError(
+  input: OutboundCareInput,
+  moduleDefault?: OutboundRestOptions['care'],
+): CareLayer {
+  if (options.care !== undefined && moduleDefault !== undefined) {
+    throw new CareConfigError(
       name,
       'defaults.outbound-rest',
-      'is set both as resilience.defaults and as outbound.rest.defaults.resilience',
+      'is set both as care.defaults and as outbound.rest.defaults.care',
       'LEGACY_AND_NEW_SAME_LAYER',
     );
   }
-  const policy = expandPolicyRef(
-    name,
-    options.resilience ?? moduleDefault,
-    input.runtime.options.policies,
-  );
-  if (policy === false) return false;
-  const layer: Record<string, unknown> = { ...policy };
-  if (options.retry !== undefined) layer.retry = retryAlias(name, options.retry, policy, input);
+  const care = expandCareRef(name, options.care ?? moduleDefault, input.runtime.options.profiles);
+  if (care === false) return false;
+  const layer: Record<string, unknown> = { ...care };
+  if (options.retry !== undefined) layer.tries = legacyTries(name, options.retry, care, input);
   if (options.timeoutMs !== undefined)
-    layer.timeout = timeoutAlias(name, options.timeoutMs, policy);
-  return Object.keys(layer).length === 0 && policy === undefined ? undefined : layer;
+    layer.patience = legacyPatience(name, options.timeoutMs, care);
+  return Object.keys(layer).length === 0 && care === undefined ? undefined : layer;
 }
 
-function retryAlias(
+function legacyTries(
   name: string,
   retry: NonNullable<OutboundRestOptions['retry']>,
-  policy: ResiliencePolicy | undefined,
-  input: OutboundResilienceInput,
+  care: Care | undefined,
+  input: OutboundCareInput,
 ): unknown {
-  if (policy?.retry !== undefined) {
-    throw new ResilienceDefinitionError(
+  if (care?.tries !== undefined) {
+    throw new CareConfigError(
       name,
-      'retry',
-      'is set both as retry and as resilience.retry',
+      'tries',
+      'is set both as the 0.9.0 retry and as care.tries',
+      'LEGACY_AND_NEW_SAME_LAYER',
     );
   }
   if (retry === false) return false;
-  // The 0.9.0 alias keeps its field-by-field merge across binding and module (section 1).
-  const legacy = input.legacyRetry;
+  // The 0.9.0 spelling keeps its field-by-field merge across binding and module (section 1).
+  const legacy = input.legacyTries;
   if (legacy !== undefined) {
-    return { enabled: true, maxAttempts: legacy.maxAttempts, [LEGACY_ALIAS]: legacyMark(legacy) };
+    return { enabled: true, max: legacy.maxAttempts, [LEGACY_ALIAS]: legacyMark(legacy) };
   }
-  const mark =
-    input.legacyRetry === undefined ? {} : { [LEGACY_ALIAS]: legacyMark(input.legacyRetry) };
-  return { ...retry, ...mark };
+  return { enabled: true, max: retry.maxAttempts };
 }
 
-function timeoutAlias(
-  name: string,
-  timeoutMs: number,
-  policy: ResiliencePolicy | undefined,
-): unknown {
-  const timeout = policy?.timeout === false ? undefined : policy?.timeout;
-  if (timeout?.perAttemptMs !== undefined) {
-    throw new ResilienceDefinitionError(
+function legacyPatience(name: string, timeoutMs: number, care: Care | undefined): unknown {
+  const patience = care?.patience === false ? undefined : care?.patience;
+  if (patience?.eachTryMs !== undefined) {
+    throw new CareConfigError(
       name,
-      'timeout.perAttemptMs',
-      'is set both as timeoutMs and as resilience.timeout.perAttemptMs',
+      'patience.eachTryMs',
+      'is set both as the 0.9.0 timeoutMs and as care.patience.eachTryMs',
+      'LEGACY_AND_NEW_SAME_LAYER',
     );
   }
-  return { ...timeout, perAttemptMs: timeoutMs, [LEGACY_ALIAS]: true };
+  return { ...patience, eachTryMs: timeoutMs, [LEGACY_ALIAS]: true };
 }
 
-/** RS-33: ad-hoc options cannot hold state; module stateful primitives are skipped with a warn. */
+/** RS-33: ad-hoc options cannot hold state; module stateful parts are skipped with a warn. */
 function adHocLayers(
   name: string,
-  own: PolicyLayer,
-  moduleLayer: PolicyLayer,
-  runtime: ResilienceRuntime,
-): PolicyLayer[] {
-  for (const primitive of STATEFUL) {
-    const value = own === false ? undefined : own?.[primitive];
+  own: CareLayer,
+  moduleLayer: CareLayer,
+  runtime: CareEngine,
+): CareLayer[] {
+  for (const part of STATEFUL) {
+    const value = own === false ? undefined : own?.[part];
     if (value !== undefined && value !== false) {
-      throw new ResilienceDefinitionError(
-        name,
-        primitive,
-        'is not allowed on ad-hoc request options',
-      );
+      throw new CareConfigError(name, part, 'is not allowed on ad-hoc request options');
     }
   }
   if (moduleLayer === undefined || moduleLayer === false || own === false) return [own];
   const stripped: Record<string, unknown> = { ...moduleLayer };
   const skipped = STATEFUL.filter(
-    (primitive) => stripped[primitive] !== undefined && stripped[primitive] !== false,
+    (part) => stripped[part] !== undefined && stripped[part] !== false,
   );
-  for (const primitive of skipped) delete stripped[primitive];
+  for (const part of skipped) delete stripped[part];
   if (skipped.length > 0 && runtime.observer.allowed(`adhoc:${name}`)) {
     runtime.observer.logger.warn(
       `outbound rest '${name}': module ${skipped.join(', ')} not applied to ad-hoc request options`,
@@ -199,19 +187,19 @@ function adHocLayers(
 }
 
 function methodsOf(
-  layers: readonly PolicyLayer[],
-  legacy: LegacyRetrySource | undefined,
+  layers: readonly CareLayer[],
+  legacy: LegacyTriesSource | undefined,
 ): ReadonlySet<string> {
   for (const layer of layers) {
     if (layer === false) break;
-    const retry = layer?.retry as { methods?: readonly string[] } | false | undefined;
-    if (retry !== undefined && retry !== false && retry.methods !== undefined)
-      return new Set(retry.methods);
+    const tries = layer?.tries as { methods?: readonly string[] } | false | undefined;
+    if (tries !== undefined && tries !== false && tries.methods !== undefined)
+      return new Set(tries.methods);
   }
   return legacy?.methods ?? new Set();
 }
 
-function restAdapter(methods: ReadonlySet<string>): ResilienceEdgeAdapter {
+function restAdapter(methods: ReadonlySet<string>): CareEdgeAdapter {
   return {
     kind: 'outbound-rest',
     classify: (error) => defaultRestClassifier(error),
@@ -221,34 +209,31 @@ function restAdapter(methods: ReadonlySet<string>): ResilienceEdgeAdapter {
     },
     safe: (ctx) => SAFE_METHODS.has(dataOf(ctx).request.method),
     idempotencyKey: (ctx) => dataOf(ctx).request.idempotencyKey,
-    timeoutError: (ctx, timeoutMs) => {
+    overdueError: (ctx, eachTryMs) => {
       const { request } = dataOf(ctx);
       const info = {
         binding: request.name,
         url: request.url,
         method: request.method,
-        attempts: ctx.attempt,
+        attempts: ctx.tryNumber,
       };
-      return new OutboundTimeoutError(info, timeoutMs);
+      return new OutboundTimeoutError(info, eachTryMs);
     },
   };
 }
 
-function assertBinding(name: string, plan: ResiliencePlan, input: OutboundResilienceInput): void {
-  if (plan.retry?.requireIdempotencyKey === true && !input.idempotencyEnabled) {
-    throw new ResilienceDefinitionError(
+function assertBinding(name: string, plan: CarePlan, input: OutboundCareInput): void {
+  if (plan.tries?.requireIdempotencyKey === true && !input.idempotencyEnabled) {
+    throw new CareConfigError(
       name,
-      'retry.requireIdempotencyKey',
+      'tries.requireIdempotencyKey',
       'needs idempotency enabled on the binding',
     );
   }
 }
 
-/** Resolves the resilience plan and executor of an outbound REST binding (RS-33..RS-35). */
-export function resolveOutboundResilience(
-  name: string,
-  input: OutboundResilienceInput,
-): OutboundResiliencePlan {
+/** Resolves the care plan and executor of an outbound REST binding (RS-33..RS-35). */
+export function resolveOutboundCare(name: string, input: OutboundCareInput): OutboundCarePlan {
   const own = layerOf(name, input.binding, input);
   const moduleLayer = layerOf(
     name,
@@ -259,23 +244,23 @@ export function resolveOutboundResilience(
   const layers = input.adHoc
     ? adHocLayers(name, own, moduleLayer, input.runtime)
     : [own, moduleLayer];
-  const plan = input.runtime.plan(name, layers, 'outbound-rest', { defaultPerAttemptMs: 30_000 });
+  const plan = input.runtime.plan(name, layers, 'outbound-rest', { defaultEachTryMs: 30_000 });
   assertBinding(name, plan, input);
   const executor = input.runtime.executor<unknown>(
     plan,
-    restAdapter(methodsOf(layers, input.legacyRetry)),
+    restAdapter(methodsOf(layers, input.legacyTries)),
     {
-      fallbackChannel: input.runtime.channelFallback(),
+      planBChannel: input.runtime.channelPlanB(),
     },
   );
-  const resolved: OutboundResiliencePlan = {
+  const resolved: OutboundCarePlan = {
     plan,
     executor,
-    budgetHeader: input.runtime.budgetHeader,
+    triesLeftHeader: input.runtime.triesLeftHeader,
   };
-  const summary = describePolicy(plan);
+  const summary = describeCare(plan);
   if (summary !== undefined) resolved.summary = summary;
   return resolved;
 }
 
-export { ResilienceRuntime };
+export { CareEngine };

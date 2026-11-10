@@ -1,11 +1,7 @@
 import { OutboundError, OutboundHttpError, redactUrl } from './outbound.errors';
-import {
-  resolveOutboundResilience,
-  usesResilience,
-  type OutboundResiliencePlan,
-} from './outbound.resilience';
+import { resolveOutboundCare, usesCare, type OutboundCarePlan } from './outbound.resilience';
 import { formSerializer, jsonSerializer, textSerializer } from './outbound.serializers';
-import type { ResilienceRuntime } from '../resilience/runtime';
+import type { CareEngine } from '../resilience/runtime';
 import {
   OUTBOUND_REST_METHODS,
   type OutboundBackoffFn,
@@ -38,9 +34,9 @@ const DEFAULT_BACKOFF = { initialMs: 200, factor: 2, maxMs: 10_000 } as const;
 export interface OutboundPlanDeps {
   defaults?: OutboundRestDefaults;
   resolver?: OutboundProviderResolver;
-  /** Resilience runtime; required only by bindings that use `resilience`. */
-  resilience?: () => ResilienceRuntime;
-  /** Ad-hoc `request()` options: stateful primitives are refused (RS-33). */
+  /** Care engine; required only by bindings that use `care`. */
+  care?: () => CareEngine;
+  /** Ad-hoc `request()` options: stateful care parts are refused (RS-33). */
   adHoc?: boolean;
 }
 
@@ -80,8 +76,8 @@ export interface OutboundRestPlan {
   retry?: OutboundRetryPlan;
   mapError?: OutboundErrorMapperFn;
   fetchFn?: OutboundFetch;
-  /** Set when the binding or the module default uses `resilience`: the call runs on the executor. */
-  resilience?: OutboundResiliencePlan;
+  /** Set when the binding or the module default uses `care`: the call runs on the executor. */
+  care?: OutboundCarePlan;
 }
 
 type AnyFn = (...args: never[]) => unknown;
@@ -353,12 +349,12 @@ export function resolveOutboundRestPlan(
     ...resolveFeatures(binding, deps),
     ...resolveHooks(binding, merged, deps.resolver),
   };
-  if (deps.resilience !== undefined && usesResilience(binding, deps.defaults, deps.resilience())) {
-    plan.resilience = resolveOutboundResilience(identity.name, {
+  if (deps.care !== undefined && usesCare(binding, deps.defaults, deps.care())) {
+    plan.care = resolveOutboundCare(identity.name, {
       binding,
       defaults: deps.defaults,
-      runtime: deps.resilience(),
-      legacyRetry: plan.retry,
+      runtime: deps.care(),
+      legacyTries: plan.retry,
       idempotencyEnabled: plan.idempotency !== undefined,
       adHoc: deps.adHoc === true,
     });

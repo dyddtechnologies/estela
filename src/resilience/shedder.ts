@@ -1,21 +1,21 @@
-import type { ResilienceExecutor } from './executor';
-import type { InboundShedContext, ResilienceContext } from './resilience.types';
+import type { CareExecutor } from './executor';
+import type { InboundCareContext, CareContext } from './resilience.types';
 
 /**
- * Inbound load shedding (RS-37): bulkhead and rate limit only, through a resilience executor
- * whose call is held open until the caller releases it, so the slot lives as long as the request.
- * `admit` rejects with `BulkheadFullError` or `RateLimitedError` before anything is dispatched.
+ * Inbound care (RS-37): lanes and pace only, through a care executor whose call is held open
+ * until the caller releases it, so the lane lives as long as the request.
+ * `admit` rejects with `LanesFullError` or `OverPaceError` before anything is dispatched.
  */
 export class LoadShedder {
-  constructor(private readonly executor: ResilienceExecutor<unknown>) {}
+  constructor(private readonly executor: CareExecutor<unknown>) {}
 
-  admit(ctx: InboundShedContext): Promise<() => void> {
+  admit(ctx: InboundCareContext): Promise<() => void> {
     return new Promise((admitted, rejected) => {
       let release: () => void = () => undefined;
       const held = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const call: Omit<ResilienceContext, 'attempt'> = {
+      const call: Omit<CareContext, 'tryNumber'> = {
         edge: 'inbound',
         binding: ctx.channel,
         channel: ctx.channel,

@@ -1,6 +1,6 @@
-import type { ResilienceClock } from './resilience.types';
+import type { CareClock } from './resilience.types';
 
-export type { ResilienceStatePort } from './resilience.types';
+export type { CareStatePort } from './resilience.types';
 
 /** Sentinel of a state-port call that did not answer in time. */
 const TIMED_OUT = Symbol('state-timeout');
@@ -12,16 +12,16 @@ export interface StateSwitchHooks {
 
 /**
  * D-REDIS-DOWN switch of one binding (RS-24): a state-port call waits at most
- * `min(stateTimeoutMs, remaining deadline)`; a throw or a timeout moves the binding to degraded
+ * `min(sharedStateWaitMs, remaining totalMs)`; a throw or a timeout moves the binding to degraded
  * local state (one event per transition), and the port is probed again at most once per
- * `stateProbeMs`. Each call is decided by exactly one source (I9).
+ * `sharedStateCheckMs`. Each call is decided by exactly one source (I9).
  */
 export class StateSwitch {
   private degraded = false;
   private nextProbeAt = 0;
 
   constructor(
-    private readonly clock: ResilienceClock,
+    private readonly clock: CareClock,
     private readonly timeoutMs: number,
     private readonly probeMs: number,
     private readonly hooks: StateSwitchHooks,

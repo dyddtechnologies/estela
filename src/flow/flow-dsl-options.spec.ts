@@ -41,8 +41,8 @@ describe('flow DSL options (RS-55, RS-57, RS-58 shape)', () => {
     expect(error.message).toContain("step 'x'");
   });
 
-  it('RU-57 resilience on filter, transform or reply fails the build with PRIMITIVE_NOT_ALLOWED', () => {
-    const policy = { resilience: { retry: { maxAttempts: 2 } } } as never;
+  it('RU-57 care on filter, transform or reply fails the build with CARE_PART_NOT_ALLOWED', () => {
+    const policy = { care: { tries: { max: 2 } } } as never;
     const error = definitionError(() =>
       IntegrationFlow.from('in')
         .filter(() => true, policy)
@@ -51,9 +51,9 @@ describe('flow DSL options (RS-55, RS-57, RS-58 shape)', () => {
         .build(),
     );
     expect(error.codes).toEqual([
-      'PRIMITIVE_NOT_ALLOWED',
-      'PRIMITIVE_NOT_ALLOWED',
-      'PRIMITIVE_NOT_ALLOWED',
+      'CARE_PART_NOT_ALLOWED',
+      'CARE_PART_NOT_ALLOWED',
+      'CARE_PART_NOT_ALLOWED',
     ]);
     expect(error.findings.map((finding) => finding.subject)).toEqual([
       "step 'filter#0'",
@@ -62,14 +62,14 @@ describe('flow DSL options (RS-55, RS-57, RS-58 shape)', () => {
     ]);
   });
 
-  it('RU-58 resilience on wireTap fails the build with WIRETAP_RESILIENCE', () => {
+  it('RU-58 care on wireTap fails the build with WIRETAP_CARE', () => {
     const error = definitionError(() =>
       IntegrationFlow.from('in')
-        .wireTap('tap', { resilience: { retry: { maxAttempts: 2 } } } as never)
+        .wireTap('tap', { care: { tries: { max: 2 } } } as never)
         .build(),
     );
-    expect(error.codes).toEqual(['WIRETAP_RESILIENCE']);
-    expect(error.findings[0]?.path).toBe('resilience');
+    expect(error.codes).toEqual(['WIRETAP_CARE']);
+    expect(error.findings[0]?.path).toBe('care');
   });
 
   it('RU-57 publish(channel, opts) sets no routing key and publish(channel, key, opts) does', () => {
@@ -85,15 +85,15 @@ describe('flow DSL options (RS-55, RS-57, RS-58 shape)', () => {
   });
 
   it('RU-55 from(source, options) carries the flow options in BuiltFlow.options', () => {
-    const options = { resilience: { send: { retry: { maxAttempts: 2 } } } };
+    const options = { care: { send: { tries: { max: 2 } } } };
     expect(IntegrationFlow.from('in', options).to('out').build().options).toBe(options);
     expect('options' in IntegrationFlow.from('in').to('out').build()).toBe(false);
   });
 
-  it('RU-66 describe() never shows a target policy reference', () => {
+  it('RU-66 describe() never shows a target care reference', () => {
     const flow = IntegrationFlow.from('in')
-      .jumpTo(['a', { channel: 'b', wait: false, resilience: { retry: false } }])
-      .fanoutTo([{ channel: 'c', resilience: 'p' }]);
+      .jumpTo(['a', { channel: 'b', wait: false, care: { tries: false } }])
+      .fanoutTo([{ channel: 'c', care: 'p' }]);
     expect(flow.inspect().steps).toEqual([
       { kind: 'jump', dests: [{ channel: 'a' }, { channel: 'b', wait: false }] },
       { kind: 'fanout', dests: [{ channel: 'c' }] },
@@ -119,6 +119,6 @@ describe('flow DSL options (RS-55, RS-57, RS-58 shape)', () => {
     }).attachTo(registry);
     await registry.sendMessage('in', createMessage('hi', { replyChannel: 'caller' }));
     expect(replies.map((msg) => msg.payload)).toEqual(['hi!']);
-    expect(replies[0]?.headers).not.toHaveProperty('degraded');
+    expect(replies[0]?.headers).not.toHaveProperty('planB');
   });
 });

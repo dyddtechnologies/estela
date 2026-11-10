@@ -1,4 +1,4 @@
-import type { ResilienceClock, ResilienceTimer } from '../resilience/resilience.types';
+import type { CareClock, CareTimer } from '../resilience/resilience.types';
 
 interface PendingTimer {
   at: number;
@@ -7,7 +7,7 @@ interface PendingTimer {
   cancelled: boolean;
 }
 
-export interface ManualResilienceClock extends ResilienceClock {
+export interface ManualCareClock extends CareClock {
   /** Moves both clocks forward, firing due timers in order and letting promises settle. */
   advance(ms: number): Promise<void>;
   /** Lets pending promise chains settle without moving time. */
@@ -18,14 +18,14 @@ export interface ManualResilienceClock extends ResilienceClock {
 
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-/** Deterministic clock for resilience tests (RS-47): no real timers, no jest fake timers. */
-export function manualResilienceClock(
+/** Deterministic clock for care tests (RS-47): no real timers, no jest fake timers. */
+export function manualCareClock(
   start = { monotonic: 0, wall: 1_700_000_000_000 },
-): ManualResilienceClock {
+): ManualCareClock {
   let now = 0;
   let seq = 0;
   const timers: PendingTimer[] = [];
-  const schedule = (ms: number, fn: () => void): ResilienceTimer => {
+  const schedule = (ms: number, fn: () => void): CareTimer => {
     seq += 1;
     const timer: PendingTimer = { at: now + Math.max(0, ms), seq, fn, cancelled: false };
     timers.push(timer);

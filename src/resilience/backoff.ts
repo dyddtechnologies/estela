@@ -1,4 +1,4 @@
-/** Jitter applied to an exponential delay. */
+/** Random spread of an exponential delay; the 0.9.0 saga `RetryPolicy.jitter` values. */
 export type JitterMode = 'full' | 'equal' | 'none';
 
 /** Upper bound of total attempts, shared by the saga retry policy and resilience retries. */

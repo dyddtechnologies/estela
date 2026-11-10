@@ -3,34 +3,30 @@ import * as main from '../src/index';
 import * as testing from '../src/testing/index';
 
 const MAIN_VALUES = [
-  'ResilienceError',
-  'CircuitOpenError',
-  'BulkheadFullError',
-  'RateLimitedError',
-  'DeadlineExceededError',
-  'FallbackFailedError',
-  'ResilienceKeyError',
-  'ResilienceDefinitionError',
-  'ResilienceExecutor',
-  'ResilienceRegistry',
-  'currentResilienceSignal',
+  'CareError',
+  'ValveShutError',
+  'LanesFullError',
+  'OverPaceError',
+  'OutOfTimeError',
+  'PlanBFailedError',
+  'CareKeyError',
+  'CareConfigError',
+  'CareExecutor',
+  'CareControl',
+  'currentTrySignal',
   'defaultRestClassifier',
   'defaultGrpcClassifier',
   'defaultInProcessClassifier',
-  'parseRetryAfter',
-  'parseRetryBudget',
-  'redisResilienceStatePort',
-  'InboundOverloadedError',
+  'parseServerWait',
+  'parseTriesLeft',
+  'redisCareState',
+  'InboundBusyError',
   'FlowDefinitionError',
 ];
 
-const TESTING_VALUES = [
-  'manualResilienceClock',
-  'MemoryResilienceStatePort',
-  'collectResilienceEvents',
-];
+const TESTING_VALUES = ['manualCareClock', 'MemoryCareState', 'collectCareEvents'];
 
-describe('resilience barrels (spec section 3.9)', () => {
+describe('care barrels (spec section 3.9)', () => {
   it.each(MAIN_VALUES)('@estela/nest exports %s', (name) => {
     expect((main as Record<string, unknown>)[name]).toBeDefined();
   });

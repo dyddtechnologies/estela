@@ -8,11 +8,11 @@ import { IntegrationFlow, type FlowDefinition } from './flow/integration-flow';
 import { ChannelGraph } from './graph/channel-graph';
 import {
   IntegrationModule,
-  RESILIENCE_RUNTIME,
+  CARE_ENGINE,
   type IntegrationModuleOptions,
 } from './integration.module';
-import { ResilienceDefinitionError } from './resilience/resilience.errors';
-import type { ResilienceRuntime } from './resilience/runtime';
+import { CareConfigError } from './resilience/resilience.errors';
+import type { CareEngine } from './resilience/runtime';
 
 const flaky = (): Error => Object.assign(new Error('flaky'), { retryable: true });
 
@@ -41,7 +41,7 @@ class ChannelPolicyActivator {
 
 @Injectable()
 class ProfileActivator {
-  @ServiceActivator('profiled.in', { resilience: 'act-std' })
+  @ServiceActivator('profiled.in', { care: 'act-std' })
   run(): string {
     return 'ok';
   }
@@ -78,18 +78,18 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it('RU-56 channel resilience applies to senders into the channel and activators on it, never to inbound or to handle steps', async () => {
+  it('RU-56 channel care applies to senders into the channel and activators on it, never to inbound or to handle steps', async () => {
     const moduleRef = await boot(
       {
-        resilience: {},
+        care: {},
         channels: [
           { name: 'in', type: 'direct' },
           {
             name: 'c',
             type: 'direct',
-            resilience: { retry: { maxAttempts: 3, idempotent: true, backoff: 0 } },
+            care: { tries: { max: 3, idempotent: true, spacing: 0 } },
           },
-          { name: 'c.src', type: 'direct', resilience: { retry: { maxAttempts: 3 } } },
+          { name: 'c.src', type: 'direct', care: { tries: { max: 3 } } },
         ],
       },
       [
@@ -98,7 +98,7 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
       ],
       [StackedActivator],
     );
-    const stacked = warnings.filter((line) => line.startsWith('RETRY_STACKED'));
+    const stacked = warnings.filter((line) => line.startsWith('TRIES_STACKED'));
     expect(stacked).toHaveLength(1);
     expect(stacked[0]).toContain("flow 'sender' step 'to#0' target 'c'");
     expect(stacked[0]).toContain('activator StackedActivator.run');
@@ -111,14 +111,14 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     await moduleRef.close();
   });
 
-  it('RU-56 an activator without its own policy inherits the resilience of its channel', async () => {
+  it('RU-56 an activator without its own care inherits the care of its channel', async () => {
     const moduleRef = await boot(
       {
         channels: [
           {
             name: 'act.in',
             type: 'direct',
-            resilience: { retry: { maxAttempts: 2, idempotent: true, backoff: 0 } },
+            care: { tries: { max: 2, idempotent: true, spacing: 0 } },
           },
         ],
       },
@@ -130,7 +130,7 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     await moduleRef.close();
   });
 
-  it('RU-66b graph shows step id, policy and retryGate only on configured steps', async () => {
+  it('RU-66b graph shows step id, care and repeatableBy only on configured steps', async () => {
     const plain = (): IntegrationFlow =>
       IntegrationFlow.from('p.in')
         .filter(() => true)
@@ -139,12 +139,12 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
         .to('out');
     const moduleRef = await boot(
       {
-        resilience: { policies: { 'jump-sla': { timeout: { perAttemptMs: 3000 } } } },
+        care: { profiles: { 'jump-sla': { patience: { eachTryMs: 3000 } } } },
         channels: [
           { name: 'p.in', type: 'direct' },
           { name: 'l.in', type: 'direct' },
           { name: 'svc', type: 'direct' },
-          { name: 'guarded', type: 'direct', resilience: { retry: { maxAttempts: 2 } } },
+          { name: 'guarded', type: 'direct', care: { tries: { max: 2 } } },
         ],
       },
       [
@@ -153,7 +153,7 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
           IntegrationFlow.from('l.in')
             .jump('svc', {
               id: 'credit',
-              resilience: { use: 'jump-sla', retry: { maxAttempts: 2, idempotent: true } },
+              care: { use: 'jump-sla', tries: { max: 2, idempotent: true } },
             })
             .handle((p) => p, { id: 'enrich' })
             .to('guarded'),
@@ -167,16 +167,16 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
       {
         kind: 'jump',
         id: 'credit',
-        dests: [{ channel: 'svc', policy: 'timeout 3s · retry x2', retryGate: 'declared' }],
+        dests: [{ channel: 'svc', care: 'patience 3s · tries x2', repeatableBy: 'declared' }],
       },
       { kind: 'handle', id: 'enrich' },
-      { kind: 'to', id: 'to#2', channel: 'guarded', policy: 'retry x2', retryGate: 'key' },
+      { kind: 'to', id: 'to#2', channel: 'guarded', care: 'tries x2', repeatableBy: 'key' },
     ]);
     const guarded = snapshot.nodes.find((node) => node.channel === 'guarded');
-    expect(guarded?.policy).toBe('retry x2');
-    expect(snapshot.nodes.find((node) => node.channel === 'svc')).not.toHaveProperty('policy');
-    expect(snapshot.module).toEqual({ policies: ['jump-sla'] });
-    expect(snapshot.mermaid).toContain('direct: guarded [retry x2]');
+    expect(guarded?.care).toBe('tries x2');
+    expect(snapshot.nodes.find((node) => node.channel === 'svc')).not.toHaveProperty('care');
+    expect(snapshot.module).toEqual({ careProfiles: ['jump-sla'] });
+    expect(snapshot.mermaid).toContain('direct: guarded [tries x2]');
     await moduleRef.close();
   });
 
@@ -186,7 +186,7 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     ]);
     const snapshot = moduleRef.get(ChannelGraph).snapshot(moduleRef.get(ChannelRegistry));
     expect(Object.keys(snapshot)).toEqual(['nodes', 'edges', 'flows', 'mermaid']);
-    expect(snapshot.nodes.every((node) => !('policy' in node))).toBe(true);
+    expect(snapshot.nodes.every((node) => !('care' in node))).toBe(true);
     await moduleRef.close();
   });
 
@@ -198,11 +198,11 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
           {
             channels: [{ name: 'profiled.in', type: 'direct' }],
             logging: { banner: false },
-            resilience: { policies: { 'act-std': { retry: { maxAttempts: 2 } } } },
+            care: { profiles: { 'act-std': { tries: { max: 2 } } } },
           },
           [
-            flowOf('a', () => IntegrationFlow.from('a.in').to('x', { resilience: 'missing-a' })),
-            flowOf('b', () => IntegrationFlow.from('b.in').jump('y', { resilience: 'missing-b' })),
+            flowOf('a', () => IntegrationFlow.from('a.in').to('x', { care: 'missing-a' })),
+            flowOf('b', () => IntegrationFlow.from('b.in').jump('y', { care: 'missing-b' })),
           ],
         ),
       ],
@@ -213,8 +213,8 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     } catch (error) {
       failure = error;
     }
-    expect(failure).toBeInstanceOf(ResilienceDefinitionError);
-    expect((failure as ResilienceDefinitionError).findings.map((f) => f.code)).toEqual([
+    expect(failure).toBeInstanceOf(CareConfigError);
+    expect((failure as CareConfigError).findings.map((f) => f.code)).toEqual([
       'UNKNOWN_PROFILE',
       'UNKNOWN_PROFILE',
     ]);
@@ -226,7 +226,7 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     const ok = await boot(
       {
         channels: [{ name: 'profiled.in', type: 'direct' }],
-        resilience: { policies: { 'act-std': { retry: { maxAttempts: 2 } } } },
+        care: { profiles: { 'act-std': { tries: { max: 2 } } } },
       },
       [],
       [ProfileActivator],
@@ -252,9 +252,9 @@ describe('IntegrationModule flow parameters (RS-56, RS-66, RS-67)', () => {
     });
   });
 
-  it('RU-62c application shutdown aborts the background attempts of the runtime', async () => {
+  it('RU-62c application shutdown aborts the background tries of the runtime', async () => {
     const moduleRef = await boot({ channels: [] }, []);
-    const runtime = moduleRef.get<ResilienceRuntime>(RESILIENCE_RUNTIME);
+    const runtime = moduleRef.get<CareEngine>(CARE_ENGINE);
     expect(runtime.shutdownSignal.aborted).toBe(false);
     await moduleRef.close();
     expect(runtime.shutdownSignal.aborted).toBe(true);

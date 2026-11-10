@@ -13,7 +13,7 @@ import {
   type FlowStep,
   type FlowTarget,
   type JumpOptions,
-  type ResilientStepOptions,
+  type CareStepOptions,
   type StepCommonOptions,
   type StepParams,
 } from './flow-step';
@@ -48,7 +48,7 @@ export type RouteFn = (
   msg: IntegrationMessage,
 ) => string | string[] | Promise<string | string[]>;
 
-/** Options of `wireTap`; resilience is never accepted there (RS-58). */
+/** Options of `wireTap`; care is never accepted there (RS-58). */
 export type WireTapOptions = StepCommonOptions;
 
 /** Effective id of the step at `index` (RS-57). */
@@ -58,12 +58,12 @@ export function stepIdOf(step: FlowStep, index: number): string {
 
 function paramsOf(
   opts: StepCommonOptions | undefined,
-  resilience: ResilientStepOptions['resilience'],
+  care: CareStepOptions['care'],
   targets?: readonly FlowTarget[],
 ): StepParams {
   const params: { -readonly [K in keyof StepParams]: StepParams[K] } = {};
   if (opts?.id !== undefined) params.id = opts.id;
-  if (resilience !== undefined) params.resilience = resilience;
+  if (care !== undefined) params.care = care;
   if (targets !== undefined) params.targets = targets;
   return params;
 }
@@ -86,31 +86,31 @@ export class IntegrationFlow {
   }
 
   filter(predicate: PredicateFn, opts?: StepCommonOptions): this {
-    this.refuseResilience('filter', opts);
+    this.refuseCare('filter', opts);
     return this.push(new FilterStep(predicate, paramsOf(opts, undefined)));
   }
 
   transform(fn: MapFn, opts?: StepCommonOptions): this {
-    this.refuseResilience('transform', opts);
+    this.refuseCare('transform', opts);
     return this.push(new TransformStep(fn, paramsOf(opts, undefined)));
   }
 
-  handle(fn: MapFn, opts?: ResilientStepOptions): this {
-    return this.push(new HandleStep(fn, paramsOf(opts, opts?.resilience)));
+  handle(fn: MapFn, opts?: CareStepOptions): this {
+    return this.push(new HandleStep(fn, paramsOf(opts, opts?.care)));
   }
 
   wireTap(channel: string, opts?: WireTapOptions): this {
-    this.refuseResilience('wireTap', opts);
+    this.refuseCare('wireTap', opts);
     return this.push(new WireTapStep(channel, paramsOf(opts, undefined)));
   }
 
-  fanoutTo(dests: readonly FlowDest[], opts?: ResilientStepOptions): this {
-    const params = paramsOf(opts, opts?.resilience, normalizeDests(dests));
+  fanoutTo(dests: readonly FlowDest[], opts?: CareStepOptions): this {
+    const params = paramsOf(opts, opts?.care, normalizeDests(dests));
     return this.push(new FanoutStep(dests, params));
   }
 
-  jumpTo(dests: readonly FlowDest[], opts?: ResilientStepOptions): this {
-    const params = paramsOf(opts, opts?.resilience, normalizeDests(dests));
+  jumpTo(dests: readonly FlowDest[], opts?: CareStepOptions): this {
+    const params = paramsOf(opts, opts?.care, normalizeDests(dests));
     return this.push(new JumpStep(dests, undefined, params));
   }
 
@@ -118,34 +118,30 @@ export class IntegrationFlow {
     const target: FanoutTargetInput = { channel };
     if (opts?.wait !== undefined) target.wait = opts.wait;
     if (opts?.timeoutMs !== undefined) target.timeoutMs = opts.timeoutMs;
-    const params = paramsOf(opts, opts?.resilience, [target]);
+    const params = paramsOf(opts, opts?.care, [target]);
     return this.push(new JumpStep([target], undefined, params));
   }
 
-  publish(channel: string, routingKey?: string, opts?: ResilientStepOptions): this;
-  publish(channel: string, opts: ResilientStepOptions): this;
-  publish(
-    channel: string,
-    second?: string | ResilientStepOptions,
-    third?: ResilientStepOptions,
-  ): this {
+  publish(channel: string, routingKey?: string, opts?: CareStepOptions): this;
+  publish(channel: string, opts: CareStepOptions): this;
+  publish(channel: string, second?: string | CareStepOptions, third?: CareStepOptions): this {
     // A string second argument is the routing key (RS-57 overload).
     const routingKey = typeof second === 'string' ? second : undefined;
     const opts = typeof second === 'object' ? second : third;
-    const params = paramsOf(opts, opts?.resilience, [{ channel }]);
+    const params = paramsOf(opts, opts?.care, [{ channel }]);
     return this.push(new PublishStep(channel, routingKey, params));
   }
 
-  route(fn: RouteFn, opts?: ResilientStepOptions): this {
-    return this.push(new RouteStep(fn, paramsOf(opts, opts?.resilience)));
+  route(fn: RouteFn, opts?: CareStepOptions): this {
+    return this.push(new RouteStep(fn, paramsOf(opts, opts?.care)));
   }
 
-  to(channel: string, opts?: ResilientStepOptions): this {
-    return this.push(new ToStep(channel, paramsOf(opts, opts?.resilience, [{ channel }])));
+  to(channel: string, opts?: CareStepOptions): this {
+    return this.push(new ToStep(channel, paramsOf(opts, opts?.care, [{ channel }])));
   }
 
   reply(options?: ReplyOptions & StepCommonOptions): this {
-    this.refuseResilience('reply', options);
+    this.refuseCare('reply', options);
     const { id, ...replyOptions } = options ?? {};
     const params = paramsOf(id === undefined ? undefined : { id }, undefined);
     return this.push(new ReplyStep(options === undefined ? undefined : replyOptions, params));
@@ -193,20 +189,17 @@ export class IntegrationFlow {
     return findings;
   }
 
-  /** RS-57, RS-58: a JavaScript caller can still pass `resilience` where the type refuses it. */
-  private refuseResilience(
-    kind: 'filter' | 'transform' | 'reply' | 'wireTap',
-    opts: unknown,
-  ): void {
-    const value = (opts as { resilience?: unknown } | undefined)?.resilience;
+  /** RS-57, RS-58: a JavaScript caller can still pass `care` where the type refuses it. */
+  private refuseCare(kind: 'filter' | 'transform' | 'reply' | 'wireTap', opts: unknown): void {
+    const value = (opts as { care?: unknown } | undefined)?.care;
     if (value === undefined) return;
     const id = (opts as { id?: string }).id ?? `${kind}#${this.steps.length}`;
     const wiretap = kind === 'wireTap';
     this.findings.push(
       flowFinding(
         `step '${id}'`,
-        'resilience',
-        wiretap ? FLOW_SHAPE_CODES.wiretapResilience : FLOW_SHAPE_CODES.primitiveNotAllowed,
+        'care',
+        wiretap ? FLOW_SHAPE_CODES.wiretapCare : FLOW_SHAPE_CODES.carePartNotAllowed,
         wiretap ? 'is never accepted on wireTap' : `is not accepted on ${kind}`,
       ),
     );

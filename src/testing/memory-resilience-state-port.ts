@@ -1,4 +1,4 @@
-import type { ResilienceStatePort } from '../resilience/resilience.types';
+import type { CareStatePort } from '../resilience/resilience.types';
 
 interface Bucket {
   tokens: number;
@@ -6,11 +6,11 @@ interface Bucket {
 }
 
 /**
- * In-memory `ResilienceStatePort` with fault injection (RS-47): `down()` makes every call throw,
- * `slow(ms)` delays answers on real timers (pair it with a short `stateTimeoutMs`), `hang()`
+ * In-memory `CareStatePort` with fault injection (RS-47): `down()` makes every call throw,
+ * `slow(ms)` delays answers on real timers (pair it with a short `sharedStateWaitMs`), `hang()`
  * never answers, and `failNext(n)` fails the next n calls. Time comes from `now`.
  */
-export class MemoryResilienceStatePort implements ResilienceStatePort {
+export class MemoryCareState implements CareStatePort {
   readonly calls: string[] = [];
   private readonly buckets = new Map<string, Bucket>();
   private readonly markers = new Map<string, number>();
@@ -54,31 +54,31 @@ export class MemoryResilienceStatePort implements ResilienceStatePort {
     return [...this.markers.keys()];
   }
 
-  async takeToken(
+  async takeTurn(
     key: string,
-    limitPerSec: number,
+    perSecond: number,
     burst: number,
-  ): Promise<{ granted: boolean; retryAfterMs: number }> {
-    await this.gate(`takeToken ${key}`);
+  ): Promise<{ granted: boolean; readyInMs: number }> {
+    await this.gate(`takeTurn ${key}`);
     const now = this.now();
     const bucket = this.buckets.get(key) ?? { tokens: burst, at: now };
-    bucket.tokens = Math.min(burst, bucket.tokens + ((now - bucket.at) * limitPerSec) / 1000);
+    bucket.tokens = Math.min(burst, bucket.tokens + ((now - bucket.at) * perSecond) / 1000);
     bucket.at = now;
     this.buckets.set(key, bucket);
     if (bucket.tokens >= 1) {
       bucket.tokens -= 1;
-      return { granted: true, retryAfterMs: 0 };
+      return { granted: true, readyInMs: 0 };
     }
-    return { granted: false, retryAfterMs: Math.ceil(((1 - bucket.tokens) * 1000) / limitPerSec) };
+    return { granted: false, readyInMs: Math.ceil(((1 - bucket.tokens) * 1000) / perSecond) };
   }
 
-  async markOpen(key: string, untilMs: number): Promise<void> {
-    await this.gate(`markOpen ${key}`);
+  async markShut(key: string, untilMs: number): Promise<void> {
+    await this.gate(`markShut ${key}`);
     this.markers.set(key, untilMs);
   }
 
-  async openUntil(key: string): Promise<number | undefined> {
-    await this.gate(`openUntil ${key}`);
+  async shutUntil(key: string): Promise<number | undefined> {
+    await this.gate(`shutUntil ${key}`);
     const until = this.markers.get(key);
     if (until !== undefined && until <= this.now()) {
       this.markers.delete(key);
@@ -87,16 +87,16 @@ export class MemoryResilienceStatePort implements ResilienceStatePort {
     return until;
   }
 
-  async tryProbeLease(key: string, leaseMs: number): Promise<boolean> {
-    await this.gate(`tryProbeLease ${key}`);
+  async claimProbe(key: string, leaseMs: number): Promise<boolean> {
+    await this.gate(`claimProbe ${key}`);
     const held = this.leases.get(key);
     if (held !== undefined && held > this.now()) return false;
     this.leases.set(key, this.now() + leaseMs);
     return true;
   }
 
-  async clearOpen(key: string): Promise<void> {
-    await this.gate(`clearOpen ${key}`);
+  async clearShut(key: string): Promise<void> {
+    await this.gate(`clearShut ${key}`);
     this.markers.delete(key);
   }
 

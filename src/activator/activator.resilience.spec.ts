@@ -6,11 +6,11 @@ import { ReplyGateway } from '../gateway/reply-gateway';
 import { IdempotencyService } from '../idempotency/idempotency.service';
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
 import { createMessage } from '../message';
-import { currentResilienceSignal } from '../resilience/executor';
-import { ResilienceDefinitionError } from '../resilience/resilience.errors';
-import type { ResilienceEvent, ResilienceModuleOptions } from '../resilience/resilience.types';
-import { DEGRADED_HEADER } from '../resilience/retry-budget';
-import { ResilienceRuntime } from '../resilience/runtime';
+import { currentTrySignal } from '../resilience/executor';
+import { CareConfigError } from '../resilience/resilience.errors';
+import type { CareEvent, CareModuleOptions } from '../resilience/resilience.types';
+import { PLAN_B_HEADER } from '../resilience/retry-budget';
+import { CareEngine } from '../resilience/runtime';
 import { TraceContext } from '../trace/trace-context';
 import { discoverActivators, subscribeActivators, type ActivatorDeps } from './activator-wrapper';
 
@@ -19,14 +19,14 @@ const flaky = (): Error => Object.assign(new Error('flaky'), { retryable: true }
 class RetryingActivator {
   calls = 0;
 
-  @ServiceActivator('retry.plain', { resilience: { retry: { maxAttempts: 2, backoff: 0 } } })
+  @ServiceActivator('retry.plain', { care: { tries: { max: 2, spacing: 0 } } })
   plain(): string {
     this.calls += 1;
     throw flaky();
   }
 
   @ServiceActivator('retry.idempotent', {
-    resilience: { retry: { maxAttempts: 2, backoff: 0, idempotent: true } },
+    care: { tries: { max: 2, spacing: 0, idempotent: true } },
   })
   idempotent(): string {
     this.calls += 1;
@@ -38,9 +38,9 @@ class RetryingActivator {
 class SignalActivator {
   signal: AbortSignal | undefined;
 
-  @ServiceActivator('signal.in', { resilience: { timeout: { perAttemptMs: 1000 } } })
+  @ServiceActivator('signal.in', { care: { patience: { eachTryMs: 1000 } } })
   run(): string {
-    this.signal = currentResilienceSignal();
+    this.signal = currentTrySignal();
     return 'done';
   }
 }
@@ -49,7 +49,7 @@ class FallbackActivator {
   calls = 0;
 
   @ServiceActivator('fb.in', {
-    resilience: { fallback: { value: () => 'fallback', on: ['transient'] } },
+    care: { planB: { value: () => 'plan-b', on: ['transient'] } },
   })
   run(): string {
     this.calls += 1;
@@ -57,7 +57,7 @@ class FallbackActivator {
   }
 }
 
-function world(options: ResilienceModuleOptions = {}) {
+function world(options: CareModuleOptions = {}) {
   const trace = new TraceContext();
   const registry = new ChannelRegistry({ trace });
   for (const name of ['error.channel']) registry.create({ name, type: 'pubsub' });
@@ -65,27 +65,27 @@ function world(options: ResilienceModuleOptions = {}) {
     registry.create({ name, type: 'direct' });
   const store = new MemoryIdempotencyStore();
   const idempotency = new IdempotencyService({ store });
-  const events: ResilienceEvent[] = [];
-  const runtime = new ResilienceRuntime({ ...options, events: { onEvent: (e) => events.push(e) } });
+  const events: CareEvent[] = [];
+  const runtime = new CareEngine({ ...options, events: { onEvent: (e) => events.push(e) } });
   const gateway = new ReplyGateway({ registry, trace, defaultTimeoutMs: 500 });
   const deps: ActivatorDeps = {
     registry,
     trace,
     errorChannel: 'error.channel',
     idempotency,
-    resilience: runtime,
+    care: runtime,
   };
   return { registry, store, idempotency, events, deps, gateway, runtime };
 }
 
-describe('@ServiceActivator resilience', () => {
-  it('RU-36a activator retries only when idempotent or keyed, inside one idempotency claim', async () => {
+describe('@ServiceActivator care', () => {
+  it('RU-36a activator extra tries only when idempotent or keyed, inside one idempotency claim', async () => {
     const w = world();
     const instance = new RetryingActivator();
     subscribeActivators(discoverActivators([instance]), w.deps);
     await expect(w.registry.send('retry.plain', {})).rejects.toThrow('flaky');
     expect(instance.calls).toBe(1);
-    expect(w.events.map((e) => e.type)).toEqual(['retry.suppressed']);
+    expect(w.events.map((e) => e.type)).toEqual(['try.held']);
 
     instance.calls = 0;
     const begin = jest.spyOn(w.idempotency, 'begin');
@@ -98,7 +98,7 @@ describe('@ServiceActivator resilience', () => {
     expect(instance.calls).toBe(2);
   });
 
-  it('RU-36b exposes the attempt signal through currentResilienceSignal', async () => {
+  it('RU-36b exposes the try signal through currentTrySignal', async () => {
     const w = world();
     const instance = new SignalActivator();
     subscribeActivators(discoverActivators([instance]), w.deps);
@@ -106,14 +106,14 @@ describe('@ServiceActivator resilience', () => {
     expect(instance.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('RU-27 activator claims are released, not completed, when a fallback ran during the message', async () => {
+  it('RU-27 activator claims are released, not completed, when a plan B ran during the message', async () => {
     const w = world();
     const instance = new FallbackActivator();
     subscribeActivators(discoverActivators([instance]), w.deps);
     const replies: unknown[] = [];
     const replyChannel = w.registry.create({ name: 'replies', type: 'direct' });
     replyChannel.subscribe((msg) => {
-      replies.push({ payload: msg.payload, degraded: msg.headers[DEGRADED_HEADER] });
+      replies.push({ payload: msg.payload, degraded: msg.headers[PLAN_B_HEADER] });
     });
     const msg = createMessage({}, { idempotencyKey: 'dup', replyChannel: 'replies' });
     await w.registry.sendMessage('fb.in', msg);
@@ -123,35 +123,35 @@ describe('@ServiceActivator resilience', () => {
     );
     expect(instance.calls).toBe(2);
     expect(replies).toEqual([
-      { payload: 'fallback', degraded: true },
-      { payload: 'fallback', degraded: true },
+      { payload: 'plan-b', degraded: true },
+      { payload: 'plan-b', degraded: true },
     ]);
     const record = await w.store.get('activator:FallbackActivator.run', 'dup');
     expect(record?.status).not.toBe('completed');
   });
 
-  it('refuses an invalid or unknown policy when the activator is subscribed', () => {
+  it('refuses an invalid or unknown care when the activator is subscribed', () => {
     class Bad {
-      @ServiceActivator('fb.in', { resilience: 'missing' })
+      @ServiceActivator('fb.in', { care: 'missing' })
       run(): void {}
     }
     const w = world();
     expect(() => subscribeActivators(discoverActivators([new Bad()]), w.deps)).toThrow(
-      ResilienceDefinitionError,
+      CareConfigError,
     );
   });
 
-  it('uses named policies of the runtime', async () => {
+  it('uses named profiles of the runtime', async () => {
     class Named {
       calls = 0;
 
-      @ServiceActivator('retry.plain', { resilience: { use: 'twice', retry: { backoff: 0 } } })
+      @ServiceActivator('retry.plain', { care: { use: 'twice', tries: { spacing: 0 } } })
       run(): void {
         this.calls += 1;
         throw flaky();
       }
     }
-    const w = world({ policies: { twice: { retry: { maxAttempts: 2, idempotent: true } } } });
+    const w = world({ profiles: { twice: { tries: { max: 2, idempotent: true } } } });
     const instance = new Named();
     subscribeActivators(discoverActivators([instance]), w.deps);
     await w.registry.send('retry.plain', {}).catch(() => undefined);

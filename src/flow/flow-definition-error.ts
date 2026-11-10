@@ -4,9 +4,9 @@ export type { FlowParameterFinding };
 
 /** Finding codes about the shape of a flow, owned by the `flow` concern (RS-57, RS-58, RS-67). */
 export const FLOW_SHAPE_CODES = {
-  wiretapResilience: 'WIRETAP_RESILIENCE',
+  wiretapCare: 'WIRETAP_CARE',
   duplicateStepId: 'DUPLICATE_STEP_ID',
-  primitiveNotAllowed: 'PRIMITIVE_NOT_ALLOWED',
+  carePartNotAllowed: 'CARE_PART_NOT_ALLOWED',
 } as const;
 
 function summarize(findings: readonly FlowParameterFinding[]): string {

@@ -1,27 +1,27 @@
 import { randomInt } from 'node:crypto';
-import { ResilienceExecutor, type ResilienceDeps, type ResilienceEdgeAdapter } from './executor';
-import { ResilienceObserver } from './observability';
-import { RuntimeResilienceRegistry } from './registry';
-import { ResilienceDefinitionError } from './resilience.errors';
+import { CareExecutor, type CareDeps, type CareEdgeAdapter } from './executor';
+import { CareObserver } from './observability';
+import { RuntimeCareControl } from './registry';
+import { CareConfigError } from './resilience.errors';
 import {
-  resolveResiliencePlan,
+  resolveCarePlan,
   validateProfiles,
-  type ResiliencePlan,
+  type CarePlan,
   type ResolvePlanOptions,
 } from './resilience.plan';
-import { RETRY_BUDGET_HEADER } from './retry-budget';
+import { TRIES_LEFT_HEADER } from './retry-budget';
 import type {
-  ResilienceClock,
-  ResilienceContext,
-  ResilienceEdgeKind,
-  ResilienceEvent,
-  ResilienceLogger,
-  ResilienceModuleOptions,
-  ResiliencePolicyRef,
+  CareClock,
+  CareContext,
+  CareEdge,
+  CareEvent,
+  CareLogger,
+  CareModuleOptions,
+  CareRefOf,
 } from './resilience.types';
-import { systemResilienceClock } from './timeout';
+import { systemCareClock } from './timeout';
 
-export const DEFAULT_RESILIENCE_EVENTS_CHANNEL = 'estela.resilience.events';
+export const DEFAULT_CARE_EVENTS_CHANNEL = 'estela.care.events';
 
 export type RequestReplyFn = (
   channel: string,
@@ -29,49 +29,49 @@ export type RequestReplyFn = (
   headers: Record<string, unknown>,
 ) => Promise<unknown>;
 
-export interface ResilienceRuntimeInit {
-  /** True under forRoot({ resilience }): retry budget, events channel and registry are on. */
+export interface CareEngineInit {
+  /** True under forRoot({ care }): tries left, events channel and control are on. */
   enabled?: boolean;
-  logger?: ResilienceLogger;
+  logger?: CareLogger;
 }
 
 /** RS-53, RS-54: profiles and reserved defaults fail the boot before any subject resolves them. */
-function validateModuleOptions(options: ResilienceModuleOptions): void {
-  validateProfiles(options.policies);
+function validateModuleOptions(options: CareModuleOptions): void {
+  validateProfiles(options.profiles);
   if (options.defaults?.inbound !== undefined) {
-    throw new ResilienceDefinitionError(
-      'resilience',
+    throw new CareConfigError(
+      'care',
       'defaults.inbound',
-      'is not allowed; inbound load shedding comes from InboundDefaults.resilience',
+      'is not allowed; inbound care comes from InboundDefaults.care',
     );
   }
 }
 
 /**
- * Module-wide resilience state: options, named policies, clock, observability and the registry
- * of executors. The module creates one; standalone gateways and saga runners create their own.
+ * Module-wide care engine: options, named profiles, clock, observability and the control over
+ * its executors. The module creates one; standalone gateways and saga runners create their own.
  */
-export class ResilienceRuntime {
+export class CareEngine {
   readonly enabled: boolean;
-  readonly clock: ResilienceClock;
+  readonly clock: CareClock;
   readonly random: (maxExclusive: number) => number;
-  readonly observer: ResilienceObserver;
-  readonly registry = new RuntimeResilienceRegistry();
-  private publisher: ((event: ResilienceEvent) => Promise<void>) | undefined;
+  readonly observer: CareObserver;
+  readonly control = new RuntimeCareControl();
+  private publisher: ((event: CareEvent) => Promise<void>) | undefined;
   private requestReply: RequestReplyFn | undefined;
-  private readonly channelPolicies = new Map<string, ResiliencePolicyRef>();
+  private readonly channelCare = new Map<string, CareRefOf>();
   private readonly stopping = new AbortController();
 
   constructor(
-    readonly options: ResilienceModuleOptions = {},
-    init: ResilienceRuntimeInit = {},
+    readonly options: CareModuleOptions = {},
+    init: CareEngineInit = {},
   ) {
     this.enabled = init.enabled ?? true;
     validateModuleOptions(options);
-    this.clock = options.clock ?? systemResilienceClock;
+    this.clock = options.clock ?? systemCareClock;
     this.random = options.random ?? ((max) => randomInt(max));
     const logger = options.logger ?? init.logger;
-    this.observer = new ResilienceObserver({
+    this.observer = new CareObserver({
       clock: this.clock,
       ...(logger === undefined ? {} : { logger }),
       ...(options.metrics === undefined ? {} : { metrics: options.metrics }),
@@ -85,24 +85,24 @@ export class ResilienceRuntime {
     if (!this.enabled) return undefined;
     const channel = this.options.events?.channel;
     if (channel === false) return undefined;
-    return channel ?? DEFAULT_RESILIENCE_EVENTS_CHANNEL;
+    return channel ?? DEFAULT_CARE_EVENTS_CHANNEL;
   }
 
-  setPublisher(publish: (event: ResilienceEvent) => Promise<void>): void {
+  setPublisher(publish: (event: CareEvent) => Promise<void>): void {
     this.publisher = publish;
   }
 
-  /** Request/reply used by `fallback.channel` (the module wires its ReplyGateway). */
+  /** Request/reply used by `planB.channel` (the module wires its ReplyGateway). */
   setRequestReply(requestReply: RequestReplyFn): void {
     this.requestReply = requestReply;
   }
 
-  /** Runs a `fallback.channel` as request/reply with the payload and trace of the message. */
-  channelFallback(): (channel: string, ctx: ResilienceContext) => Promise<unknown> {
+  /** Runs a `planB.channel` as request/reply with the payload and trace of the message. */
+  channelPlanB(): (channel: string, ctx: CareContext) => Promise<unknown> {
     return (channel, ctx) => {
       const requestReply = this.requestReply;
       if (requestReply === undefined) {
-        return Promise.reject(new Error('fallback.channel needs a reply gateway'));
+        return Promise.reject(new Error('planB.channel needs a reply gateway'));
       }
       const headers = ctx.message?.headers;
       const init: Record<string, unknown> =
@@ -117,24 +117,24 @@ export class ResilienceRuntime {
     };
   }
 
-  /** RS-56: records the L2 references of the declared channels (`ChannelSpec.resilience`). */
-  declareChannels(specs: readonly { name: string; resilience?: ResiliencePolicyRef }[]): void {
+  /** RS-56: records the L2 references of the declared channels (`ChannelSpec.care`). */
+  declareChannels(specs: readonly { name: string; care?: CareRefOf }[]): void {
     for (const spec of specs) {
-      if (spec.resilience !== undefined) this.channelPolicies.set(spec.name, spec.resilience);
+      if (spec.care !== undefined) this.channelCare.set(spec.name, spec.care);
     }
   }
 
   /** L2 reference of a channel, or undefined when its spec sets none. */
-  channelPolicy(channel: string): ResiliencePolicyRef | undefined {
-    return this.channelPolicies.get(channel);
+  channelCareRef(channel: string): CareRefOf | undefined {
+    return this.channelCare.get(channel);
   }
 
-  /** Channels declared with a resilience reference, in declaration order. */
-  get channelsWithPolicy(): readonly string[] {
-    return [...this.channelPolicies.keys()];
+  /** Channels declared with a care reference, in declaration order. */
+  get channelsWithCare(): readonly string[] {
+    return [...this.channelCare.keys()];
   }
 
-  /** Aborted when the application shuts down; background flow attempts stop (RS-62). */
+  /** Aborted when the application shuts down; background flow tries stop (RS-62). */
   get shutdownSignal(): AbortSignal {
     return this.stopping.signal;
   }
@@ -143,21 +143,21 @@ export class ResilienceRuntime {
     this.stopping.abort();
   }
 
-  /** Header carrying the retry budget on the wire (RS-29). */
-  get budgetHeader(): string {
-    return this.options.retryBudget?.header ?? RETRY_BUDGET_HEADER;
+  /** Header carrying the tries left on the wire (RS-29). */
+  get triesLeftHeader(): string {
+    return this.options.triesLeft?.header ?? TRIES_LEFT_HEADER;
   }
 
-  /** Resolves and validates a plan with the named policies (RS-03, RS-43, RS-51). */
+  /** Resolves and validates a plan with the named profiles (RS-03, RS-43, RS-51). */
   plan(
     binding: string,
-    layers: readonly (ResiliencePolicyRef | undefined)[],
-    edge: ResilienceEdgeKind,
-    options: Omit<ResolvePlanOptions, 'policies'> = {},
-  ): ResiliencePlan {
-    const plan = resolveResiliencePlan(binding, layers, edge, {
+    layers: readonly (CareRefOf | undefined)[],
+    edge: CareEdge,
+    options: Omit<ResolvePlanOptions, 'profiles'> = {},
+  ): CarePlan {
+    const plan = resolveCarePlan(binding, layers, edge, {
       ...options,
-      ...(this.options.policies === undefined ? {} : { policies: this.options.policies }),
+      ...(this.options.profiles === undefined ? {} : { profiles: this.options.profiles }),
     });
     this.assertHashedKeys(plan);
     for (const warning of plan.warnings) this.observer.logger.warn(warning);
@@ -166,48 +166,48 @@ export class ResilienceRuntime {
 
   /** A tracked executor for `plan` (one per edge and binding). */
   executor<T>(
-    plan: ResiliencePlan,
-    adapter: ResilienceEdgeAdapter,
-    extra: Pick<ResilienceDeps, 'fallbackChannel' | 'defaultKey' | 'shutdown'> = {},
-  ): ResilienceExecutor<T> {
-    const executor = new ResilienceExecutor<T>(plan, adapter, { ...this.deps(), ...extra });
-    this.registry.track(executor);
+    plan: CarePlan,
+    adapter: CareEdgeAdapter,
+    extra: Pick<CareDeps, 'planBChannel' | 'defaultKey' | 'shutdown'> = {},
+  ): CareExecutor<T> {
+    const executor = new CareExecutor<T>(plan, adapter, { ...this.deps(), ...extra });
+    this.control.track(executor);
     return executor;
   }
 
-  deps(): ResilienceDeps {
-    const deps: ResilienceDeps = {
+  deps(): CareDeps {
+    const deps: CareDeps = {
       clock: this.clock,
       random: this.random,
       observer: this.observer,
-      budget: {
+      triesLeft: {
         enabled: this.enabled,
-        ...(this.options.retryBudget?.initial === undefined
+        ...(this.options.triesLeft?.initial === undefined
           ? {}
-          : { initial: this.options.retryBudget.initial }),
+          : { initial: this.options.triesLeft.initial }),
       },
-      stateTimeoutMs: this.options.stateTimeoutMs ?? 100,
-      stateProbeMs: this.options.stateProbeMs ?? 5000,
+      sharedStateWaitMs: this.options.sharedStateWaitMs ?? 100,
+      sharedStateCheckMs: this.options.sharedStateCheckMs ?? 5000,
     };
     if (this.options.keyLabel !== undefined) deps.keyLabel = this.options.keyLabel;
     if (this.options.keyHasher !== undefined) deps.keyHasher = this.options.keyHasher;
     return deps;
   }
 
-  /** RS-43: a custom key with shared state needs a module keyHasher; no unsalted fallback. */
-  private assertHashedKeys(plan: ResiliencePlan): void {
+  /** RS-43: a custom key with shared state needs a module keyHasher; no unsalted alternative. */
+  private assertHashedKeys(plan: CarePlan): void {
     if (this.options.keyHasher !== undefined) return;
-    if (plan.circuitBreaker?.key !== undefined && plan.circuitBreaker.state !== undefined) {
-      throw new ResilienceDefinitionError(
+    if (plan.valve?.key !== undefined && plan.valve.state !== undefined) {
+      throw new CareConfigError(
         plan.binding,
-        'circuitBreaker.state',
+        'valve.state',
         'needs a module keyHasher with a custom key',
       );
     }
-    if (plan.rateLimit?.key !== undefined && plan.rateLimit.state !== undefined) {
-      throw new ResilienceDefinitionError(
+    if (plan.pace?.key !== undefined && plan.pace.state !== undefined) {
+      throw new CareConfigError(
         plan.binding,
-        'rateLimit.state',
+        'pace.state',
         'needs a module keyHasher with a custom key',
       );
     }

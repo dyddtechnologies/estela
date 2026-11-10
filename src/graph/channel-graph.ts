@@ -6,8 +6,8 @@ export interface GraphInboundRef {
   transport: InboundTransport;
   requestReply: boolean;
   operation?: GraphqlOperation;
-  /** Load-shedding summary (RS-42); absent without a policy. */
-  policy?: string;
+  /** Inbound care summary (RS-42); absent without care. */
+  care?: string;
 }
 
 /** Outbound transports a channel can be bound to. */
@@ -17,8 +17,8 @@ export interface GraphOutboundRef {
   transport: OutboundTransport;
   /** `POST https://host/path` or `dynamic`; never a query string or credentials. */
   target: string;
-  /** Resilience summary (RS-42); absent without a policy. */
-  policy?: string;
+  /** Care summary (RS-42); absent without care. */
+  care?: string;
 }
 
 export interface GraphNode {
@@ -29,8 +29,8 @@ export interface GraphNode {
   outbounds: GraphOutboundRef[];
   activators: string[];
   flowsFrom: string[];
-  /** Summary of the channel's `resilience` reference (RS-66); absent without one. */
-  policy?: string;
+  /** Summary of the channel's `care` reference (RS-66); absent without one. */
+  care?: string;
 }
 
 export type GraphEdgeVia =
@@ -66,8 +66,8 @@ export interface GraphSnapshot {
   edges: GraphEdge[];
   flows: GraphFlowEntry[];
   mermaid: string;
-  /** Module-wide names (RS-66); present only when `resilience.policies` is non-empty. */
-  module?: { policies: string[] };
+  /** Module-wide names (RS-66); present only when `care.profiles` is non-empty. */
+  module?: { careProfiles: string[] };
 }
 
 interface DestLike {
@@ -91,9 +91,9 @@ function destChannels(step: Record<string, unknown>): { channel: string; wait?: 
   return out;
 }
 
-/** ` [policy]` for Mermaid labels, empty without a policy. */
-function policySuffix(policy: string | undefined): string {
-  return policy === undefined ? '' : ` [${policy}]`;
+/** ` [summary]` for Mermaid labels, empty without care. */
+function careSuffix(care: string | undefined): string {
+  return care === undefined ? '' : ` [${care}]`;
 }
 
 function sanitizeId(value: string): string {
@@ -110,17 +110,17 @@ export class ChannelGraph {
   private readonly activators = new Map<string, string[]>();
   private readonly flows: GraphFlowEntry[] = [];
   private readonly flowEdges: GraphEdge[] = [];
-  private readonly channelPolicies = new Map<string, string>();
-  private modulePolicies: string[] = [];
+  private readonly channelCare = new Map<string, string>();
+  private careProfiles: string[] = [];
 
-  /** RS-66: summary of a channel declared with `resilience`. */
-  recordChannelPolicy(channel: string, policy: string): void {
-    this.channelPolicies.set(channel, policy);
+  /** RS-66: summary of a channel declared with `care`. */
+  recordChannelCare(channel: string, care: string): void {
+    this.channelCare.set(channel, care);
   }
 
-  /** RS-66: names of the module's resilience profiles (names only, never values). */
-  recordModulePolicies(names: readonly string[]): void {
-    this.modulePolicies = [...names].sort((a, b) => a.localeCompare(b));
+  /** RS-66: names of the module's care profiles (names only, never values). */
+  recordCareProfiles(names: readonly string[]): void {
+    this.careProfiles = [...names].sort((a, b) => a.localeCompare(b));
   }
 
   recordActivator(channel: string, label: string): void {
@@ -129,14 +129,14 @@ export class ChannelGraph {
     this.activators.set(channel, labels);
   }
 
-  recordInbound(spec: InboundSpec, policy?: string): void {
+  recordInbound(spec: InboundSpec, care?: string): void {
     const refs = this.inbounds.get(spec.channel) ?? [];
     const ref: GraphInboundRef = {
       transport: spec.transport,
       requestReply: spec.requestReply === true,
     };
     if (spec.operation !== undefined) ref.operation = spec.operation;
-    if (policy !== undefined) ref.policy = policy;
+    if (care !== undefined) ref.care = care;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
   }
@@ -145,9 +145,9 @@ export class ChannelGraph {
   recordOutbound(channel: string, ref: GraphOutboundRef): void {
     const refs = this.outbounds.get(channel) ?? [];
     refs.push(
-      ref.policy === undefined
+      ref.care === undefined
         ? { transport: ref.transport, target: ref.target }
-        : { transport: ref.transport, target: ref.target, policy: ref.policy },
+        : { transport: ref.transport, target: ref.target, care: ref.care },
     );
     this.outbounds.set(channel, refs);
   }
@@ -199,8 +199,8 @@ export class ChannelGraph {
           .filter((flow) => flow.source === channel.name)
           .map((flow) => flow.name),
       };
-      const policy = this.channelPolicies.get(channel.name);
-      if (policy !== undefined) node.policy = policy;
+      const care = this.channelCare.get(channel.name);
+      if (care !== undefined) node.care = care;
       nodes.push(node);
       edges.push(...this.channelEdges(channel.name, bindings));
     }
@@ -212,7 +212,7 @@ export class ChannelGraph {
       flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })),
       mermaid,
     };
-    if (this.modulePolicies.length > 0) snapshot.module = { policies: [...this.modulePolicies] };
+    if (this.careProfiles.length > 0) snapshot.module = { careProfiles: [...this.careProfiles] };
     return snapshot;
   }
 
@@ -246,18 +246,18 @@ export class ChannelGraph {
     let outboundIndex = 0;
     for (const node of nodes) {
       lines.push(
-        `  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}${policySuffix(node.policy)}"]`,
+        `  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}${careSuffix(node.care)}"]`,
       );
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(
-          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}${policySuffix(ref.policy)}"] --> ${sanitizeId(node.channel)}`,
+          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}${careSuffix(ref.care)}"] --> ${sanitizeId(node.channel)}`,
         );
       }
       for (const ref of node.outbounds) {
         outboundIndex += 1;
         lines.push(
-          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}${policySuffix(ref.policy)}"]`,
+          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}${careSuffix(ref.care)}"]`,
         );
       }
       for (const label of node.activators) {

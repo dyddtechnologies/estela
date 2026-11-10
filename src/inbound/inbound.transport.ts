@@ -13,7 +13,7 @@ export interface InboundExtraction {
 export interface InboundTransportStrategy {
   readonly transport: InboundTransport;
   extract(context: ExecutionContext, handlerResult: unknown, spec: InboundSpec): InboundExtraction;
-  /** Raw headers before the handler runs (load-shedding keys, RS-37). Optional: `{}` without it. */
+  /** Raw headers before the handler runs (inbound `pace.key`, RS-37). Optional: `{}` without it. */
   rawHeaders?(context: ExecutionContext): Record<string, unknown>;
 }
 

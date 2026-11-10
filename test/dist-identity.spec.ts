@@ -58,47 +58,47 @@ d('dist: one class identity across the main and testing entries', () => {
 });
 
 /**
- * RU-46 (RS-46): a ResilienceError subclass built inside the testing bundle. `bindFlow` resolves
+ * RU-46 (RS-46): a CareError subclass built inside the testing bundle. `bindFlow` resolves
  * the flow's parameters with the testing entry's own copy of FlowParameterResolver (the CJS build
- * inlines it), so an unknown profile throws that copy's ResilienceDefinitionError; the brand must
+ * inlines it), so an unknown profile throws that copy's CareConfigError; the brand must
  * make it an instance of the main entry's classes.
  */
 const resilienceProbe = (load: string): string => `
 ${load}
-const runtime = new main.ResilienceRuntime({}, { enabled: false });
+const runtime = new main.CareEngine({}, { enabled: false });
 const registry = new main.ChannelRegistry({ trace: new main.TraceContext() });
-const flow = main.IntegrationFlow.from('ru46.in').handle((p) => p, { resilience: 'missing-profile' });
+const flow = main.IntegrationFlow.from('ru46.in').handle((p) => p, { care: 'missing-profile' });
 let error;
 try {
-  testing.bindFlow({ name: 'ru46', build: () => flow }, registry, { resilience: runtime });
+  testing.bindFlow({ name: 'ru46', build: () => flow }, registry, { care: runtime });
 } catch (caught) {
   error = caught;
 }
 console.log(JSON.stringify({
   name: error?.name,
   code: error?.code,
-  definition: error instanceof main.ResilienceDefinitionError,
-  resilience: error instanceof main.ResilienceError,
-  circuitOpen: error instanceof main.CircuitOpenError,
+  definition: error instanceof main.CareConfigError,
+  care: error instanceof main.CareError,
+  circuitOpen: error instanceof main.ValveShutError,
 }));
 `;
 
 const resilienceExpected = {
-  name: 'ResilienceDefinitionError',
+  name: 'CareConfigError',
   code: 'UNKNOWN_PROFILE',
   definition: true,
-  resilience: true,
+  care: true,
   circuitOpen: false,
 };
 
 d('dist: resilience errors keep instanceof across the main and testing entries (RU-46)', () => {
-  it('CJS: a ResilienceDefinitionError built by the testing bundle is a main-bundle instance', () => {
+  it('CJS: a CareConfigError built by the testing bundle is a main-bundle instance', () => {
     const load =
       "const main = require('./dist/index.js'); const testing = require('./dist/testing/index.js');";
     expect(run(resilienceProbe(load), 'commonjs')).toEqual(resilienceExpected);
   });
 
-  it('ESM: a ResilienceDefinitionError built by the testing bundle is a main-bundle instance', () => {
+  it('ESM: a CareConfigError built by the testing bundle is a main-bundle instance', () => {
     const load =
       "const main = await import('./dist/index.mjs'); const testing = await import('./dist/testing/index.mjs');";
     expect(run(resilienceProbe(load), 'module')).toEqual(resilienceExpected);

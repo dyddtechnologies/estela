@@ -1,171 +1,155 @@
-import { ResilienceDefinitionError } from './resilience.errors';
-import {
-  describePolicy,
-  expandPolicyRef,
-  resolveResiliencePlan,
-  validateProfiles,
-} from './resilience.plan';
-import type { NamedResiliencePolicy, ResiliencePolicy } from './resilience.types';
+import { CareConfigError } from './resilience.errors';
+import { describeCare, expandCareRef, resolveCarePlan, validateProfiles } from './resilience.plan';
+import type { CareProfile, Care } from './resilience.types';
 
-const resolve = (...layers: (ResiliencePolicy | string | undefined)[]) =>
-  resolveResiliencePlan('orders.http', layers, 'outbound-rest');
+const resolve = (...layers: (Care | string | undefined)[]) =>
+  resolveCarePlan('orders.http', layers, 'outbound-rest');
 
-function definitionError(fn: () => unknown): ResilienceDefinitionError {
+function definitionError(fn: () => unknown): CareConfigError {
   try {
     fn();
   } catch (error) {
-    expect(error).toBeInstanceOf(ResilienceDefinitionError);
-    return error as ResilienceDefinitionError;
+    expect(error).toBeInstanceOf(CareConfigError);
+    return error as CareConfigError;
   }
-  throw new Error('expected a ResilienceDefinitionError');
+  throw new Error('expected a CareConfigError');
 }
 
-describe('resolveResiliencePlan', () => {
-  it('RU-03 rejects invalid policies at declaration with the option path', () => {
-    expect(definitionError(() => resolve({ retry: { maxAttempts: 0 } })).message).toBe(
-      'orders.http: resilience.retry.maxAttempts must be an integer 1..20',
+describe('resolveCarePlan', () => {
+  it('RU-03 rejects invalid profiles at declaration with the option path', () => {
+    expect(definitionError(() => resolve({ tries: { max: 0 } })).message).toBe(
+      'orders.http: care.tries.max must be an integer 1..20',
     );
-    const cases: [ResiliencePolicy, string][] = [
-      [{ retry: { maxAttempts: 21 } }, 'retry.maxAttempts'],
-      [{ timeout: { perAttemptMs: -1 } }, 'timeout.perAttemptMs'],
-      [{ timeout: { deadlineMs: 0 } }, 'timeout.deadlineMs'],
-      [{ circuitBreaker: { openMs: 0 } }, 'circuitBreaker.openMs'],
-      [{ circuitBreaker: { minimumCalls: 0 } }, 'circuitBreaker.minimumCalls'],
-      [
-        { circuitBreaker: { minimumCalls: 10, window: { type: 'count', size: 5 } } },
-        'circuitBreaker.window.size',
-      ],
-      [{ circuitBreaker: { window: { type: 'time', sizeMs: 0 } } }, 'circuitBreaker.window.sizeMs'],
-      [{ circuitBreaker: { failureRateThreshold: 101 } }, 'circuitBreaker.failureRateThreshold'],
-      [{ circuitBreaker: { recordOn: [] } }, 'circuitBreaker.recordOn'],
-      [{ circuitBreaker: { recordOn: ['transient', 'transient'] } }, 'circuitBreaker.recordOn'],
-      [{ circuitBreaker: { quotaOpenMs: 0 } }, 'circuitBreaker.quotaOpenMs'],
-      [{ circuitBreaker: { state: {} as never } }, 'circuitBreaker.state'],
-      [{ bulkhead: { maxConcurrent: 0 } }, 'bulkhead.maxConcurrent'],
-      [{ bulkhead: { maxConcurrent: 1, maxQueue: -1 } }, 'bulkhead.maxQueue'],
-      [{ rateLimit: { limitPerSec: 0 } }, 'rateLimit.limitPerSec'],
-      [{ rateLimit: { limitPerSec: 1, maxWaitMs: -1 } }, 'rateLimit.maxWaitMs'],
-      [{ rateLimit: { limitPerSec: 1, replicasHint: 0 } }, 'rateLimit.replicasHint'],
-      [{ retry: { retryOn: ['quota' as never] } }, 'retry.retryOn'],
-      [{ retry: { retryOn: ['bogus' as never] } }, 'retry.retryOn'],
-      [{ retry: { backoff: { factor: 0.5 } } }, 'retry.backoff.factor'],
-      [{ retry: { backoff: { initialMs: 100, maxMs: 50 } } }, 'retry.backoff.maxMs'],
-      [{ fallback: {} }, 'fallback'],
-      [{ fallback: { value: () => 1, channel: 'x' } }, 'fallback'],
-      [{ fallback: { value: () => 1, on: ['nope' as never] } }, 'fallback.on'],
+    const cases: [Care, string][] = [
+      [{ tries: { max: 21 } }, 'tries.max'],
+      [{ patience: { eachTryMs: -1 } }, 'patience.eachTryMs'],
+      [{ patience: { totalMs: 0 } }, 'patience.totalMs'],
+      [{ valve: { shutMs: 0 } }, 'valve.shutMs'],
+      [{ valve: { minCalls: 0 } }, 'valve.minCalls'],
+      [{ valve: { minCalls: 10, lookBack: { lastCalls: 5 } } }, 'valve.lookBack.lastCalls'],
+      [{ valve: { lookBack: { lastMs: 0 } } }, 'valve.lookBack.lastMs'],
+      [{ valve: { failPercent: 101 } }, 'valve.failPercent'],
+      [{ valve: { countOn: [] } }, 'valve.countOn'],
+      [{ valve: { countOn: ['transient', 'transient'] } }, 'valve.countOn'],
+      [{ valve: { quotaShutMs: 0 } }, 'valve.quotaShutMs'],
+      [{ valve: { state: {} as never } }, 'valve.state'],
+      [{ lanes: { count: 0 } }, 'lanes.count'],
+      [{ lanes: { count: 1, waitlist: -1 } }, 'lanes.waitlist'],
+      [{ pace: { perSecond: 0 } }, 'pace.perSecond'],
+      [{ pace: { perSecond: 1, waitMs: -1 } }, 'pace.waitMs'],
+      [{ pace: { perSecond: 1, replicas: 0 } }, 'pace.replicas'],
+      [{ tries: { on: ['quota' as never] } }, 'tries.on'],
+      [{ tries: { on: ['bogus' as never] } }, 'tries.on'],
+      [{ tries: { spacing: { growth: 0.5 } } }, 'tries.spacing.growth'],
+      [{ tries: { spacing: { firstMs: 100, capMs: 50 } } }, 'tries.spacing.capMs'],
+      [{ planB: {} }, 'planB'],
+      [{ planB: { value: () => 1, channel: 'x' } }, 'planB'],
+      [{ planB: { value: () => 1, on: ['nope' as never] } }, 'planB.on'],
     ];
     for (const [policy, path] of cases) {
       expect(definitionError(() => resolve(policy)).path).toBe(path);
     }
   });
 
-  it('RU-04 replaces each primitive whole by the highest level that sets it and false disables', () => {
-    // The binding owns retry: the module's maxAttempts is not inherited (amended RS-04).
-    const plan = resolve({ retry: { backoff: 50 } }, { retry: { maxAttempts: 5 } });
-    expect(plan.retry?.maxAttempts).toBe(3);
-    expect(plan.retry?.delay(1, undefined, () => 0)).toBe(50);
-    const mixed = resolve(
-      { circuitBreaker: false },
-      { circuitBreaker: {}, timeout: { perAttemptMs: 700 } },
-    );
-    expect(mixed.circuitBreaker).toBeUndefined();
-    expect(mixed.perAttemptMs).toBe(700);
-    expect(resolve({ retry: { enabled: false, maxAttempts: 5 } }).retry).toBeUndefined();
+  it('RU-04 replaces each part whole by the highest level that sets it and false disables', () => {
+    // The binding owns tries: the module's max is not inherited (amended RS-04).
+    const plan = resolve({ tries: { spacing: 50 } }, { tries: { max: 5 } });
+    expect(plan.tries?.max).toBe(3);
+    expect(plan.tries?.delay(1, undefined, () => 0)).toBe(50);
+    const mixed = resolve({ valve: false }, { valve: {}, patience: { eachTryMs: 700 } });
+    expect(mixed.valve).toBeUndefined();
+    expect(mixed.eachTryMs).toBe(700);
+    expect(resolve({ tries: { enabled: false, max: 5 } }).tries).toBeUndefined();
     expect(resolve({}).empty).toBe(true);
   });
 
-  it('RU-52 resilience false means no policy at this level and below', () => {
-    const plan = resolveResiliencePlan('b', [false, { retry: { maxAttempts: 4 } }], 'activator');
+  it('RU-52 care false means no care at this level and below', () => {
+    const plan = resolveCarePlan('b', [false, { tries: { max: 4 } }], 'activator');
     expect(plan.empty).toBe(true);
-    const above = resolveResiliencePlan(
+    const above = resolveCarePlan(
       'b',
-      [{ timeout: { perAttemptMs: 5 } }, false, { retry: {} }],
+      [{ patience: { eachTryMs: 5 } }, false, { tries: {} }],
       'activator',
     );
-    expect(above.perAttemptMs).toBe(5);
-    expect(above.retry).toBeUndefined();
+    expect(above.eachTryMs).toBe(5);
+    expect(above.tries).toBeUndefined();
   });
 
-  it('RU-51 resolves named policies with inline fields deep-merged once and refuses unknown names', () => {
+  it('RU-51 resolves named profiles with inline fields deep-merged once and refuses unknown names', () => {
     const policies = {
-      billing: { retry: { maxAttempts: 5, backoff: 100 }, timeout: { perAttemptMs: 2000 } },
+      billing: { tries: { max: 5, spacing: 100 }, patience: { eachTryMs: 2000 } },
     };
-    const plan = resolveResiliencePlan(
-      'b',
-      [{ use: 'billing', retry: { backoff: 50 } }],
-      'activator',
-      { policies },
+    const plan = resolveCarePlan('b', [{ use: 'billing', tries: { spacing: 50 } }], 'activator', {
+      profiles: policies,
+    });
+    expect(plan.tries?.max).toBe(5);
+    expect(plan.tries?.delay(1, undefined, () => 0)).toBe(50);
+    expect(plan.eachTryMs).toBe(2000);
+    expect(resolveCarePlan('b', ['billing'], 'activator', { profiles: policies }).tries?.max).toBe(
+      5,
     );
-    expect(plan.retry?.maxAttempts).toBe(5);
-    expect(plan.retry?.delay(1, undefined, () => 0)).toBe(50);
-    expect(plan.perAttemptMs).toBe(2000);
     expect(
-      resolveResiliencePlan('b', ['billing'], 'activator', { policies }).retry?.maxAttempts,
-    ).toBe(5);
-    expect(
-      definitionError(() => resolveResiliencePlan('b', ['missing'], 'activator', { policies }))
+      definitionError(() => resolveCarePlan('b', ['missing'], 'activator', { profiles: policies }))
         .code,
     ).toBe('UNKNOWN_PROFILE');
-    expect(definitionError(() => resolveResiliencePlan('b', ['billing'], 'activator')).path).toBe(
-      'use',
-    );
-    const nested = { a: { use: 'b' } as NamedResiliencePolicy, b: {} };
-    expect(definitionError(() => expandPolicyRef('x', 'a', nested)).path).toBe('use');
-    const off = resolveResiliencePlan('b', [{ use: 'billing', retry: false }], 'activator', {
-      policies,
+    expect(definitionError(() => resolveCarePlan('b', ['billing'], 'activator')).path).toBe('use');
+    const nested = { a: { use: 'b' } as CareProfile, b: {} };
+    expect(definitionError(() => expandCareRef('x', 'a', nested)).path).toBe('use');
+    const off = resolveCarePlan('b', [{ use: 'billing', tries: false }], 'activator', {
+      profiles: policies,
     });
-    expect(off.retry).toBeUndefined();
+    expect(off.tries).toBeUndefined();
   });
 
   it('RU-53a resolves extends chains and fails on cycles and more than 8 hops', () => {
-    const policies: Record<string, NamedResiliencePolicy> = {
-      base: { retry: { maxAttempts: 2 }, timeout: { perAttemptMs: 100 } },
-      child: { extends: 'base', retry: { backoff: 10 } },
+    const profiles: Record<string, CareProfile> = {
+      base: { tries: { max: 2 }, patience: { eachTryMs: 100 } },
+      child: { extends: 'base', tries: { spacing: 10 } },
     };
-    const plan = resolveResiliencePlan('b', ['child'], 'activator', { policies });
-    expect(plan.retry?.maxAttempts).toBe(2);
-    expect(plan.retry?.delay(1, undefined, () => 0)).toBe(10);
-    expect(plan.perAttemptMs).toBe(100);
+    const plan = resolveCarePlan('b', ['child'], 'activator', { profiles });
+    expect(plan.tries?.max).toBe(2);
+    expect(plan.tries?.delay(1, undefined, () => 0)).toBe(10);
+    expect(plan.eachTryMs).toBe(100);
     expect(
       definitionError(() => validateProfiles({ a: { extends: 'b' }, b: { extends: 'a' } })).code,
     ).toBe('PROFILE_CYCLE');
-    const chain = (n: number): Record<string, NamedResiliencePolicy> =>
+    const chain = (n: number): Record<string, CareProfile> =>
       Object.fromEntries(
         Array.from({ length: n }, (_, i) => [`p${i}`, i === n - 1 ? {} : { extends: `p${i + 1}` }]),
       );
     expect(definitionError(() => validateProfiles(chain(10))).code).toBe('PROFILE_DEPTH');
     expect(() => validateProfiles(chain(9))).not.toThrow();
     expect(definitionError(() => validateProfiles({ 'Bad Name': {} })).path).toBe(
-      'policies.Bad Name',
+      'profiles.Bad Name',
     );
   });
 
-  it('refuses primitives not allowed on the edge', () => {
+  it('refuses parts not allowed on the edge', () => {
     const error = definitionError(() =>
-      resolveResiliencePlan('in', [{ retry: {} }], 'inbound', {
-        allowed: ['bulkhead', 'rateLimit'],
+      resolveCarePlan('in', [{ tries: {} }], 'inbound', {
+        allowed: ['lanes', 'pace'],
       }),
     );
-    expect(error.message).toBe('in: resilience.retry is not allowed on this edge');
+    expect(error.message).toBe('in: care.tries is not allowed on this edge');
   });
 
-  it('warns when the deadline is shorter than the per-attempt timeout', () => {
-    expect(resolve({ timeout: { perAttemptMs: 5000, deadlineMs: 1000 } }).warnings).toHaveLength(1);
+  it('warns when the total patience is shorter than the per-try eachTryMs', () => {
+    expect(resolve({ patience: { eachTryMs: 5000, totalMs: 1000 } }).warnings).toHaveLength(1);
   });
 
-  it('RU-42 summarizes a plan with kinds, timeouts and attempts only', () => {
+  it('RU-42 summarizes a plan with kinds, eachTryMs and tries only', () => {
     const plan = resolve({
-      timeout: { perAttemptMs: 2000, deadlineMs: 5000 },
-      retry: { maxAttempts: 3 },
-      circuitBreaker: { failureRateThreshold: 25 },
-      bulkhead: { maxConcurrent: 7 },
-      rateLimit: { limitPerSec: 9 },
-      fallback: { value: () => 1 },
+      patience: { eachTryMs: 2000, totalMs: 5000 },
+      tries: { max: 3 },
+      valve: { failPercent: 25 },
+      lanes: { count: 7 },
+      pace: { perSecond: 9 },
+      planB: { value: () => 1 },
     });
-    expect(describePolicy(plan)).toBe(
-      'timeout 2s · deadline 5s · retry x3 · breaker · bulkhead · ratelimit · fallback',
+    expect(describeCare(plan)).toBe(
+      'patience 2s · total 5s · tries x3 · valve · lanes · pace · plan-b',
     );
-    expect(describePolicy(resolve({ timeout: { perAttemptMs: 1500 } }))).toBe('timeout 1500ms');
-    expect(describePolicy(resolve({}))).toBeUndefined();
+    expect(describeCare(resolve({ patience: { eachTryMs: 1500 } }))).toBe('patience 1500ms');
+    expect(describeCare(resolve({}))).toBeUndefined();
   });
 });

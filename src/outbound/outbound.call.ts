@@ -9,8 +9,8 @@ import {
   type OutboundFailureInfo,
 } from './outbound.errors';
 import { assertOutboundTimeout, type OutboundRestPlan } from './outbound.plan';
-import type { OutboundResiliencePlan, RestAttemptData } from './outbound.resilience';
-import type { ResilienceAttempt } from '../resilience/executor';
+import type { OutboundCarePlan, RestAttemptData } from './outbound.resilience';
+import type { CareTry } from '../resilience/executor';
 import { buildOutboundRequest } from './outbound.request';
 import type {
   OutboundCallContext,
@@ -185,26 +185,26 @@ async function exchange(
   }
 }
 
-/** One attempt on the resilience executor: the response, or a thrown `OutboundRestError`. */
-async function resilientAttempt(
+/** One try on the care engine: the response, or a thrown `OutboundRestError`. */
+async function carefulTry(
   request: OutboundRestRequest,
   fetchFn: OutboundFetch,
-  attempt: ResilienceAttempt,
-  budgetHeader: string,
+  current: CareTry,
+  triesLeftHeader: string,
 ): Promise<OutboundRestResponse> {
   const info: OutboundFailureInfo = {
     binding: request.name,
     url: request.url,
     method: request.method,
-    attempts: attempt.attempt,
+    attempts: current.tryNumber,
   };
   const headers =
-    attempt.budgetOut === undefined
+    current.triesLeftOut === undefined
       ? request.headers
-      : { ...request.headers, [budgetHeader]: String(attempt.budgetOut) };
+      : { ...request.headers, [triesLeftHeader]: String(current.triesLeftOut) };
   let answer: Answer;
   try {
-    answer = await send({ ...request, headers }, fetchFn, attempt.signal);
+    answer = await send({ ...request, headers }, fetchFn, current.signal);
   } catch (error) {
     throw new OutboundNetworkError(info, error);
   }
@@ -213,22 +213,24 @@ async function resilientAttempt(
   throw new OutboundHttpError(info, status, answer.statusText, responseHeaders, body);
 }
 
-function attemptsOf(error: unknown): number {
-  const attempts = (error as { attempts?: unknown } | null | undefined)?.attempts;
-  return typeof attempts === 'number' ? attempts : 0;
+/** Tries of a care error, or the 0.9.0 `attempts` of an outbound error. */
+function triesOf(error: unknown): number {
+  const counted = error as { tries?: unknown; attempts?: unknown } | null | undefined;
+  if (typeof counted?.tries === 'number') return counted.tries;
+  return typeof counted?.attempts === 'number' ? counted.attempts : 0;
 }
 
 /**
- * The exchange under a resilience plan (RS-33): the executor wraps only the attempts; the
- * response mapper runs after a successful attempt, `mapError` once after the final failure, and a
- * fallback value is the reply as is.
+ * The exchange under a care plan (RS-33): the executor wraps only the tries; the response
+ * mapper runs after a successful try, `mapError` once after the final failure, and a plan B
+ * value is the reply as is.
  */
-async function resilientExchange(
+async function carefulExchange(
   plan: OutboundRestPlan,
-  resilience: OutboundResiliencePlan,
+  care: OutboundCarePlan,
   ctx: OutboundCallContext,
   request: OutboundRestRequest,
-  call: { fetchFn: OutboundFetch; perAttemptMs: number | undefined },
+  call: { fetchFn: OutboundFetch; eachTryMs: number | undefined },
 ): Promise<unknown> {
   const data: RestAttemptData = { ctx, request, startedAt: Date.now() };
   const context = (attempts: number): OutboundExchangeContext => ({
@@ -239,7 +241,7 @@ async function resilientExchange(
   });
   let result;
   try {
-    result = await resilience.executor.execute(
+    result = await care.executor.execute(
       {
         edge: 'outbound-rest',
         binding: plan.name,
@@ -247,17 +249,17 @@ async function resilientExchange(
         message: ctx.message,
         data,
       },
-      (attempt) => resilientAttempt(request, call.fetchFn, attempt, resilience.budgetHeader),
-      call.perAttemptMs === undefined ? {} : { perAttemptMs: call.perAttemptMs },
+      (current) => carefulTry(request, call.fetchFn, current, care.triesLeftHeader),
+      call.eachTryMs === undefined ? {} : { eachTryMs: call.eachTryMs },
     );
   } catch (error) {
     const failure: unknown =
-      (await plan.mapError?.(error as OutboundRestError, context(attemptsOf(error)))) ?? error;
+      (await plan.mapError?.(error as OutboundRestError, context(triesOf(error)))) ?? error;
     throw failure;
   }
-  if (result.fallback) return result.value;
+  if (result.planB) return result.value;
   return plan.response({
-    ...context(result.attempts),
+    ...context(result.tries),
     response: result.value as OutboundRestResponse,
   });
 }
@@ -275,12 +277,12 @@ export async function executeOutboundRest(
 ): Promise<unknown> {
   const { ctx, request } = await buildOutboundRequest(plan, message, call);
   const run = (): Promise<unknown> => {
-    const resilience = plan.resilience;
-    if (resilience === undefined) return exchange(plan, ctx, request, deps);
+    const care = plan.care;
+    if (care === undefined) return exchange(plan, ctx, request, deps);
     const override = call.timeoutMs ?? ctx.target.timeoutMs;
-    return resilientExchange(plan, resilience, ctx, request, {
+    return carefulExchange(plan, care, ctx, request, {
       fetchFn: plan.fetchFn ?? deps.fetchFn,
-      perAttemptMs: override === undefined ? undefined : assertOutboundTimeout(override),
+      eachTryMs: override === undefined ? undefined : assertOutboundTimeout(override),
     });
   };
   const log = deps.logger;

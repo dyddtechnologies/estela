@@ -1,11 +1,11 @@
 import { LruMap } from './lru';
-import type { RateLimitPlan } from './resilience.plan';
-import type { ResilienceClock } from './resilience.types';
+import type { PacePlan } from './resilience.plan';
+import type { CareClock } from './resilience.types';
 import type { StateSwitch } from './state-port';
 
 /** Outcome of a take: granted after `waitMs` (0 = now), or denied. */
 export type TakeOutcome =
-  { granted: true } | { granted: false; retryAfterMs: number; byDeadline: boolean };
+  { granted: true } | { granted: false; readyInMs: number; byDeadline: boolean };
 
 type Reservation = { granted: true; waitMs: number } | Extract<TakeOutcome, { granted: false }>;
 
@@ -32,9 +32,9 @@ class TokenBucket {
     }
     const waitMs = ((1 - this.tokens) * 1000) / this.rate;
     if (waitMs > maxWaitMs)
-      return { granted: false, retryAfterMs: Math.ceil(waitMs), byDeadline: false };
+      return { granted: false, readyInMs: Math.ceil(waitMs), byDeadline: false };
     if (now + waitMs >= deadlineAt) {
-      return { granted: false, retryAfterMs: Math.ceil(waitMs), byDeadline: true };
+      return { granted: false, readyInMs: Math.ceil(waitMs), byDeadline: true };
     }
     this.tokens -= 1;
     return { granted: true, waitMs };
@@ -51,8 +51,8 @@ export class RateLimiter {
   private readonly degraded = new LruMap<TokenBucket>();
 
   constructor(
-    private readonly plan: RateLimitPlan,
-    private readonly clock: ResilienceClock,
+    private readonly plan: PacePlan,
+    private readonly clock: CareClock,
     private readonly shared?: { switch: StateSwitch; stateKey: (key: string) => string },
   ) {}
 
@@ -62,32 +62,32 @@ export class RateLimiter {
 
   async take(key: string, deadlineAt: number): Promise<TakeOutcome> {
     if (this.shared === undefined)
-      return this.takeLocal(this.local, key, this.plan.limitPerSec, this.plan.burst, deadlineAt);
+      return this.takeLocal(this.local, key, this.plan.perSecond, this.plan.burst, deadlineAt);
     const started = this.clock.monotonic();
     for (;;) {
       const port = this.plan.state;
       const stateKey = this.shared.stateKey(key);
       const answer = await this.shared.switch.call(
-        () => port!.takeToken(stateKey, this.plan.limitPerSec, this.plan.burst),
+        () => port!.takeTurn(stateKey, this.plan.perSecond, this.plan.burst),
         deadlineAt,
       );
       if (answer === undefined) {
         return this.takeLocal(
           this.degraded,
           key,
-          this.plan.degradedLimitPerSec,
-          this.plan.degradedBurst,
+          this.plan.soloPerSecond,
+          this.plan.soloBurst,
           deadlineAt,
         );
       }
       if (answer.value.granted) return { granted: true };
-      const waitMs = Math.max(1, answer.value.retryAfterMs);
+      const waitMs = Math.max(1, answer.value.readyInMs);
       const now = this.clock.monotonic();
-      if (now - started + waitMs > this.plan.maxWaitMs) {
-        return { granted: false, retryAfterMs: waitMs, byDeadline: false };
+      if (now - started + waitMs > this.plan.waitMs) {
+        return { granted: false, readyInMs: waitMs, byDeadline: false };
       }
       if (now + waitMs >= deadlineAt)
-        return { granted: false, retryAfterMs: waitMs, byDeadline: true };
+        return { granted: false, readyInMs: waitMs, byDeadline: true };
       await this.clock.sleep(waitMs);
     }
   }
@@ -106,7 +106,7 @@ export class RateLimiter {
       bucket = new TokenBucket(rate, burst, now);
       buckets.set(key, bucket);
     }
-    const outcome = bucket.reserve(now, this.plan.maxWaitMs, deadlineAt);
+    const outcome = bucket.reserve(now, this.plan.waitMs, deadlineAt);
     if (!outcome.granted) return outcome;
     if (outcome.waitMs > 0) await this.clock.sleep(outcome.waitMs);
     return { granted: true };

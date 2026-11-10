@@ -6,7 +6,7 @@ import { ChannelRegistry } from './channel-registry';
 import { ServiceActivator } from './decorators';
 import { IntegrationModule, type IntegrationModuleOptions } from './integration.module';
 import type { IntegrationMessage } from './message';
-import { ResilienceScope } from './resilience/retry-budget';
+import { CareScope } from './resilience/retry-budget';
 import { TraceContext } from './trace/trace-context';
 import { waitFor } from './testing/index';
 
@@ -29,7 +29,7 @@ class Consumer {
   constructor(private readonly registry: ChannelRegistry) {}
 
   @ServiceActivator('budget.work', {
-    resilience: { retry: { maxAttempts: 3, idempotent: true, backoff: 0 } },
+    care: { tries: { max: 3, idempotent: true, spacing: 0 } },
   })
   async consume(_payload: unknown, msg: IntegrationMessage): Promise<void> {
     this.seen.push(msg);
@@ -70,7 +70,7 @@ async function runOnce(
   return consumer.seen;
 }
 
-describe('ChannelRegistry.send under a retry budget scope (RS-29)', () => {
+describe('ChannelRegistry.send under a tries left scope (RS-29)', () => {
   beforeEach(() => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -80,47 +80,47 @@ describe('ChannelRegistry.send under a retry budget scope (RS-29)', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it('RU-29b a message sent to a queue channel under a budget scope carries retryBudget and the consumer rebuilds the scope', async () => {
-    const moduleRef = await boot({ resilience: { events: { channel: false } } });
-    const seen = await runOnce(moduleRef, { retryBudget: 0, idempotencyKey: 'k-1' });
+  it('RU-29b a message sent to a queue channel under a tries left scope carries triesLeft and the consumer rebuilds the scope', async () => {
+    const moduleRef = await boot({ care: { events: { channel: false } } });
+    const seen = await runOnce(moduleRef, { triesLeft: 0, idempotencyKey: 'k-1' });
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.headers.retryBudget).toBe(0);
+    expect(seen[0]?.headers.triesLeft).toBe(0);
     await moduleRef.close();
   });
 
-  it('RU-29b without an incoming budget the queue consumer keeps its own retries', async () => {
-    const moduleRef = await boot({ resilience: { events: { channel: false } } });
+  it('RU-29b without an incoming tries left the queue consumer keeps its own extra tries', async () => {
+    const moduleRef = await boot({ care: { events: { channel: false } } });
     const seen = await runOnce(moduleRef, { idempotencyKey: 'k-2' });
     expect(seen).toHaveLength(3);
-    expect(seen[0]?.headers.retryBudget).toBeUndefined();
+    expect(seen[0]?.headers.triesLeft).toBeUndefined();
     await moduleRef.close();
   });
 
-  it('RU-29b without forRoot({ resilience }) no message gets a retryBudget header', async () => {
+  it('RU-29b without forRoot({ care }) no message gets a triesLeft header', async () => {
     const moduleRef = await boot({});
-    const seen = await runOnce(moduleRef, { retryBudget: 0, idempotencyKey: 'k-3' });
+    const seen = await runOnce(moduleRef, { triesLeft: 0, idempotencyKey: 'k-3' });
     expect(seen).toHaveLength(3);
-    expect(seen[0]?.headers.retryBudget).toBeUndefined();
+    expect(seen[0]?.headers.triesLeft).toBeUndefined();
     await moduleRef.close();
   });
 
-  it('copies the scope budget only when opted in, and never over an explicit header', async () => {
+  it('copies the scope tries left only when opted in, and never over an explicit header', async () => {
     const plain = new ChannelRegistry({ trace: new TraceContext() });
     const opted = new ChannelRegistry({ trace: new TraceContext() });
-    opted.inheritRetryBudget();
+    opted.inheritTriesLeft();
     const received: IntegrationMessage[] = [];
     for (const registry of [plain, opted]) {
       registry.create({ name: 'c', type: 'direct' }).subscribe((msg) => {
         received.push(msg);
       });
     }
-    await ResilienceScope.run({ budget: 0 }, async () => {
+    await CareScope.run({ triesLeft: 0 }, async () => {
       await plain.send('c', 1);
       await opted.send('c', 2);
-      await opted.send('c', 3, { retryBudget: 2 });
+      await opted.send('c', 3, { triesLeft: 2 });
     });
     await opted.send('c', 4);
-    expect(received.map((msg) => [msg.payload, msg.headers.retryBudget])).toEqual([
+    expect(received.map((msg) => [msg.payload, msg.headers.triesLeft])).toEqual([
       [1, undefined],
       [2, 0],
       [3, 2],

@@ -1,24 +1,24 @@
 import { performance } from 'node:perf_hooks';
 import { ChannelError } from '../channel';
-import type { ResilienceClock, ResilienceTimer } from './resilience.types';
+import type { CareClock, CareTimer } from './resilience.types';
 
 /**
- * Per-attempt timeout of an in-process edge (activator, saga step, flow function). It is
- * `retryable`, so `defaultInProcessClassifier` treats it as transient.
+ * One in-process try (activator, saga step, flow function) ran past `eachTryMs`.
+ * `defaultInProcessClassifier` treats it as transient.
  */
-export class AttemptTimeoutError extends ChannelError {
-  readonly retryable = true;
+export class TryOverdueError extends ChannelError {
+  readonly transient = true;
 
   constructor(
     readonly binding: string,
-    readonly timeoutMs: number,
+    readonly eachTryMs: number,
   ) {
-    super(`attempt of '${binding}' timed out after ${timeoutMs}ms`);
+    super(`try of '${binding}' ran past ${eachTryMs}ms`);
   }
 }
 
 /** Default clock: `performance.now()` for decisions, `Date.now()` for events and markers. */
-export const systemResilienceClock: ResilienceClock = {
+export const systemCareClock: CareClock = {
   monotonic: () => performance.now(),
   wall: () => Date.now(),
   sleep(ms, signal) {
@@ -38,7 +38,7 @@ export const systemResilienceClock: ResilienceClock = {
       signal?.addEventListener('abort', onAbort, { once: true });
     });
   },
-  setTimer(ms, fn): ResilienceTimer {
+  setTimer(ms, fn): CareTimer {
     const timer = setTimeout(fn, ms);
     return { cancel: () => clearTimeout(timer) };
   },
@@ -57,14 +57,14 @@ export class AttemptTimeout extends Error {
  * The returned promise rejects with `AttemptTimeout` wrapping `onTimeout()`.
  */
 export async function withAttemptTimeout<T>(
-  clock: ResilienceClock,
+  clock: CareClock,
   timeoutMs: number,
   work: (signal: AbortSignal | undefined) => Promise<T>,
   onTimeout: () => Error,
 ): Promise<T> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return work(undefined);
   const controller = new AbortController();
-  let timer: ResilienceTimer | undefined;
+  let timer: CareTimer | undefined;
   const expired = new Promise<never>((_resolve, reject) => {
     timer = clock.setTimer(timeoutMs, () => {
       reject(new AttemptTimeout(onTimeout()));

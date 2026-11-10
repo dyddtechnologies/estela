@@ -59,7 +59,7 @@ export {
   HttpExceptionFailureCodec,
   INBOUND_STORED_FAILURE_KEY,
   InboundIdempotencyInFlightError,
-  InboundOverloadedError,
+  InboundBusyError,
   InboundReplayedFailureError,
   markInboundFailure,
   readInboundFailureMark,
@@ -104,5 +104,5 @@ export * from './saga/state-machine';
 export * from './saga/transition';
 export * from './saga/postgres/index';
 
-// ---------- Resilience: policies, executor, classifiers, retry budget (SPI-445) ----------
+// ---------- Care: profiles, executor, classifiers, tries left (SPI-445) ----------
 export * from './resilience/index';

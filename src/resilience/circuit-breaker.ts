@@ -1,11 +1,11 @@
 import { LruMap } from './lru';
-import type { BreakerPlan } from './resilience.plan';
-import type { ResilienceClock } from './resilience.types';
+import type { ValvePlan } from './resilience.plan';
+import type { CareClock } from './resilience.types';
 import type { StateSwitch } from './state-port';
 
-export type BreakerState = 'closed' | 'open' | 'half-open';
+export type BreakerState = 'flowing' | 'shut' | 'probing';
 export type BreakerTransition =
-  'breaker.open' | 'breaker.half-open' | 'breaker.closed' | 'breaker.forced-open';
+  'valve.shut' | 'valve.probing' | 'valve.flowing' | 'valve.forced-shut';
 
 /** A shared manual opening lasts until reset; the marker needs a finite expiry. */
 const MANUAL_MARKER_MS = 2_147_483_647;
@@ -40,7 +40,7 @@ export interface Admission {
 
 export type AdmitResult =
   | { admitted: true; admission: Admission }
-  | { admitted: false; retryAfterMs?: number; forcedBy?: 'quota' };
+  | { admitted: false; readyInMs?: number; forcedBy?: 'quota' };
 
 export interface BreakerHooks {
   transition(type: BreakerTransition, key: string): void;
@@ -54,7 +54,7 @@ export interface SharedBreakerState {
 
 function newEntry(): Entry {
   return {
-    state: 'closed',
+    state: 'flowing',
     openUntil: 0,
     probes: 0,
     probeSuccesses: 0,
@@ -76,8 +76,8 @@ export class CircuitBreakers {
   private readonly entries = new LruMap<Entry>();
 
   constructor(
-    private readonly plan: BreakerPlan,
-    private readonly clock: ResilienceClock,
+    private readonly plan: ValvePlan,
+    private readonly clock: CareClock,
     private readonly hooks: BreakerHooks,
     private readonly shared?: SharedBreakerState,
   ) {}
@@ -88,7 +88,7 @@ export class CircuitBreakers {
 
   get openCount(): number {
     let count = 0;
-    for (const entry of this.entries.values()) if (entry.state !== 'closed') count += 1;
+    for (const entry of this.entries.values()) if (entry.state !== 'flowing') count += 1;
     return count;
   }
 
@@ -96,8 +96,8 @@ export class CircuitBreakers {
     const entry = this.entryFor(key);
     if (entry === undefined) return { admitted: true, admission: { key, probe: false } };
     this.maybeHalfOpen(key, entry);
-    if (entry.state === 'open') return this.rejected(entry);
-    if (entry.state === 'half-open') return this.admitProbe(key, entry, deadlineAt);
+    if (entry.state === 'shut') return this.rejected(entry);
+    if (entry.state === 'probing') return this.admitProbe(key, entry, deadlineAt);
     if (this.shared !== undefined) {
       const sharedResult = await this.checkShared(key, entry, deadlineAt);
       if (sharedResult !== undefined) return sharedResult;
@@ -114,7 +114,7 @@ export class CircuitBreakers {
     }
     entry.probes -= 1;
     entry.probeSuccesses += 1;
-    if (entry.state === 'half-open' && entry.probeSuccesses >= this.plan.halfOpenCalls) {
+    if (entry.state === 'probing' && entry.probeSuccesses >= this.plan.probes) {
       this.close(admission.key, entry);
     }
   }
@@ -124,12 +124,12 @@ export class CircuitBreakers {
     if (entry === undefined) return;
     if (admission.probe) {
       entry.probes -= 1;
-      this.open(admission.key, entry, this.plan.openMs, 'breaker.open');
+      this.open(admission.key, entry, this.plan.shutMs, 'valve.shut');
       return;
     }
-    if (entry.state !== 'closed') return;
+    if (entry.state !== 'flowing') return;
     this.record(entry, true);
-    if (this.tripped(entry)) this.open(admission.key, entry, this.plan.openMs, 'breaker.open');
+    if (this.tripped(entry)) this.open(admission.key, entry, this.plan.shutMs, 'valve.shut');
   }
 
   /** Frees a probe slot without changing the state (not recorded, rate limited, cut). */
@@ -142,10 +142,10 @@ export class CircuitBreakers {
     const entry = admission.entry ?? this.entries.peek(admission.key);
     if (admission.probe && entry !== undefined) entry.probes -= 1;
     if (entry === undefined) return;
-    if (entry.state === 'open' && entry.forcedBy === 'quota') return;
-    const ms = this.plan.quotaOpenMs;
+    if (entry.state === 'shut' && entry.forcedBy === 'quota') return;
+    const ms = this.plan.quotaShutMs;
     entry.forcedBy = 'quota';
-    this.open(admission.key, entry, ms === 'manual' ? Infinity : ms, 'breaker.forced-open');
+    this.open(admission.key, entry, ms === 'until-resumed' ? Infinity : ms, 'valve.forced-shut');
   }
 
   stateOf(key: string): { state: BreakerState; forcedBy?: 'quota' } | undefined {
@@ -164,7 +164,7 @@ export class CircuitBreakers {
       const stateKey = this.shared.stateKey(key);
       const port = this.plan.state;
       await this.shared.switch.call(
-        () => Promise.all([port?.clearOpen(stateKey), port?.clearOpen(`${stateKey}:quota`)]),
+        () => Promise.all([port?.clearShut(stateKey), port?.clearShut(`${stateKey}:quota`)]),
         Infinity,
       );
     }
@@ -178,7 +178,7 @@ export class CircuitBreakers {
     if (found !== undefined) return found;
     if (this.entries.size >= this.plan.maxKeys) {
       const evicted = this.entries.evictOne(
-        (entry) => entry.state === 'closed' && entry.probes === 0,
+        (entry) => entry.state === 'flowing' && entry.probes === 0,
       );
       if (!evicted) {
         this.hooks.capacity(key);
@@ -191,18 +191,18 @@ export class CircuitBreakers {
   }
 
   private maybeHalfOpen(key: string, entry: Entry): void {
-    if (entry.state !== 'open' || this.clock.monotonic() < entry.openUntil) return;
-    entry.state = 'half-open';
+    if (entry.state !== 'shut' || this.clock.monotonic() < entry.openUntil) return;
+    entry.state = 'probing';
     entry.probes = 0;
     entry.probeSuccesses = 0;
     entry.leaseHeld = false;
-    this.hooks.transition('breaker.half-open', key);
+    this.hooks.transition('valve.probing', key);
   }
 
   private rejected(entry: Entry): AdmitResult {
     const remaining = entry.openUntil - this.clock.monotonic();
     const result: AdmitResult = { admitted: false };
-    if (Number.isFinite(remaining)) result.retryAfterMs = Math.max(0, Math.ceil(remaining));
+    if (Number.isFinite(remaining)) result.readyInMs = Math.max(0, Math.ceil(remaining));
     if (entry.forcedBy !== undefined) result.forcedBy = entry.forcedBy;
     return result;
   }
@@ -212,7 +212,7 @@ export class CircuitBreakers {
    * so one pod probes per half-open period (RS-23). The slot is reserved while the lease is asked.
    */
   private async admitProbe(key: string, entry: Entry, deadlineAt: number): Promise<AdmitResult> {
-    if (entry.probes >= this.plan.halfOpenCalls) return { admitted: false };
+    if (entry.probes >= this.plan.probes) return { admitted: false };
     entry.probes += 1;
     if (this.shared !== undefined && !entry.leaseHeld) {
       if (!(await this.takeLease(key, deadlineAt))) {
@@ -229,7 +229,7 @@ export class CircuitBreakers {
     const port = this.plan.state!;
     const stateKey = this.shared!.stateKey(key);
     const lease = await this.shared!.switch.call(
-      () => port.tryProbeLease(stateKey, this.plan.openMs),
+      () => port.claimProbe(stateKey, this.plan.shutMs),
       deadlineAt,
     );
     return lease === undefined || lease.value;
@@ -248,7 +248,7 @@ export class CircuitBreakers {
       const stateKey = shared.stateKey(key);
       const port = this.plan.state!;
       const answer = await shared.switch.call(
-        () => Promise.all([port.openUntil(stateKey), port.openUntil(`${stateKey}:quota`)]),
+        () => Promise.all([port.shutUntil(stateKey), port.shutUntil(`${stateKey}:quota`)]),
         deadlineAt,
       );
       if (answer !== undefined) {
@@ -264,7 +264,7 @@ export class CircuitBreakers {
     if (!entry.sharedSeen || entry.sharedUntil === undefined) return undefined;
     const remaining = entry.sharedUntil - this.clock.wall();
     if (remaining > 0) {
-      const result: AdmitResult = { admitted: false, retryAfterMs: Math.ceil(remaining) };
+      const result: AdmitResult = { admitted: false, readyInMs: Math.ceil(remaining) };
       if (entry.sharedQuota) result.forcedBy = 'quota';
       return result;
     }
@@ -276,7 +276,7 @@ export class CircuitBreakers {
     // Degraded state: decide locally, the marker read earlier has expired.
     if (!(await this.takeLease(key, deadlineAt))) return { admitted: false };
     entry.sharedSeen = false;
-    entry.state = 'half-open';
+    entry.state = 'probing';
     entry.probes = 1;
     entry.probeSuccesses = 0;
     entry.leaseHeld = true;
@@ -286,38 +286,38 @@ export class CircuitBreakers {
   private record(entry: Entry, failure: boolean): void {
     const now = this.clock.monotonic();
     entry.outcomes.push({ at: now, failure });
-    const window = this.plan.window;
-    if (window.type === 'count') {
-      if (entry.outcomes.length > window.size)
-        entry.outcomes.splice(0, entry.outcomes.length - window.size);
+    const lookBack = this.plan.lookBack;
+    if ('lastCalls' in lookBack) {
+      if (entry.outcomes.length > lookBack.lastCalls)
+        entry.outcomes.splice(0, entry.outcomes.length - lookBack.lastCalls);
       return;
     }
-    const from = now - window.sizeMs;
+    const from = now - lookBack.lastMs;
     const firstKept = entry.outcomes.findIndex((outcome) => outcome.at > from);
     entry.outcomes.splice(0, firstKept === -1 ? entry.outcomes.length : firstKept);
   }
 
   private tripped(entry: Entry): boolean {
     const recorded = entry.outcomes.length;
-    if (recorded < this.plan.minimumCalls) return false;
+    if (recorded < this.plan.minCalls) return false;
     const failures = entry.outcomes.filter((outcome) => outcome.failure).length;
-    return (failures * 100) / recorded >= this.plan.failureRateThreshold;
+    return (failures * 100) / recorded >= this.plan.failPercent;
   }
 
   private open(key: string, entry: Entry, ms: number, type: BreakerTransition): void {
-    entry.state = 'open';
+    entry.state = 'shut';
     entry.leaseHeld = false;
     entry.openUntil = this.clock.monotonic() + ms;
     entry.outcomes = [];
     entry.probeSuccesses = 0;
-    if (type === 'breaker.open') delete entry.forcedBy;
+    if (type === 'valve.shut') delete entry.forcedBy;
     this.hooks.transition(type, key);
-    this.writeMarker(key, ms, type === 'breaker.forced-open');
+    this.writeMarker(key, ms, type === 'valve.forced-shut');
   }
 
   private close(key: string, entry: Entry): void {
-    const wasClosed = entry.state === 'closed' && entry.forcedBy === undefined;
-    entry.state = 'closed';
+    const wasClosed = entry.state === 'flowing' && entry.forcedBy === undefined;
+    entry.state = 'flowing';
     entry.openUntil = 0;
     entry.outcomes = [];
     entry.probes = 0;
@@ -325,7 +325,7 @@ export class CircuitBreakers {
     entry.sharedSeen = false;
     delete entry.sharedUntil;
     delete entry.forcedBy;
-    if (!wasClosed) this.hooks.transition('breaker.closed', key);
+    if (!wasClosed) this.hooks.transition('valve.flowing', key);
   }
 
   /** One write per transition; failures degrade through the switch, never the call. */
@@ -334,6 +334,6 @@ export class CircuitBreakers {
     const port = this.plan.state!;
     const stateKey = quota ? `${this.shared.stateKey(key)}:quota` : this.shared.stateKey(key);
     const until = this.clock.wall() + (Number.isFinite(ms) ? ms : MANUAL_MARKER_MS);
-    void this.shared.switch.call(() => port.markOpen(stateKey, until), Infinity);
+    void this.shared.switch.call(() => port.markShut(stateKey, until), Infinity);
   }
 }

@@ -7,19 +7,19 @@ import {
   type FlowStepContext,
   type StepOutcome,
   type StepParams,
-  type TargetPolicyPort,
+  type TargetCarePort,
 } from '../flow-step';
 import { openFirstMessageWait } from '../../channels/one-shot';
 import { JUMP_REPLY_HEADER, nextHop, newId, type IntegrationMessage } from '../../message';
-import { jumpUnderPolicy, LEGACY_JUMP_WAIT_MS, markIfDegraded } from '../flow-resilience';
+import { jumpWithCare, LEGACY_JUMP_WAIT_MS, markIfPlanB } from '../flow-resilience';
 import { reportFireAndForget } from './forget';
 
 /**
  * Jump: its own ephemeral reply `reply.<uuid>`; the parent keeps its `replyChannel`
  * (plan sec.8.1). Awaited -> timeout/errors fail the flow; forget -> error.channel.
  * Result lands in `headers.jumpReplies[channel]`; the parent payload is not overwritten.
- * A target with a policy runs its attempts through the resilience engine (RS-62); a fallback
- * value lands in `jumpReplies[channel]` with `jumpDegraded[channel] = true` (RS-64).
+ * A target with care runs its tries through the care engine (RS-62); a plan B value lands in
+ * `jumpReplies[channel]` with `jumpPlanB[channel] = true` (RS-64).
  */
 export class JumpStep implements FlowStep {
   readonly kind = 'jump' as const;
@@ -36,19 +36,19 @@ export class JumpStep implements FlowStep {
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
     const jumpReplies: Record<string, unknown> = { ...(ctx.msg.headers.jumpReplies ?? {}) };
-    const jumpDegraded: Record<string, boolean> = {};
+    const jumpPlanB: Record<string, boolean> = {};
     const awaited: Promise<void>[] = [];
     for (const target of normalizeDests(this.dests)) {
-      const policy = ctx.policy?.target(target.channel);
+      const care = ctx.care?.target(target.channel);
       const run =
-        policy === undefined
+        care === undefined
           ? this.runJump(
               ctx,
               target.channel,
               target.timeoutMs ?? this.defaultTimeoutMs,
               jumpReplies,
             )
-          : runWithPolicy(ctx, policy, target.channel, jumpReplies, jumpDegraded);
+          : runWithCare(ctx, care, target.channel, jumpReplies, jumpPlanB);
       if (target.wait === false) reportFireAndForget(ctx, target.channel, run, ctx.msg);
       else {
         awaited.push(run.then(() => undefined));
@@ -56,9 +56,9 @@ export class JumpStep implements FlowStep {
     }
     await Promise.all(awaited);
     const headers: IntegrationMessage['headers'] = { ...ctx.msg.headers, jumpReplies };
-    if (Object.keys(jumpDegraded).length > 0) {
-      const previous = (ctx.msg.headers.jumpDegraded ?? {}) as Record<string, boolean>;
-      headers.jumpDegraded = { ...previous, ...jumpDegraded };
+    if (Object.keys(jumpPlanB).length > 0) {
+      const previous = (ctx.msg.headers.jumpPlanB ?? {}) as Record<string, boolean>;
+      headers.jumpPlanB = { ...previous, ...jumpPlanB };
     }
     return { action: 'continue', msg: { payload: ctx.msg.payload, headers } };
   }
@@ -85,7 +85,7 @@ export class JumpStep implements FlowStep {
       hop.headers[JUMP_REPLY_HEADER] = '1'; // ADR-014: ephemeral-reply marker
       await ctx.registry.sendMessage(channel, hop);
       const reply = await wait.promise;
-      markIfDegraded(reply);
+      markIfPlanB(reply);
       jumpReplies[channel] = reply.payload;
     } finally {
       // A failed hop send abandons the wait: release its timer and subscription.
@@ -95,14 +95,14 @@ export class JumpStep implements FlowStep {
   }
 }
 
-async function runWithPolicy(
+async function runWithCare(
   ctx: FlowStepContext,
-  policy: TargetPolicyPort,
+  care: TargetCarePort,
   channel: string,
   jumpReplies: Record<string, unknown>,
-  jumpDegraded: Record<string, boolean>,
+  jumpPlanB: Record<string, boolean>,
 ): Promise<void> {
-  const result = await jumpUnderPolicy(ctx, policy, channel);
+  const result = await jumpWithCare(ctx, care, channel);
   jumpReplies[channel] = result.value;
-  if (result.fallback) jumpDegraded[channel] = true;
+  if (result.planB) jumpPlanB[channel] = true;
 }
