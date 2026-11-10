@@ -110,7 +110,7 @@ function refObject(ref: PrivacyRef | undefined): RefObject {
 }
 
 /** `idempotency.remember` joins the endpoint reference, so its `rememberReason` sits next to it. */
-function withRemember(
+export function withRemember(
   ref: PrivacyRef | undefined,
   remember: Remember | undefined,
 ): PrivacyRef | undefined {

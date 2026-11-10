@@ -16,6 +16,8 @@ import type { SagaDefinition, SagaStep, TransactionStep } from './saga';
 import { validateLockDeclaration, validateRetryPolicy } from './saga-definition';
 import { SagaCare } from './saga-resilience';
 import { SagaTracer } from './saga-tracer';
+import { SagaPrivacy, type SagaPrivacyOptions } from './saga-privacy';
+import type { RecordSealer } from '../sensitive/sealed-record';
 import {
   declaresLocks,
   DEFAULT_MAX_LOCKS_PER_UNIT,
@@ -56,6 +58,11 @@ export interface SagaRunnerOptions<Tx> {
    * left off). Without it, inline step care still runs on a default engine.
    */
   care?: CareModuleOptions | CareEngine;
+  /**
+   * Privacy (SPI-433): ledger `remember`, seal keys and the rules of the error lines. Without it
+   * the ledger keeps replies as they are and the error lines apply the baseline.
+   */
+  privacy?: SagaPrivacyOptions;
   /** Test seam; default node:timers/promises setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   /** Test seam; default node:crypto randomInt. */
@@ -75,6 +82,8 @@ interface RunContext<Ctx, Tx, Reply> {
   ctx: Ctx;
   state: RunState<Reply>;
   headers: MessageHeaders;
+  /** Ledger encoder fetched before the first unit (SD-33); absent keeps replies as they are. */
+  sealer: RecordSealer | undefined;
 }
 
 const DATABASE_KINDS = ['lock-timeout', 'deadlock', 'serialization'];
@@ -97,6 +106,7 @@ export class SagaRunner<Tx = unknown> {
   private readonly tracer: SagaTracer;
   private readonly units: UnitOfWorkExecutor<Tx>;
   private readonly care: SagaCare;
+  private readonly privacy: SagaPrivacy;
 
   private readonly maxLocksPerUnit: number;
 
@@ -106,7 +116,8 @@ export class SagaRunner<Tx = unknown> {
       throw new TypeError(`maxLocksPerUnit must be a positive integer, got ${String(max)}`);
     }
     this.maxLocksPerUnit = max;
-    this.tracer = new SagaTracer(options.logger);
+    this.privacy = new SagaPrivacy(options.privacy);
+    this.tracer = new SagaTracer(options.logger, this.privacy.engine);
     this.care = new SagaCare(options.care);
     this.units = new UnitOfWorkExecutor<Tx>({
       transactions: options.transactions,
@@ -230,7 +241,9 @@ export class SagaRunner<Tx = unknown> {
     const segments = segmentsOf(definition.steps);
     const key = this.options.ledger === undefined ? undefined : definition.idempotencyKey?.(ctx);
     const state: RunState<Reply> = key === undefined ? { claimed: false } : { key, claimed: false };
-    const run: RunContext<Ctx, Tx, Reply> = { definition, retry, ctx, state, headers };
+    // SD-32, SD-33: the seal key is fetched before any unit; a failure claims nothing.
+    const sealer = key === undefined ? undefined : await this.privacy.prepare();
+    const run: RunContext<Ctx, Tx, Reply> = { definition, retry, ctx, state, headers, sealer };
     let reply: { value: Reply } | undefined;
     let lastLocks: readonly LockRequest[] = [];
 
@@ -239,14 +252,14 @@ export class SagaRunner<Tx = unknown> {
         await this.runOutbound(run, segment.step, lastLocks, index);
         // A replay found by the claim of an outbound-first saga ends the run here: the segments
         // after it would resolve locks and run steps over a ctx the skipped outbound never filled.
-        if (state.replay !== undefined) return state.replay.response;
+        if (state.replay !== undefined) return this.replayed(run);
         continue;
       }
       const locks = resolveLocks(definition.name, segment.locks, ctx, this.maxLocksPerUnit);
       lastLocks = locks;
       const isLast = index === segments.length - 1;
       reply = await this.runUnitOfWork(run, segment, locks, index, isLast);
-      if (state.replay !== undefined) return state.replay.response;
+      if (state.replay !== undefined) return this.replayed(run);
     }
     if (reply !== undefined) return reply.value;
     return this.finishAfterOutbound(run);
@@ -302,7 +315,7 @@ export class SagaRunner<Tx = unknown> {
       }
       if (!isLast) return undefined;
       const value = definition.reply(ctx);
-      await this.recordIfClaimed(definition.name, tx, state, value);
+      await this.recordIfClaimed(run, tx, value);
       return { value };
     });
   }
@@ -361,11 +374,11 @@ export class SagaRunner<Tx = unknown> {
 
   private async finishAfterOutbound<Ctx, Reply>(run: RunContext<Ctx, Tx, Reply>): Promise<Reply> {
     const { definition, ctx, state } = run;
-    if (state.replay !== undefined) return state.replay.response;
+    if (state.replay !== undefined) return this.replayed(run);
     const value = definition.reply(ctx);
     if (state.claimed) {
       await this.units.execute(this.plan(run, 'record', []), (tx) =>
-        this.recordIfClaimed(definition.name, tx, state, value),
+        this.recordIfClaimed(run, tx, value),
       );
     }
     return value;
@@ -389,15 +402,24 @@ export class SagaRunner<Tx = unknown> {
     return true;
   }
 
-  private async recordIfClaimed<Reply>(
-    sagaName: string,
+  private async recordIfClaimed<Ctx, Reply>(
+    run: RunContext<Ctx, Tx, Reply>,
     tx: Tx,
-    state: RunState<Reply>,
     value: Reply,
   ): Promise<void> {
+    const { definition, state, sealer } = run;
     if (state.claimed && state.key !== undefined) {
-      await this.options.ledger?.record(tx, sagaName, state.key, value);
+      const stored = this.privacy.encode(sealer, definition.name, state.key, value);
+      await this.options.ledger?.record(tx, definition.name, state.key, stored);
     }
+  }
+
+  /** The stored reply, decoded after the claim's unit, outside any transaction (I9). */
+  private async replayed<Ctx, Reply>(run: RunContext<Ctx, Tx, Reply>): Promise<Reply> {
+    const { definition, state, ctx } = run;
+    const stored = state.replay?.response;
+    if (state.key === undefined) return stored as Reply;
+    return (await this.privacy.replay(definition.name, state.key, stored, ctx)) as Reply;
   }
 
   private traceHeaders(runOptions: SagaRunOptions): MessageHeaders {
