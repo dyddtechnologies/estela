@@ -18,6 +18,9 @@ export type FlowEdgeKind = 'flow-handle' | 'flow-jump' | 'flow-send';
 /** The 0.9.0 jump wait (`jump.step.ts`), kept when no level sets `eachTryMs` (RS-62). */
 export const LEGACY_JUMP_WAIT_MS = 10_000;
 
+/** Longest delay `setTimeout` accepts; the wait is always cancelled before it fires. */
+const MAX_TIMER_MS = 2_147_483_647;
+
 const REJECTED_CHANNEL_ERRORS: ReadonlySet<string> = new Set([
   'NoSubscriberError',
   'ChannelNotFoundError',
@@ -174,9 +177,12 @@ async function jumpTry(
 ): Promise<unknown> {
   const replyName = `reply.${newId()}`;
   const replyChannel = ctx.registry.create({ name: replyName, type: 'direct' });
+  // A try with eachTryMs is ended by the engine's timer on the care clock, which aborts the
+  // signal; a second real timer here would end it early under a manual clock.
+  const engineTimed = current.eachTryMs > 0 && current.signal !== undefined;
   const waitMs = current.eachTryMs > 0 ? current.eachTryMs : LEGACY_JUMP_WAIT_MS;
   const wait = openFirstMessageWait(replyChannel, {
-    timeoutMs: waitMs,
+    timeoutMs: engineTimed ? MAX_TIMER_MS : waitMs,
     name: channel,
     timeoutError: () => new JumpTimeoutError(channel, waitMs),
   });

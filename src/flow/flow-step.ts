@@ -152,7 +152,11 @@ export function describeDest(target: FlowTarget): Record<string, unknown> {
 }
 
 export class JumpTimeoutError extends Error {
-  constructor(channel: string, timeoutMs: number) {
+  constructor(
+    channel: string,
+    /** The wait that ran out, in ms. */
+    readonly timeoutMs: number,
+  ) {
     super(`jump a '${channel}' excedió el timeout (${timeoutMs}ms)`);
     this.name = 'JumpTimeoutError';
   }

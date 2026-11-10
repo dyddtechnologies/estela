@@ -14,6 +14,7 @@ import { TraceContext } from '../trace/trace-context';
 import { FlowExecutor } from './flow-executor';
 import { FlowParameterResolver } from './flow-parameter-resolver';
 import { classifyFlowError } from './flow-resilience';
+import { JumpTimeoutError } from './flow-step';
 import { IntegrationFlow, type FlowDefinition } from './integration-flow';
 
 const flaky = (message = 'flaky'): Error => Object.assign(new Error(message), { retryable: true });
@@ -300,7 +301,8 @@ describe('flow care (SPI-445 section 2.13)', () => {
       const waits: number[] = [];
       const original = oneShot.openFirstMessageWait;
       jest.spyOn(oneShot, 'openFirstMessageWait').mockImplementation((channel, options) => {
-        waits.push(options.timeoutMs);
+        // The effective wait is the one the try's timeout error reports (the engine times it).
+        waits.push((options.timeoutError?.() as JumpTimeoutError).timeoutMs);
         return original(channel, options);
       });
       w.inbox('svc', (msg) => w.registry.send(String(msg.headers.replyChannel), 'ok'));
@@ -326,6 +328,28 @@ describe('flow care (SPI-445 section 2.13)', () => {
       );
       for (const source of ['in.a', 'in.b', 'in.c', 'in.d']) await w.send(source, 'x');
       expect(waits).toEqual([10_000, 10_000, 40, 3000]);
+    });
+
+    it('RU-62d a jump try is timed on the care clock only, never by a real timer of its own', async () => {
+      const w = world();
+      w.inbox('svc');
+      w.bind(
+        'f',
+        IntegrationFlow.from('in').jump('svc', {
+          care: { patience: { eachTryMs: 20 }, tries: { max: 2, idempotent: true, spacing: 0 } },
+        }),
+      );
+      const done = settle(w.send('in', 'x'));
+      // Real time well past eachTryMs while the care clock stands still: the try keeps waiting.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await w.clock.flush();
+      expect(w.events.filter((e) => e.type === 'try.again')).toHaveLength(0);
+      await w.clock.advance(20);
+      expect(w.events.filter((e) => e.type === 'try.again')).toHaveLength(1);
+      await w.clock.advance(20);
+      expect(await done).toBeInstanceOf(JumpTimeoutError);
+      expect(((await done) as JumpTimeoutError).timeoutMs).toBe(20);
+      expect(w.registry.list().filter((c) => c.name.startsWith('reply.'))).toEqual([]);
     });
 
     it('RU-62c wait:false targets extra try in the background, refuse plan B, report one final failure, and start no try after shutdown begins', async () => {
