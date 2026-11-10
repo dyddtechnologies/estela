@@ -172,7 +172,7 @@ Every requirement has an acceptance criterion and at least one named test (secti
 | RS-13 (amended) | MUST | Every failure is classified into exactly one `FailureClass`: `'transient' \| 'busy' \| 'rejected' \| 'quota' \| 'unknown'`. Classifiers in `classify` (one function or an ordered array) run first, and the first non-`undefined` result wins. The edge default comes next, and `'unknown'` is the last resort. A classifier that throws is treated as returning `'unknown'`, and its error is logged once at error level. The call is never crashed by a classifier. | Given `classify: [() => undefined, () => 'quota']`. When a 503 fails. Then its class is `'quota'`. Given a classifier that throws. Then the class is `'unknown'` and one error line is logged. | RU-13a, RU-13b |
 | RS-14 (amended) | MUST | The default REST classifier (under `care`) maps failures as in the table of section 5.2. It never returns `'quota'`. It sees only the failures of an attempt (`OutboundRestError` values). Target, header and key resolvers run before the executor, and the response mapper runs after a successful attempt, so their errors are never classified, retried, recorded or passed to the fallback. They triesLeft unchanged, as in 0.9.0. | Table-driven test over every row of section 5.2. Given a response mapper that throws after a 200. Then the error propagates, `mapError` is not called, and the breaker records a success. | RU-14 |
 | RS-15 (amended) | MUST | The default gRPC classifier is shipped here as a pure function of the numeric status code and of the raw `grpc-retry-pushback-ms` value when there is one. It does not import `@grpc/grpc-js`. It maps codes as in section 5.2 and never returns `'quota'`. Following the gRPC retry design (gRFC A6), a pushback value that is negative or not an integer means "do not retry", so the class becomes `'rejected'`. SPI-430 wires it in. | Table-driven test over the 17 gRPC codes. Given code 8 with pushback `'250'`. Then `{ class: 'busy', readyInMs: 250 }`. Given pushback `'-1'` or `'x'`. Then `'rejected'`. | RU-15 |
-| RS-16 (amended) | MUST | The `'quota'` class is generic. It is never retried. It **forces the breaker for that key open**, even below `minCalls`, and writes the shared open marker when shared state is configured. The opening lasts `valve.quotaShutMs` (default `shutMs`). The value `'until-resumed'` keeps the breaker open until `CareControl.resume` is called (RS-49), with no half-open probe. While a breaker is open because of quota, its `ValveShutError` carries `forcedBy: 'quota'`, and its fallback trigger is `'quota'`, not `'valve-shut'`. So neither the failing call nor the calls rejected afterwards run a fallback unless `planB.on` lists `'quota'`. The engine emits `quota.used-up` once per quota failure and `valve.forced-shut` once per transition. The library ships no provider-specific rule: only an app classifier can produce `'quota'`. | Given an app classifier that maps a 429 with body `{ reason: 'quota' }` to `'quota'`. When one call fails and a second call follows. Then there is no retry, the breaker for that key is open, the second call fails with `ValveShutError { forcedBy: 'quota' }` after 0 dependency calls, a fallback configured with the default `on` runs for neither call, and exactly one `quota.used-up` and one `valve.forced-shut` are emitted. Given `quotaShutMs: 'until-resumed'`. Then no probe runs after any amount of clock time, until `resume`. A test asserts that neither default classifier ever returns `'quota'`. | RU-16a, RU-16b, RU-16c |
+| RS-16 (amended) | MUST | The `'quota'` class is generic. It is never retried. It **forces the breaker for that key open**, even below `minCalls`, and writes the shared open marker when shared state is configured. How long the opening lasts is chosen by the enum `valve.onQuota` (D35): `OnQuota.ShutLikeFailure` (default) shuts for `shutMs`, `OnQuota.ShutFor` shuts for `valve.quotaShutMs` (an integer >= 1, required with this mode and refused with any other), and both then let probes through like any other shut. `OnQuota.ShutUntilResumed` keeps the breaker open until `CareControl.resume` is called (RS-49), with no half-open probe. While a breaker is open because of quota, its `ValveShutError` carries `forcedBy: 'quota'`, and its fallback trigger is `'quota'`, not `'valve-shut'`. So neither the failing call nor the calls rejected afterwards run a fallback unless `planB.on` lists `'quota'`. The engine emits `quota.used-up` once per quota failure and `valve.forced-shut` once per transition. The library ships no provider-specific rule: only an app classifier can produce `'quota'`. | Given an app classifier that maps a 429 with body `{ reason: 'quota' }` to `'quota'`. When one call fails and a second call follows. Then there is no retry, the breaker for that key is open, the second call fails with `ValveShutError { forcedBy: 'quota' }` after 0 dependency calls, a fallback configured with the default `on` runs for neither call, and exactly one `quota.used-up` and one `valve.forced-shut` are emitted. Given `onQuota: OnQuota.ShutFor` and `quotaShutMs: 5000`. Then the breaker refuses calls for 5000 ms and then lets a probe through. Given `onQuota: OnQuota.ShutUntilResumed`. Then no probe runs after any amount of clock time, until `resume`. Given `quotaShutMs` without `OnQuota.ShutFor`, `OnQuota.ShutFor` without `quotaShutMs`, or an `onQuota` that is not an `OnQuota` value. Then plan resolution throws `CareConfigError`. A test asserts that neither default classifier ever returns `'quota'`. | RU-16a, RU-16b, RU-16c, RU-16d, RU-16e, RU-16f |
 | RS-17a (amended) | MUST | **In-process default classifier.** Activators and saga outbound steps use `defaultInProcessClassifier`, which reads errors structurally, never by `instanceof` on a transport class: an `OutboundRestError`-like value (`kind` plus `status`) is classified by the REST table; an error with `retryable: true` is `'transient'` (this covers SPI-429's `IdempotencyStoreUnavailableError` and SPI-433's `SensitiveKeyUnavailableError`); an error with `retryable: false` is `'rejected'`; an inner `OverPaceError` or `LanesFullError` is `'busy'` with its `readyInMs`; an inner `ValveShutError` or `OutOfTimeError` is `'rejected'`, so an outer layer never hammers an open circuit; anything else is `'unknown'`. | Table-driven test over each row. Given an activator method that throws an `OutboundHttpError` with status 503. Then the class is `'transient'`. Given one that throws an inner `ValveShutError`. Then `'rejected'`. | RU-17a |
 | RS-17 (amended) | MUST | **429, breaker and quota.** With the defaults, `'busy'` is retried (honouring `Retry-After`) and is **not** a breaker failure. `'transient'` is retried and is a breaker failure. `'quota'` follows RS-16. `'rejected'` and `'unknown'` are neither retried nor recorded. The full matrix is in section 5.3. | Given 20 consecutive 429s and a breaker with a threshold of 50% and `minCalls` 10. When the calls run. Then the breaker stays closed. Given 20 consecutive 503s. Then it opens. | RU-17 |
 
@@ -246,7 +246,7 @@ Every requirement has an acceptance criterion and at least one named test (secti
 | ID | Level | Requirement | Acceptance | Test |
 |---|---|---|---|---|
 | RS-48 (amended) | MUST | **`tries.requireIdempotencyKey`** (default false) on an outbound REST binding, an activator or a saga outbound step. When true, a non-safe operation (REST: a method other than GET, HEAD, OPTIONS; activator and saga: always) without an idempotency key fails before any attempt with `CareKeyError` (reason `idempotency-key-required`), and the dependency is not called. Declaring it on a REST binding with `idempotency: false` is refused at boot. It is independent of `maxAttempts`: it also applies to a single attempt. | Given a POST binding with `requireIdempotencyKey: true` and no key resolver. When a message without `idempotencyKey` is sent. Then the call fails with `CareKeyError` and the fetch count is 0. Given the same binding with `idempotency: false`. Then `bind()` throws `CareConfigError`. | RU-48 |
-| RS-49 (amended) | MUST | `CareControl` (an injectable, present when `forRoot({ care })` is set) exposes `valveState(binding, key?)` returning a `ValveStateView` (`'flowing' \| 'shut' \| 'probing'` plus `forcedBy`) or `undefined`, and `resume(binding, key?)`, which closes the local breaker, clears the shared marker when shared state is configured, and emits `valve.flowing`. Keys are passed raw by the app and never logged (RS-43). Unknown bindings or keys resolve to `undefined` or a no-op, never an error. | Given a breaker forced open with `quotaShutMs: 'until-resumed'`. When `resume` is called. Then the next call reaches the dependency, `valveState` is `'flowing'`, and one `valve.flowing` event is emitted. | RU-49 |
+| RS-49 (amended) | MUST | `CareControl` (an injectable, present when `forRoot({ care })` is set) exposes `valveState(binding, key?)` returning a `ValveStateView` (`'flowing' \| 'shut' \| 'probing'` plus `forcedBy`) or `undefined`, and `resume(binding, key?)`, which closes the local breaker, clears the shared marker when shared state is configured, and emits `valve.flowing`. Keys are passed raw by the app and never logged (RS-43). Unknown bindings or keys resolve to `undefined` or a no-op, never an error. | Given a breaker forced open with `onQuota: OnQuota.ShutUntilResumed`. When `resume` is called. Then the next call reaches the dependency, `valveState` is `'flowing'`, and one `valve.flowing` event is emitted. | RU-49 |
 | RS-50 (amended) | SHOULD | **Replica findings.** (amended: the findings also name flow step subjects, `flow:<flow>#<stepId>` for `handle` and `flow:<flow>#<stepId>:<channel>` for a send or jump target, that hold a local limiter or breaker, RS-66.) When SPI-429's replica guard (`assessReplicaSafety`, `MR-` spec) is present and the effective mode is `multi`, the resilience module contributes these warning findings: `PROCESS_LOCAL_RATE_LIMIT` for a rate limiter with `state: 'local'`; `PROCESS_LOCAL_BREAKER` for a breaker with `state: 'local'`; and `REPLICAS_HINT_DEFAULT` for a shared rate limiter whose `replicas` is 1. If SPI-429 has not merged when this ticket merges, RS-50 is deferred to a follow-up, and the deferral is recorded in the PR. | Given `ESTELA_REPLICAS=multi` and a binding with a local rate limiter. When the app boots. Then the guard logs one `PROCESS_LOCAL_RATE_LIMIT` warning naming the binding. | RU-50 |
 
 ### 2.13 Flow DSL and channel integration
@@ -362,6 +362,16 @@ export interface Tries {
   triesLeft?: 'keep' | 'forward';
 }
 
+/** What a valve does when a call fails with the 'quota' class (RS-16, D35). */
+export enum OnQuota {
+  /** Shut for shutMs, then let probes through, like any other shut. Default. */
+  ShutLikeFailure = 'shut-like-failure',
+  /** Shut for quotaShutMs, then let probes through. */
+  ShutFor = 'shut-for',
+  /** Stay shut, with no probes, until CareControl.resume is called (RS-49). */
+  ShutUntilResumed = 'shut-until-resumed',
+}
+
 /** Shuts traffic to a dependency that keeps failing, then lets probes through. */
 export interface Valve {
   enabled?: boolean;
@@ -378,8 +388,10 @@ export interface Valve {
   probes?: number;
   /** Default ['transient']; 'quota' always shuts. */
   countOn?: readonly FailureClass[];
-  /** 'until-resumed' waits for CareControl.resume (RS-16, RS-49). */
-  quotaShutMs?: number | 'until-resumed';
+  /** What a 'quota' failure does; default OnQuota.ShutLikeFailure (RS-16, RS-49). */
+  onQuota?: OnQuota;
+  /** Integer ms >= 1; required with OnQuota.ShutFor, refused otherwise. */
+  quotaShutMs?: number;
   maxKeys?: number;
   state?: 'local' | CareStatePort;
   /** How long a shared "shut" mark is cached locally; default 1000. */
@@ -761,7 +773,7 @@ export interface SagaRunnerOptions { /* existing */ care?: CareModuleOptions | C
 ### 3.9 Barrels
 
 - `src/index.ts` exports:
-  - the public types of section 3.1;
+  - the public types of section 3.1, with the enum `OnQuota` exported as a value (D35);
   - the errors of section 3.2;
   - `CareExecutor`, `CareControl` and `currentTrySignal`;
   - `defaultRestClassifier`, `defaultGrpcClassifier`, `defaultInProcessClassifier`, `parseServerWait` and `parseTriesLeft`;
@@ -921,7 +933,7 @@ execute(ctx, run):
       outcome = CareScope.run({ budget: triesLeftOut, signal }, () => withTimeout(timeoutMs, run))
       if success: breaker.recordSuccess(key); return
       c = classify(error)                       # app chain, then edge default, then 'unknown'
-      if c.class == 'quota': breaker.forceOpen(key, quotaShutMs, shared); emit quota.used-up; throw error
+      if c.class == 'quota': breaker.forceOpen(key, quotaShutLength(onQuota), shared); emit quota.used-up; throw error
       if c.class in countOn and not (timed out and cutByDeadline): breaker.recordFailure(key)   # RS-07
       if attempt > retries or c.class not in retryOn: throw error
       delay = delayFor(backoff, attempt, random)
@@ -974,7 +986,7 @@ The "unknown" mapping of codes 1, 2, 13 and 15 is deliberate: they are not retri
 | transient | yes | yes (failure) | yes | `try.again` per extra try |
 | busy (429, `RESOURCE_EXHAUSTED`) | yes, heeding `Retry-After` | **no** | yes | `try.again` |
 | rejected (4xx, `INVALID_ARGUMENT`) | no | no | no | none |
-| quota (app classifier only) | **no** | forces open (`quotaShutMs` or `'until-resumed'`) | **no**, also for the `ValveShutError { forcedBy: 'quota' }` that follows | `quota.used-up`, `valve.forced-shut` |
+| quota (app classifier only) | **no** | forces open (per `onQuota`: `shutMs`, `quotaShutMs`, or until resumed) | **no**, also for the `ValveShutError { forcedBy: 'quota' }` that follows | `quota.used-up`, `valve.forced-shut` |
 | unknown | no | no | no | none |
 | valve-shut (not quota-forced) | no | n/a | yes | `valve.*` on changes only |
 | bulkhead-full / rate-limited | no | no | yes | `lanes.full` / `pace.over` |
@@ -1037,7 +1049,8 @@ Each rule below throws `CareConfigError` naming its path:
   - Legacy and new options for the same primitive on the same layer are refused (RS-35).
 - **Shared state.** `state` must be `'local'` or an object implementing every `CareStatePort` method. A custom `key` with a shared `state` needs a module `keyHasher` (RS-43).
 - **Ad-hoc outbound options.** `valve`, `lanes` and `pace` are refused, on the first call (RS-33).
-- **Idempotency key rule.** `requireIdempotencyKey: true` with `idempotency: false` on a REST binding is refused (RS-48). `quotaShutMs` must be an integer >= 1 or `'until-resumed'`.
+- **Idempotency key rule.** `requireIdempotencyKey: true` with `idempotency: false` on a REST binding is refused (RS-48).
+- **Quota mode (RS-16).** `valve.onQuota` must be one of the `OnQuota` string values (`'shut-like-failure'`, `'shut-for'`, `'shut-until-resumed'`); any other value, including a raw string from JavaScript, is refused at `valve.onQuota`. `quotaShutMs` is required with `OnQuota.ShutFor` and refused with any other mode, at `valve.quotaShutMs`.
 - **Legacy aliases.** `retry` and `timeoutMs` outside `care` keep the 0.9.0 validation and `OutboundError` (section 1). The rules above apply only to values under `care`.
 - **References and levels (amended, RS-53..RS-67).**
   - Unknown profile name: `UNKNOWN_PROFILE`. `extends` cycle: `PROFILE_CYCLE`. Chain deeper than 8: `PROFILE_DEPTH`. Profile name outside `^[a-z0-9][a-z0-9._-]{0,63}$`: error at `care.profiles.<name>`.
@@ -1111,7 +1124,7 @@ jumpTarget(ctx, target, plan):
 - **I9.** Each call's admission is decided by exactly one state source, local or shared. There is never a "both" or an unlimited path (RU-24a).
 - **I10.** A degraded result is never stored as an idempotent completed result unless `cacheable: true` (RE-06, RU-27).
 - **I11.** The local breaker map and bucket map of a policy never hold more than `maxKeys` entries (RU-20a, RU-22a).
-- **I12.** A quota-forced breaker never runs a fallback whose `on` lacks `'quota'`, and with `quotaShutMs: 'until-resumed'` it never probes (RU-16a, RU-16c).
+- **I12.** A quota-forced breaker never runs a fallback whose `on` lacks `'quota'`, and with `onQuota: OnQuota.ShutUntilResumed` it never probes (RU-16a, RU-16c).
 - **I13.** A flow step makes more than one attempt only under a message key, a step key resolver or `tries.idempotent: true` (RU-60a).
 - **I14.** A `wireTap` never retries, never waits and never carries a retry budget (RU-58).
 - **I15.** Every `reply.<uuid>` channel opened by a jump attempt is unregistered when that attempt ends, whatever the outcome (RU-62a).
@@ -1164,7 +1177,7 @@ Bucket boundaries are the port's choice. SPI-437 (OTel) may bridge this port, an
 - **Shared open markers are lost.** Open breakers in other pods close until failures are counted again.
 - **Event and metric labels change.** Dashboards and alerts keyed on old labels break.
 
-- **Manual quota openings are lost.** A breaker forced open with `quotaShutMs: 'until-resumed'` and shared state reopens only on the next quota failure, so one call reaches the provider per pod.
+- **Manual quota openings are lost.** A breaker forced open with `onQuota: OnQuota.ShutUntilResumed` and shared state reopens only on the next quota failure, so one call reaches the provider per pod.
 
 Rotate during low traffic, and keep the old secret for one `shutMs` if continuity matters. This rotation guidance is documentation only: the library holds a single hasher.
 
@@ -1180,7 +1193,7 @@ Rotate during low traffic, and keep the old secret for one `shutMs` if continuit
 | Half-open probe admitted, then rate limited or cut by the deadline | probe slot freed, state unchanged |
 | Breaker opens during the backoff of a retrying call | `ValveShutError { cause: previous attempt's error }` |
 | Attempt cut by the deadline (not by `eachTryMs`) | not recorded by the breaker; `OutOfTimeError` |
-| Breaker forced open by quota, next calls | `ValveShutError { forcedBy: 'quota' }`; fallback only if `'quota'` is in `on`; with `'until-resumed'`, no probe until `resume` |
+| Breaker forced open by quota, next calls | `ValveShutError { forcedBy: 'quota' }`; fallback only if `'quota'` is in `on`; with `OnQuota.ShutUntilResumed`, no probe until `resume` |
 | `maxKeys` reached for rate-limit buckets | least recently used bucket evicted; it restarts full (R5) |
 | Activator retry with an outbound call inside that throws `ValveShutError` | `'rejected'` by the in-process classifier; not retried by the activator |
 | Classifier throws | class `'unknown'`; error logged once; not retried |
@@ -1281,6 +1294,9 @@ Test ids (`RU-01`, `RE-01`, ...) are local to this spec. The multi-replica spec 
 - **RU-16a** `quota is final, forces the valve open and skips the default plan B`
 - **RU-16b** `default classifiers never return quota`
 - **RU-16c** `manual quota opening never probes until resume`
+- **RU-16d** `shut-for keeps a quota shut for quotaShutMs, then lets one probe through`
+- **RU-16e** `resolves each onQuota mode to its shut length`
+- **RU-16f** `refuses quotaShutMs without shut-for, shut-for without it, and unknown modes`
 - **RU-17** `busy is tried again but not recorded by the valve`
 - **RU-17a** `in-process classifier maps outbound, retryable and inner care errors per the table`
 - **RU-18a** `opens at the failure rate after minCalls in a count window`
@@ -1379,7 +1395,7 @@ Local Redis target for RE-04 and RE-05 is `ESTELA_REDIS_URL=redis://localhost:63
   - The retry budget, with a guidance box: put retries on the edge closest to the dependency, and give activators only a bulkhead and timeouts.
   - Shared state with the ioredis and node-redis `evalScript` snippets, and D-REDIS-DOWN behaviour.
   - Events, metrics and keys (D-PHONE guidance: `keyHasher` MUST be an HMAC with a secret of at least 32 bytes; configure a hashing `keyLabel` when keys may be personal).
-  - `tries.requireIdempotencyKey`, `quotaShutMs: 'until-resumed'` and `CareControl`.
+  - `tries.requireIdempotencyKey`, `valve.onQuota` (`OnQuota`) and `CareControl`.
   - The degraded mark: a fallback answer is never replayed by idempotency (RS-27).
   - Budget migration: legacy `retry` bindings do not take part in the retry budget (R11).
   - Inbound 429 and the `RESOURCE_EXHAUSTED` mapping (an app filter snippet until SPI-431 lands).
@@ -1498,7 +1514,7 @@ Notes on that order:
 | D20 | Unsalted digest for state keys | None; `keyHasher` required for custom keys in shared state | D-PHONE and SD-15 (no unsalted fallback); an unsalted digest of a phone number is reversible |
 | D21 | Where the plan B mark travels | Per-message `CareScope` plus reply header `planB: true` | `ReplyGateway` returns only payloads today; a header keeps the payload untouched |
 | D22 | Default classifier of activators and saga steps | Structural `defaultInProcessClassifier` | With `'unknown'` as the only default, an activator retry would never fire; reading `retryable` reuses the flag SPI-429 and SPI-433 already set |
-| D23 | Quota opening that must not reopen on a timer | `quotaShutMs: 'until-resumed'` plus `CareControl.resume` | A consumer may need to close only on an external signal (for example a new credential version), and the library must not probe a quota-exhausted dependency |
+| D23 | Quota opening that must not reopen on a timer | `onQuota: OnQuota.ShutUntilResumed` (amended by D35; was `quotaShutMs: 'until-resumed'`) plus `CareControl.resume` | A consumer may need to close only on an external signal (for example a new credential version), and the library must not probe a quota-exhausted dependency |
 | D24 | Merging across levels | Per-primitive replace, with a one-time deep merge inside one reference (shared model 1.2); legacy aliases keep the field-by-field rule | With six levels, a field merge makes the effective value impossible to read in one place; a level that sets a primitive states it whole. Amends RS-04; confirm in OQ-12 |
 | D25 | Fallback on flow send steps | Refused, except `to` with `{ channel }` as a plain send | `fanoutTo`, `publish` and `route` continue or fan out and have no place for a substitute value; `to` ends the flow, so a reroute is meaningful |
 | D26 | Where `FlowParameterResolver` runs | After boot step 1 (channels) and before step 2 (activators, outbound bindings) | Activators and bindings take profile names, so they need the frozen registry; flows (step 3) come later anyway |
@@ -1510,6 +1526,7 @@ Notes on that order:
 | D32 | Quota openings in shared state (RS-16, RS-23) | Written to a separate marker key `estela:care:valve:<binding>[:<hash>]:quota`; a pod reads both markers in one state call per `syncMs` | `markShut(key, untilMs)` carries no reason, and other pods must also report `forcedBy: 'quota'` and skip the default fallback; `resume` clears both keys |
 | D33 | Public names not listed in section 3.9 | `TryOverdueError` (one in-process try ran past `eachTryMs`; classified transient), `CareEngine` (module-wide state; standalone gateways and saga runners create their own), the DI token `CARE_ENGINE`, `ReplyGateway.sendAndReceiveMessage` (the internal method of RS-27 that returns reply headers), `InboundTransportStrategy.rawHeaders` implemented by the built-in strategies, and `MemoryCareState.hang()` | Each is needed by an application point of this spec; all are additive |
 | D34 | Estela-own vocabulary | Every public name of the feature uses the Estela vocabulary of section 18 (`care` with the parts `patience`, `tries`, `valve`, `lanes`, `pace`, `planB`; `CareError` family; `CareControl`; `CareEngine`; `try.again` and `valve.*` events; `estela_care_*` metrics; `x-tries-left` and `planB` headers; `care`/`repeatableBy` graph text; `CARE_PART_*`, `PLAN_B_*` and `TRIES_*` finding codes). There are no aliases for the earlier draft names, because they never shipped. The 0.9.0 names stay as they are. Without any care configuration, behaviour stays exactly 0.9.0 (RS-70, amended) | Owner decision 2026-11-10 (final vocabulary ruling): a flow author reads the names without the docs, they sit next to `sensitive`, `idempotency` and `profiles`, and they do not tie the public API to textbook or third-party library terms. Requirement IDs, file paths and this file name are unchanged |
+| D35 | Quota behaviour of a valve (RS-16, RS-49) | Quota behaviour is an explicit enum to avoid a number\|string union: `valve.onQuota: OnQuota` (`ShutLikeFailure` default, `ShutFor`, `ShutUntilResumed`), with `quotaShutMs: number` required by `ShutFor` and refused otherwise. The resolved plan keeps `number \| 'until-resumed'` internally | Owner decision 2026-11-10: `quotaShutMs?: number \| 'until-resumed'` read as a duration that sometimes was not one. The enum names the three behaviours, and a JavaScript caller passing any other string fails at boot. Unreleased, so no alias for the union |
 | D-PHONE | How keys holding phone numbers are shown in sinks | Customer numbers: `'hash'` (salted HMAC) via `keyLabel` and `keyHasher`. The platform's own business or sender numbers MAY use `'partial'` through the app's `keyLabel`. Without configuration, custom keys are omitted from events, metrics and logs, and shared state with a custom key is refused | Owner default 2026-11-09 (OQ-7) |
 | D-REDIS-DOWN | Shared limiter or breaker state unavailable | Degrade to local per-pod state (never unlimited), emit `shared-state.lost`, probe and recover. Idempotency store unavailable: fail closed for side-effecting channels (the `MR-` spec owns it; section 5.4 only states how the engine classifies the error) | Owner default 2026-11-09 (OQ-7) |
 
@@ -1526,7 +1543,7 @@ Notes on that order:
 | OQ-7 | Confirm or override D-PHONE and D-REDIS-DOWN | the defaults in section 14 | Koletz platform owner |
 | OQ-8 | Should `'busy'` trigger the fallback by default? | yes | ESTELA maintainer |
 | OQ-9 | Redis client used as a devDependency for the gated e2e | `ioredis` | ESTELA maintainer |
-| OQ-10 | The Koletz adoption spec used the event names `estela.resilience.quota_exhausted` and `state_degraded`, and the option `requireIdempotencyKey`. This spec defines the event types `quota.used-up` and `shared-state.lost` on channel `estela.care.events`, and `tries.requireIdempotencyKey`. Align the KA spec to these names | Resolved 2026-11-09: the KA spec uses `estela.care.events`, `quota.used-up`, `shared-state.lost` and `tries.requireIdempotencyKey` (KA-35), and `quotaShutMs: 'until-resumed'` (KA-29) | Koletz platform owner |
+| OQ-10 | The Koletz adoption spec used the event names `estela.resilience.quota_exhausted` and `state_degraded`, and the option `requireIdempotencyKey`. This spec defines the event types `quota.used-up` and `shared-state.lost` on channel `estela.care.events`, and `tries.requireIdempotencyKey`. Align the KA spec to these names | Resolved 2026-11-09: the KA spec uses `estela.care.events`, `quota.used-up`, `shared-state.lost` and `tries.requireIdempotencyKey` (KA-35), and `quotaShutMs: 'until-resumed'` (KA-29), since replaced by `onQuota: OnQuota.ShutUntilResumed` (D35) | Koletz platform owner |
 | OQ-11 | Split this ticket into "engine plus outbound REST" and "activator, inbound, saga application points" if review finds it too large for one PR | one ticket, one PR. Section 2.13 (flows) is the most natural split point if one is needed | ESTELA maintainer |
 | OQ-12 | Confirm the amended RS-04 merge rule (per-primitive replace across levels, from the shared model) instead of the original field-by-field merge | as amended (D24) | ESTELA maintainer |
 | OQ-13 | Meaning of `care` in the graph: RS-42 renders a part summary (`patience 2s · tries x3`); the shared model renders the source (`jump-sla+inline`, `module:flow-jump`) | flow step targets carry the source label; outbound, inbound and activator refs keep the RS-42 summary; `describeCare` keeps returning the summary | ESTELA maintainer |
@@ -1575,7 +1592,7 @@ Notes on that order:
 | RS-13 | RU-13a, RU-13b | SPI-445 |
 | RS-14 | RU-14 | SPI-445 |
 | RS-15 | RU-15 | SPI-445 (wired by SPI-430) |
-| RS-16 | RU-16a, RU-16b, RU-16c | SPI-445 |
+| RS-16 | RU-16a, RU-16b, RU-16c, RU-16d, RU-16e, RU-16f | SPI-445 |
 | RS-17 | RU-17 | SPI-445 |
 | RS-17a | RU-17a | SPI-445 |
 | RS-18 | RU-18a, RU-18b | SPI-445 |
@@ -1668,7 +1685,7 @@ planB > patience.total > lanes > tries > valve > pace > patience.eachTry > call
 | `timeout` / `TimeoutPolicy` (`perAttemptMs`, `deadlineMs`) | `patience` / `Patience` (`eachTryMs`, `totalMs`) |
 | `retry` / `RetryPolicyOptions` (`maxAttempts`, `backoff`, `retryOn`, `honorRetryAfter`, `maxRetryAfterMs`, `propagate: 'claim' \| 'forward'`) | `tries` / `Tries` (`max`, `spacing`, `on`, `heedServerWait`, `maxServerWaitMs`, `triesLeft: 'keep' \| 'forward'`) |
 | `BackoffPolicy` (`initialMs`, `factor`, `maxMs`, `jitter: 'full' \| 'equal' \| 'none'`), `BackoffFn` | `Spacing` (`firstMs`, `growth`, `capMs`, `spread: 'full' \| 'half' \| 'none'`), `SpacingFn` |
-| `circuitBreaker` / `CircuitBreakerPolicy` (`failureRateThreshold`, `minimumCalls`, `window`, `openMs`, `halfOpenCalls`, `recordOn`, `quotaOpenMs: number \| 'manual'`) | `valve` / `Valve` (`failPercent`, `minCalls`, `lookBack: { lastCalls } \| { lastMs }`, `shutMs`, `probes`, `countOn`, `quotaShutMs: number \| 'until-resumed'`) |
+| `circuitBreaker` / `CircuitBreakerPolicy` (`failureRateThreshold`, `minimumCalls`, `window`, `openMs`, `halfOpenCalls`, `recordOn`, `quotaOpenMs: number \| 'manual'`) | `valve` / `Valve` (`failPercent`, `minCalls`, `lookBack: { lastCalls } \| { lastMs }`, `shutMs`, `probes`, `countOn`, `onQuota: OnQuota`, `quotaShutMs: number`) |
 | breaker states `'closed' \| 'open' \| 'half-open'` | valve states `'flowing' \| 'shut' \| 'probing'` |
 | `bulkhead` / `BulkheadPolicy` (`maxConcurrent`, `maxQueue`, `queueTimeoutMs`) | `lanes` / `Lanes` (`count`, `waitlist`, `waitlistMs`) |
 | `rateLimit` / `RateLimitPolicy` (`limitPerSec`, `maxWaitMs`, `degradedLimitPerSec`, `replicasHint`) | `pace` / `Pace` (`perSecond`, `waitMs`, `soloPerSecond`, `replicas`) |

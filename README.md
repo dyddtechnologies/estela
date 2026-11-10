@@ -727,7 +727,7 @@ A `Care` holds any of these parts, plus a care-wide `classify` hook:
 |---|---|---|
 | `patience` | How long Estela waits. | `eachTryMs` (one try; `0` = no limit), `totalMs` (the whole call) |
 | `tries` | Trying again after a failure. | `max` (counts the first, 1..20, default 3), `spacing`, `on`, `heedServerWait`, `idempotent`, `requireIdempotencyKey`, `triesLeft` |
-| `valve` | Shuts traffic to a dependency that keeps failing, then lets probes through. | `failPercent`, `minCalls`, `lookBack`, `shutMs`, `probes`, `countOn`, `quotaShutMs`, `key`, `state` |
+| `valve` | Shuts traffic to a dependency that keeps failing, then lets probes through. | `failPercent`, `minCalls`, `lookBack`, `shutMs`, `probes`, `countOn`, `onQuota`, `quotaShutMs`, `key`, `state` |
 | `lanes` | How many calls run at the same time. | `count`, `waitlist`, `waitlistMs` |
 | `pace` | How many calls start per second. | `perSecond`, `burst`, `waitMs`, `key`, `state`, `soloPerSecond`, `replicas` |
 | `planB` | What answers when the call still fails. | `value` or `channel`, `on`, `cacheable` |
@@ -786,7 +786,7 @@ from your own classifier.
 | transient | yes | yes (failure) | yes | `try.again` |
 | busy (429) | yes, heeding `Retry-After` | **no** | yes | `try.again` |
 | rejected | no | no | no | none |
-| quota | **no** | shuts it (`quotaShutMs` or `'until-resumed'`) | **no** | `quota.used-up`, `valve.forced-shut` |
+| quota | **no** | shuts it (per `onQuota`) | **no** | `quota.used-up`, `valve.forced-shut` |
 | unknown | no | no | no | none |
 | `valve-shut` (not quota) | no | n/a | yes | `valve.*` on changes |
 | `lanes-full` / `over-pace` | no | no | yes | `lanes.full` / `pace.over` |
@@ -891,11 +891,27 @@ care: {
 }
 ```
 
-### Quota, `'until-resumed'` and `CareControl`
+### Quota, `onQuota` and `CareControl`
 
-A `quota` failure shuts the valve for `valve.quotaShutMs` (default `shutMs`).
-`quotaShutMs: 'until-resumed'` keeps it shut until an operator resumes it. `CareControl` is
-injectable under `forRoot({ care })`:
+What a `quota` failure does to the valve is set by `valve.onQuota`, an `OnQuota` enum exported by
+`@estela/nest`:
+
+| `onQuota` | Shut for | Then |
+|---|---|---|
+| `OnQuota.ShutLikeFailure` (default) | `shutMs` | probes, like any other shut |
+| `OnQuota.ShutFor` | `quotaShutMs` (integer ms >= 1, required) | probes |
+| `OnQuota.ShutUntilResumed` | until `CareControl.resume` | no probes |
+
+```ts
+import { OnQuota } from '@estela/nest';
+
+valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 60_000 }   // a provider's per-minute quota
+valve: { onQuota: OnQuota.ShutUntilResumed }               // a daily limit an operator lifts
+```
+
+`quotaShutMs` without `OnQuota.ShutFor`, `OnQuota.ShutFor` without `quotaShutMs`, and any value
+that is not an `OnQuota` string (`'shut-like-failure'`, `'shut-for'`, `'shut-until-resumed'`) fail
+boot with `CareConfigError`. `CareControl` is injectable under `forRoot({ care })`:
 
 ```ts
 constructor(private readonly care: CareControl) {}
