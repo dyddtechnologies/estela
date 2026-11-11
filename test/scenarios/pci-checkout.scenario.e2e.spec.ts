@@ -39,6 +39,7 @@ import {
   type CareEvent,
   type FingerprintSecretProvider,
   type FlowDefinition,
+  type IntegrationMessage,
   type OutboundRestError,
   type PrivacyModuleOptions,
   type SealKey,
@@ -294,7 +295,8 @@ const price = (order: unknown): unknown => {
 const checkoutFlow: FlowDefinition = {
   name: 'checkout',
   build: () =>
-    IntegrationFlow.from('checkout.pay')
+    // Flow level: the card profile shapes every step's trail, the audit tap channel included.
+    IntegrationFlow.from('checkout.pay', { privacy: 'card' })
       .handle(price, { id: 'price' })
       .wireTap('checkout.audit', { id: 'audit' })
       .to('psp.charges', { id: 'charge' }),
@@ -705,6 +707,78 @@ describe('scenario: PCI checkout (card data stays out of the trail)', () => {
 describe('scenario: PCI checkout receipt step (delivery reach)', () => {
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('SD-50 + SD-47: the receipt step hides the card in the e-mailed receipt itself, with its reason logged at boot', async () => {
+    const warns: string[] = [];
+    jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation((message: unknown) => warns.push(String(message)) as never);
+    const toReceipt = (order: unknown): unknown => {
+      const o = order as CheckoutOrder & { amount: number };
+      return { orderId: o.orderId, amount: o.amount, card: o.card };
+    };
+    const receiptFlow: FlowDefinition = {
+      name: 'receipt',
+      build: () =>
+        IntegrationFlow.from('checkout.receipt', { privacy: 'card' })
+          .handle(price, { id: 'price' })
+          .transform(toReceipt, {
+            id: 'receipt',
+            privacy: {
+              use: 'card',
+              reach: Reach.Delivery,
+              reachReason: 'the e-mailed receipt shows the last four digits only',
+            },
+          })
+          .to('receipt.email', { id: 'email' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        IntegrationModule.forRoot(
+          {
+            channels: [
+              { name: 'checkout.receipt', type: 'direct', privacy: 'card' },
+              { name: 'receipt.email', type: 'pubsub' },
+            ],
+            logging: { banner: false },
+            privacy,
+          },
+          [receiptFlow],
+        ),
+      ],
+    }).compile();
+    const receiptApp = moduleRef.createNestApplication({ logger: false });
+    await receiptApp.init();
+    const emailed: unknown[] = [];
+    receiptApp
+      .get(ChannelRegistry)
+      .get('receipt.email')
+      .subscribe((message: IntegrationMessage) => {
+        emailed.push(message.payload);
+      });
+    const order = onlineOrder(ORDER_ONLINE, ONLINE_PAN);
+    await receiptApp.get(ChannelRegistry).send('checkout.receipt', order);
+    await receiptApp.close();
+
+    expect(emailed).toEqual([
+      {
+        orderId: ORDER_ONLINE,
+        amount: 18_950,
+        card: { pan: '***1111', expiry: '[HIDDEN:card.expiry]' },
+      },
+    ]);
+    // The order the flow carried is untouched: only the receipt copy is hidden.
+    expect(order.card).toEqual({ pan: ONLINE_PAN, expiry: EXPIRY, cvv: CVV });
+    expect(
+      warns.some(
+        (line) =>
+          line.includes('privacy delivery-reach') &&
+          line.includes('the e-mailed receipt shows the last four digits only'),
+      ),
+    ).toBe(true);
   });
 
   it('SD-50: Reach.Delivery with a reason written on the receipt channel fails boot with DELIVERY_REACH_LEVEL (flow steps only)', async () => {

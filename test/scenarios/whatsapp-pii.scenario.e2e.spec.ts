@@ -22,6 +22,7 @@ import {
   IntegrationModule,
   Pack,
   PrivacyEngine,
+  Reach,
   Remember,
   SEALED_RECORD_KEY,
   ServiceActivator,
@@ -49,7 +50,8 @@ import {
  * (`application/x-www-form-urlencoded`) signed with `X-Twilio-Signature`; the endpoint
  * (`@InboundRest`, request/reply) is gated by `MessageSid` and remembers its replies sealed
  * (`Remember.Sealed`) in a store that round-trips records through JSON, like Redis. A flow taps
- * an audit copy and hands the turn to an assistant activator that verifies the signature.
+ * an audit copy, feeds conversation analytics a copy hidden on delivery (the target's
+ * `Reach.Delivery`), and hands the turn to an assistant activator that verifies the signature.
  *
  * What the trail may show of each field is the product decision under test:
  * - customer number (`From`, `WaId`): a keyed fingerprint, stable per number and per secret id;
@@ -165,6 +167,7 @@ function twilioSignature(url: string, form: TwilioForm): string {
 const INBOUND = 'wa.twilio.inbound';
 const ASSISTANT = 'wa.assistant';
 const AUDIT = 'wa.audit';
+const ANALYTICS = 'wa.analytics';
 const SCOPE = `inbound:${INBOUND}`;
 
 /** What the controller hands to Estela: the form plus what the activator needs to verify it. */
@@ -331,6 +334,8 @@ interface Scenario {
   sealKeys: RotatingSealKeys;
   assistant: WhatsAppAssistant;
   audit: CarrierWebhook[];
+  /** What the analytics feed receives: a delivered copy shaped by its target privacy (SD-50). */
+  analytics: CarrierWebhook[];
   deliver(form: TwilioForm): Promise<Response>;
 }
 
@@ -365,6 +370,7 @@ describe('scenario whatsapp-pii: a Twilio-style WhatsApp webhook under explicit 
               { name: INBOUND, type: 'direct', privacy: 'wa-twilio' },
               { name: ASSISTANT, type: 'direct', privacy: 'wa-twilio' },
               { name: AUDIT, type: 'pubsub' },
+              { name: ANALYTICS, type: 'pubsub' },
             ],
             idempotency: { store: capture.store(store) },
             logging: { hops: true, level: 'debug', banner: false },
@@ -407,8 +413,24 @@ describe('scenario whatsapp-pii: a Twilio-style WhatsApp webhook under explicit 
             {
               name: 'wa-twilio-inbound',
               build: () =>
-                IntegrationFlow.from(INBOUND)
+                // Flow level: every step's trail follows the WhatsApp profile, the analytics hop
+                // included, though that channel declares no privacy of its own.
+                IntegrationFlow.from(INBOUND, { privacy: 'wa-twilio' })
                   .wireTap(AUDIT, { id: 'audit' })
+                  .fanoutTo(
+                    [
+                      {
+                        channel: ANALYTICS,
+                        wait: false,
+                        privacy: {
+                          use: 'wa-twilio',
+                          reach: Reach.Delivery,
+                          reachReason: 'conversation analytics counts customers, never reads them',
+                        },
+                      },
+                    ],
+                    { id: 'analytics' },
+                  )
                   .to(ASSISTANT, { id: 'assistant' }),
             },
           ],
@@ -428,6 +450,10 @@ describe('scenario whatsapp-pii: a Twilio-style WhatsApp webhook under explicit 
     registry.get(AUDIT).subscribe((message: IntegrationMessage) => {
       audit.push(message.payload as CarrierWebhook);
     });
+    const analytics: CarrierWebhook[] = [];
+    registry.get(ANALYTICS).subscribe((message: IntegrationMessage) => {
+      analytics.push(message.payload as CarrierWebhook);
+    });
     const url = `${await app.getUrl()}/webhooks/twilio/whatsapp`;
     return {
       app,
@@ -437,6 +463,7 @@ describe('scenario whatsapp-pii: a Twilio-style WhatsApp webhook under explicit 
       sealKeys,
       assistant: app.get(WhatsAppAssistant),
       audit,
+      analytics,
       deliver: (form) =>
         fetch(url, {
           method: 'POST',
@@ -520,6 +547,30 @@ describe('scenario whatsapp-pii: a Twilio-style WhatsApp webhook under explicit 
       Buffer.from(FP_K1.secret).toString('hex'),
       Buffer.from(FP_K2.secret).toString('hex'),
     ]);
+  });
+
+  it('SD-47 SD-50: the analytics target gets the message as the trail shows it; the assistant gets it whole', async () => {
+    const s = await boot();
+    await deliverOk(s, photoMessage());
+    await until('the analytics copy', () => s.analytics.length === 1);
+
+    const counted = s.analytics[0]!.form;
+    const audited = auditOf(s, SID.photo);
+    // The same customer gets the same token in the analytics feed and in the trail: a join key.
+    expect(counted.From).toBe(expectedFingerprint(FP_K1, CUSTOMER.from));
+    expect(counted.From).toBe(audited.From);
+    expect(counted.WaId).toBe(audited.WaId);
+    expect(counted.ProfileName).toBe('[HIDDEN:wa.name]');
+    expect(counted.Body).toBe(`[HIDDEN:wa.body len=${PHOTO_CAPTION.length}]`);
+    expect(counted.MediaUrl0).toBe('[HIDDEN:wa.media]');
+    expect(counted.To).toBe('***8886');
+    expect(counted.MessageSid).toBe(SID.photo);
+    // The assistant, on the same flow, receives every value as the carrier sent it.
+    expect(s.assistant.delivered[0]?.form).toEqual(photoMessage());
+    const feed = JSON.stringify(s.analytics);
+    for (const value of [CUSTOMER.from, CUSTOMER.waId, CUSTOMER.name, PHOTO_CAPTION, MEDIA_URL]) {
+      expect(feed).not.toContain(value);
+    }
   });
 
   it('SD-18 SD-25: the business sender number shows only its last 4 digits, through an exemption logged with its reason', async () => {
