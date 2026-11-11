@@ -104,21 +104,42 @@ interface GrpcErrorShape {
   metadata?: unknown;
 }
 
+function grpcNameIn(value: unknown): number | undefined {
+  return typeof value === 'string' ? GRPC_CODE_NAMES[value] : undefined;
+}
+
 function grpcCodeIn(value: unknown): number | undefined {
-  if (typeof value === 'string') return GRPC_CODE_NAMES[value];
   return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 16
     ? (value as number)
     : undefined;
 }
 
+/** The grpc-js message format `<code> <NAME>: <details>`. */
+const GRPC_MESSAGE = /^\d+ [A-Z_]+: /;
+
 /**
- * The gRPC status code of an error read structurally (no `@grpc/grpc-js` import): a numeric `code`
- * (grpc-js `ServiceError`, nice-grpc, connect) or `status`, or the name of a code this classifier
- * maps. A `DOMException` is never read: its legacy numeric `code` overlaps the gRPC range.
+ * A numeric code alone is not proof of gRPC: MongoDB, KafkaJS and others use 4, 8 and 14 for errors
+ * a retry never fixes. A gRPC error also has string `details` (grpc-js, nice-grpc), a `metadata`
+ * object (grpc-js, connect) or the grpc-js message format.
+ */
+function looksLikeGrpc(shape: GrpcErrorShape): boolean {
+  if (typeof shape.details === 'string') return true;
+  if (typeof shape.metadata === 'object' && shape.metadata !== null) return true;
+  return typeof shape.message === 'string' && GRPC_MESSAGE.test(shape.message);
+}
+
+/**
+ * The gRPC status code of an error read structurally (no `@grpc/grpc-js` import): the name of a code
+ * this classifier maps, or a numeric `code` (grpc-js `ServiceError`, nice-grpc, connect) or `status`
+ * when the error also looks like gRPC. A `DOMException` is never read: its legacy numeric `code`
+ * overlaps the gRPC range.
  */
 function grpcCodeOf(error: object): number | undefined {
   if (typeof DOMException !== 'undefined' && error instanceof DOMException) return undefined;
   const shape = error as GrpcErrorShape;
+  const byName = grpcNameIn(shape.code) ?? grpcNameIn(shape.status);
+  if (byName !== undefined) return byName;
+  if (!looksLikeGrpc(shape)) return undefined;
   return grpcCodeIn(shape.code) ?? grpcCodeIn(shape.status);
 }
 

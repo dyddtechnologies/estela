@@ -875,14 +875,20 @@ anything else unknown (no extra try).
 | gRPC error thrown in process | Kind | `readyInMs` |
 |---|---|---|
 | 14 `UNAVAILABLE` | transient | n/a |
-| 4 `DEADLINE_EXCEEDED` | transient (an extra try still needs `tries.idempotent` or an `idempotencyKey`) | n/a |
+| 4 `DEADLINE_EXCEEDED` | transient | n/a |
 | 8 `RESOURCE_EXHAUSTED` | busy; rejected when the pushback is negative or not an integer | from `grpc-retry-pushback-ms` |
 | 8 `RESOURCE_EXHAUSTED` with a quota detail (`details` or message names a quota, or a `google.rpc.QuotaFailure` in `grpc-status-details-bin`) | unknown: only your classifier can call it `quota` | n/a |
 | any other code | unknown, as in 0.9.0 | n/a |
 
-The code is read structurally, without importing `@grpc/grpc-js`: a numeric `code` (grpc-js
-`ServiceError`, nice-grpc, connect) or `status` from 0 to 16, or the code name
-(`'UNAVAILABLE'`, `'DEADLINE_EXCEEDED'`, `'RESOURCE_EXHAUSTED'`). Metadata is read through
+Whatever the code, an extra try still needs `tries.idempotent` or an `idempotencyKey` on the
+message: without one the call runs once and `try.held` is emitted (RS-36, RS-60).
+
+The code is read structurally, without importing `@grpc/grpc-js`: the code name
+(`'UNAVAILABLE'`, `'DEADLINE_EXCEEDED'`, `'RESOURCE_EXHAUSTED'`) in `code` or `status`, or a
+numeric `code` or `status` from 0 to 16 **when the error also looks like gRPC**: it has string
+`details` (grpc-js `ServiceError`, nice-grpc), a `metadata` object (grpc-js, connect) or a message
+in the grpc-js format `<code> <NAME>: <details>`. A bare numeric code is not enough: MongoDB
+(`TypeMismatch` is 14) and KafkaJS errors use the same numbers and stay unknown. Metadata is read through
 `metadata.get(key)` or as a plain record. A `DOMException` is never read as gRPC (its legacy
 numeric `code` overlaps the range), and a `retryable` or `transient` flag on the error wins over
 the code. A `classify` hook that already answered `transient` for code 14 keeps working; it is no

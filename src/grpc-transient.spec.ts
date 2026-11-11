@@ -51,7 +51,12 @@ describe('default in-process classifier for gRPC errors (SPI-448 gap grpc-transi
         { code: 14, details: 'connection refused' },
         { class: 'transient' },
       ],
-      ['UNAVAILABLE as a status field', { status: 14, message: 'down' }, { class: 'transient' }],
+      ['UNAVAILABLE as a status field', { status: 14, details: 'down' }, { class: 'transient' }],
+      [
+        'an out-of-range code falls back to a gRPC status',
+        { code: 503, status: 14, details: 'down' },
+        { class: 'transient' },
+      ],
       ['UNAVAILABLE by name', { code: 'UNAVAILABLE', details: 'down' }, { class: 'transient' }],
       [
         'DEADLINE_EXCEEDED',
@@ -133,6 +138,26 @@ describe('default in-process classifier for gRPC errors (SPI-448 gap grpc-transi
         { class: 'unknown' },
       ],
       ['a non-integer code', { code: 14.5 }, { class: 'unknown' }],
+      [
+        'a MongoDB TypeMismatch (code 14) is not gRPC',
+        Object.assign(new Error('x'), { code: 14, codeName: 'TypeMismatch', errmsg: 'x' }),
+        { class: 'unknown' },
+      ],
+      [
+        'a MongoDB UnknownError (code 8) is not gRPC',
+        Object.assign(new Error('x'), { code: 8, codeName: 'UnknownError' }),
+        { class: 'unknown' },
+      ],
+      [
+        'a KafkaJS protocol error (code 4) is not gRPC',
+        Object.assign(new Error('x'), { code: 4, type: 'INVALID_FETCH_SIZE' }),
+        { class: 'unknown' },
+      ],
+      [
+        'a bare numeric status is not gRPC',
+        Object.assign(new Error('x'), { status: 14 }),
+        { class: 'unknown' },
+      ],
       ['null', null, { class: 'unknown' }],
     ];
     for (const [label, error, expected] of rows) {
