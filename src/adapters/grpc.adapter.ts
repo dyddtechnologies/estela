@@ -3,17 +3,28 @@ import type { ChannelRegistry } from '../channel-registry';
 import { GrpcHeaderMapper } from './header-mapper';
 import type { RequestReplyPort } from '../inbound/inbound.interceptor';
 import type { TraceContext } from '../trace/trace-context';
+import type { PrivacyRef } from '../sensitive/privacy.types';
 
 const mapper = new GrpcHeaderMapper();
 
 export type GrpcStubFn = (payload: unknown, metadata: Record<string, string>) => unknown;
+
+/** Options of `bindGrpcOut`. */
+export interface GrpcOutOptions {
+  replyChannel?: string;
+  /**
+   * Privacy of this binding (L4, SD-64): the reference is accepted with the shape it will keep;
+   * the gRPC out trail writers that read it arrive with SPI-430, so today nothing reads it.
+   */
+  privacy?: PrivacyRef;
+}
 
 /** gRPC outbound (spec sec.9): stub inyectado — cero imports de @grpc/grpc-js. */
 export function bindGrpcOut(
   registry: ChannelRegistry,
   fromChannel: string,
   stub: GrpcStubFn,
-  options: { replyChannel?: string } = {},
+  options: GrpcOutOptions = {},
 ): Unsubscribe {
   const handler: MessageHandlerFn = async (msg) => {
     const metadata = mapper.mapOut(msg.headers);

@@ -60,6 +60,11 @@ import type { PrivacyFinding } from './sensitive/privacy-errors';
 import type { PrivacyModuleOptions } from './sensitive/privacy.types';
 import type { PrivacyLevel, PrivacyScope } from './sensitive/policy-resolver';
 import { envelopeBody, errorChannelText, textForLog } from './trace/trail';
+import {
+  bindingRefsOf,
+  outboundPrivacyScope,
+  outboundScopeName,
+} from './outbound/outbound.privacy';
 import { flowPrivacyScopes, resolveFlowPrivacy, type FlowPrivacy } from './flow/flow-privacy';
 import {
   activatorPrivacyScope,
@@ -204,6 +209,7 @@ function outboundRestProvider(): Provider {
         registry,
         trace,
         care,
+        privacy: { engine: privacy, channelLevels: (name) => channelLevels(opts.channels, name) },
         ...(defaults === undefined ? {} : { defaults }),
         ...(logger === undefined ? {} : { logger }),
         resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
@@ -452,6 +458,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       const scope = inboundPrivacyScope(channels, inbound.spec, this.options.inbound);
       scopes[`inbound:${inbound.spec.channel}`] = scope;
     }
+    Object.assign(scopes, this.outboundPrivacyScopes());
     const levelsOf = (name: string): PrivacyLevel[] => channelLevels(channels, name);
     const flowScopes: Record<string, PrivacyScope> = {};
     for (const flow of flows) {
@@ -480,6 +487,23 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       if (resolved.privacy !== undefined) perFlow.set(flow.name, resolved.privacy);
     }
     return { findings, problems, perFlow };
+  }
+
+  /** One scope per declared outbound REST binding, options first, then `@OutboundRest` (SD-64). */
+  private outboundPrivacyScopes(): Record<string, PrivacyScope> {
+    const rest = this.options.outbound?.rest;
+    const specs: OutboundRestSpec[] = [...(rest?.bindings ?? [])];
+    for (const { metadata } of this.annotatedMethods<OutboundRestSpec>(OUTBOUND_REST_METADATA)) {
+      specs.push(metadata);
+    }
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(this.options.channels, name);
+    const scopes: Record<string, PrivacyScope> = {};
+    for (const spec of specs) {
+      const refs = bindingRefsOf(spec, rest?.defaults?.privacy);
+      if (refs !== undefined)
+        scopes[outboundScopeName(refs.name)] = outboundPrivacyScope(refs, levelsOf);
+    }
+    return scopes;
   }
 
   private attachFlows(resolution: FlowResolution, privacy: Map<string, FlowPrivacy>): void {

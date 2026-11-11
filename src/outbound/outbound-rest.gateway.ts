@@ -9,6 +9,12 @@ import { executeOutboundRest } from './outbound.call';
 import { OutboundError } from './outbound.errors';
 import { CareConfigError } from '../resilience/resilience.errors';
 import { resolveOutboundRestPlan, type OutboundRestPlan } from './outbound.plan';
+import {
+  bindingRefsOf,
+  OutboundPrivacy,
+  type OutboundBindingRefs,
+  type OutboundPrivacyDeps,
+} from './outbound.privacy';
 import type {
   OutboundFetch,
   OutboundMessageInput,
@@ -38,6 +44,8 @@ export interface OutboundRestGatewayDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Care engine (the module's); a standalone gateway creates one on first use. */
   care?: CareEngine;
+  /** Privacy engine (the module's) and channel levels; a standalone gateway uses the baseline. */
+  privacy?: OutboundPrivacyDeps;
 }
 
 const globalFetch: OutboundFetch = (url, init) => globalThis.fetch(url, init);
@@ -63,8 +71,11 @@ function describeBinding(plan: OutboundRestPlan): OutboundRestBindingInfo {
 export class OutboundRestGateway {
   private readonly plans = new Map<string, OutboundRestPlan>();
   private readonly adHoc = new WeakMap<OutboundRestRequestOptions, OutboundRestPlan>();
+  /** Binding privacy references of every plan, declared or ad hoc. */
+  private readonly privacyRefs = new WeakMap<OutboundRestPlan, OutboundBindingRefs>();
 
   private standalone: CareEngine | undefined;
+  private privacyState: OutboundPrivacy | undefined;
 
   constructor(private readonly deps: OutboundRestGatewayDeps = {}) {}
 
@@ -73,6 +84,19 @@ export class OutboundRestGateway {
     this.standalone ??= new CareEngine({}, { enabled: false });
     return this.standalone;
   };
+
+  private privacy(): OutboundPrivacy {
+    this.privacyState ??= new OutboundPrivacy(this.deps.privacy);
+    return this.privacyState;
+  }
+
+  /** The binding's L4 references (module defaults first), kept beside its plan. */
+  private refsOf(plan: OutboundRestPlan, binding: OutboundRestRequestOptions): OutboundBindingRefs {
+    const own = { name: plan.name, ...binding };
+    const refs = bindingRefsOf(own, this.deps.defaults?.privacy) ?? { name: plan.name };
+    this.privacyRefs.set(plan, refs);
+    return refs;
+  }
 
   private planDeps(adHoc: boolean): Parameters<typeof resolveOutboundRestPlan>[1] {
     return { ...this.deps, care: this.runtime, adHoc };
@@ -89,6 +113,7 @@ export class OutboundRestGateway {
     if (this.plans.has(plan.name)) {
       throw new OutboundError(`outbound rest '${plan.name}' is already declared`);
     }
+    this.privacy().declare(this.refsOf(plan, binding));
     const unsubscribe = plan.channel === undefined ? undefined : this.subscribe(plan, plan.channel);
     this.plans.set(plan.name, plan);
     return () => {
@@ -114,6 +139,8 @@ export class OutboundRestGateway {
     call: OutboundRestCallOptions = {},
   ): Promise<R> {
     const plan = typeof target === 'string' ? this.declared(target) : this.planOf(target);
+    // SD-56: a call reference is checked before anything is built or sent.
+    this.privacy().checkCall(plan, this.privacyRefs.get(plan) ?? { name: plan.name }, call.privacy);
     return (await this.run(plan, this.toMessage(message), call)) as R;
   }
 
@@ -128,6 +155,7 @@ export class OutboundRestGateway {
     let plan = this.adHoc.get(options);
     if (plan === undefined) {
       plan = resolveOutboundRestPlan({ name: 'rest', ...options }, this.planDeps(true));
+      this.privacy().checkAdHoc(this.refsOf(plan, options));
       this.adHoc.set(options, plan);
     }
     return plan;

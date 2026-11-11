@@ -269,14 +269,30 @@ export class PrivacyEngine {
     scopes: PrivacyScopes,
     extra: AddScopesOptions = {},
   ): Pick<PrivacyCompileResult, 'findings' | 'problems'> {
-    const findings = new Findings();
-    const base = compileEnv(this.parts.options, findings);
-    const env: CompileEnv = { ...base, hasSealKeys: base.hasSealKeys || extra.sealKeys === true };
-    const resolved = resolveScopes(scopes, this.parts.moduleLevel, env);
+    const { findings, env, resolved } = this.resolve(scopes, extra);
     if (findings.count > 0) return { findings: findings.list, problems: findings.problems };
     for (const [name, plan] of resolved.plans) this.parts.scopes.set(name, plan);
     this.logBoot(resolved.logged, env.exemptions, resolved.notes, extra.logger);
     return { findings: [], problems: [] };
+  }
+
+  /**
+   * @internal Resolves scopes against the frozen profile registry without adding or logging them:
+   * an L5 call reference is checked this way at its first call (SD-56).
+   */
+  checkScopes(scopes: PrivacyScopes): Pick<PrivacyCompileResult, 'findings' | 'problems'> {
+    const { findings } = this.resolve(scopes, {});
+    return { findings: findings.list, problems: findings.problems };
+  }
+
+  private resolve(
+    scopes: PrivacyScopes,
+    extra: AddScopesOptions,
+  ): { findings: Findings; env: CompileEnv; resolved: ReturnType<typeof resolveScopes> } {
+    const findings = new Findings();
+    const base = compileEnv(this.parts.options, findings);
+    const env: CompileEnv = { ...base, hasSealKeys: base.hasSealKeys || extra.sealKeys === true };
+    return { findings, env, resolved: resolveScopes(scopes, this.parts.moduleLevel, env) };
   }
 
   /** @internal The module compile findings `forBoot` held back; empty for a valid module. */
