@@ -1,4 +1,4 @@
-/** The HMAC key behind `Show.Fingerprint`. `id` matches `^[A-Za-z0-9_-]{1,16}$`; `secret` >= 32 bytes. */
+/** The keyed-digest secret behind `Show.Fingerprint`. `id` matches `^[A-Za-z0-9_-]{1,16}$`; `secret` >= 32 bytes. */
 export interface FingerprintSecret {
   id: string;
   secret: Uint8Array;

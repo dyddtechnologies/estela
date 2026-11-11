@@ -607,7 +607,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     return trying;
   }
 
-  /** The annotated entry points; a discovery failure never breaks boot (S15 line redacted). */
+  /** The annotated entry points; a discovery failure never breaks boot (S15 line hidden). */
   private discoverInbounds(): DiscoveredInbound[] {
     const skipped = (error: unknown): void => {
       this.logger.warn(`inbound discovery skipped: ${textForLog(this.privacy, String(error))}`);

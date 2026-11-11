@@ -108,4 +108,20 @@ d('dist: privacy declarations are emitted for both module formats (SD-40)', () =
     }
     expect(text).not.toMatch(/\bSensitive[A-Z]\w*/);
   });
+
+  it('the declaration files use none of the pre-vocabulary privacy words', () => {
+    const dist = join(root, 'dist');
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- the dist folder only
+    const text = readdirSync(dist)
+      .filter((file) => /\.d\.m?ts$/.test(file))
+      // eslint-disable-next-line security/detect-non-literal-fs-filename -- files under dist
+      .map((file) => readFileSync(join(dist, file), 'utf8'))
+      .join('\n')
+      // Shipped in 0.9.0 (D42) and `case-insensitive` are not privacy vocabulary.
+      .replace(/\bredactUrl\b/g, '')
+      .replace(/case-insensitive/gi, '');
+    expect(text).not.toMatch(
+      /sensitive|\bredact|\bmask|sanitiz|scrub|obfuscat|anonymi|pseudonymi|tokeniz|denylist|allowlist|\bpii\b|\bpci\b|encrypt|cipher/i,
+    );
+  });
 });

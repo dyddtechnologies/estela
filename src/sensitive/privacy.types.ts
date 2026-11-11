@@ -107,7 +107,7 @@ export interface Privacy {
 
 /**
  * Profile names: `^[a-z0-9][a-z0-9._-]{0,63}$` (the grammar of PatternRule.name). The public name
- * is the `ProfileName` SPI-445 already exports; this local alias keeps src/sensitive a leaf.
+ * is the `ProfileName` SPI-445 already exports; this local alias keeps the privacy engine a leaf.
  */
 // eslint-disable-next-line sonarjs/redundant-type-aliases -- names the profile grammar
 type ProfileName = string;
@@ -144,7 +144,7 @@ export interface PrivacyModuleOptions extends Privacy {
   maxNodes?: number;
 }
 
-/** The baseline header denylist (SD-09). */
+/** The headers the baseline always hides (SD-09). */
 export const DEFAULT_HIDDEN_HEADERS: readonly string[] = Object.freeze([
   'authorization',
   'proxy-authorization',

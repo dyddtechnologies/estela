@@ -100,7 +100,7 @@ export interface FlowStep {
 // ---------- Flow parameter model (minimal scaffolding pending SPI-433, SD-67) ----------
 
 /**
- * Options every step accepts. Only `id` exists here; the sensitive concern (SPI-433) adds its
+ * Options every step accepts. Only `id` exists here; the privacy concern (SPI-433) adds its
  * member to this interface.
  */
 export interface StepCommonOptions {

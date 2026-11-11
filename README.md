@@ -290,7 +290,7 @@ IntegrationModule.forRoot({
   fails boot.
 - **`Show`**, strictest first: `Omitted` (key left out) > `Hidden` = `Text` (`[HIDDEN:<rule>]` or
   your `text`) > `Length` (`[HIDDEN:<rule> len=<n>]`) > `Fingerprint` (`fp:<secretId>:<hex>`, a keyed
-  HMAC, `fingerprintChars` 12..64, default 16) > `Ends` (`***1111`; never more than half the value,
+  SHA-256 digest, `fingerprintChars` 12..64, default 16) > `Ends` (`***1111`; never more than half the value,
   `Hidden` under 8 characters). When two rules hit one path the stricter wins; an inner level can
   only add, and `exempt` (with a `reason`, logged at boot) is the only way to weaken.
 - **Packs:** `secrets@1` (`secrets.keys`, `secrets.jwt`, `secrets.bearer`, `secrets.basic-url`,
