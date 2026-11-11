@@ -36,6 +36,11 @@
 7. Dispatchers rebuild the ALS context from `msg.headers` at every dispatch — never trust ambient
    context across `setImmediate`/buffers/EventEmitter listeners.
 8. Fanout bindings run the cycle guard: repeated channel in `history` or depth > 50 → `FanoutCycleError`.
+9. `RESERVED_HEADER_NAMES` (`src/message.ts`: trace, reply, idempotency, `history`, `jumpReplies`,
+   `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are written only by Estela: a flow
+   `headers` step refuses them (build: `RESERVED_HEADER`; run: `FlowHeadersError`) and so does an
+   inbound `carryHeaders` target. A new Estela-owned header goes into that list.
+   Inbound endpoints copy transport headers only through the explicit `carryHeaders` allowlist.
 
 ## Layer boundaries (enforced by dependency-cruiser)
 

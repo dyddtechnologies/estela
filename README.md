@@ -129,6 +129,7 @@ export class OrdersController {
 |---|---|
 | `filter` | exits successfully (idempotency `{filtered:true}`) |
 | `transform` / `handle` | replace the payload; `handle` never triggers a reply |
+| `headers(values \| fn)` | merges custom headers into the message (header enricher); payload and trace stay |
 | `wireTap` | fire-and-forget copy; swallows errors |
 | `fanoutTo` | awaited group in parallel; `wait:false` → forget → `error.channel` |
 | `jumpTo` / `jump` | own ephemeral channel · awaits reply + timeout · `jumpReplies[channel]` |
@@ -139,6 +140,35 @@ export class OrdersController {
 
 **`replyChannel` precedence** (runtime invariant): `wireTap/fanout/publish → none` ·
 `to/route → inherit` · `jump → its own ephemeral`. The parent always keeps the inbound reply.
+
+### Headers in a flow
+
+`headers(values, opts?)` merges headers into the message, so routing keys such as a tenant or a
+sender number travel as headers instead of payload fields. `values` is a fixed object or a function
+`(payload, msg) => object | Promise<object>`. Later steps, activators and care key functions
+(`valve.key`, `pace.key`, which read `ctx.message.headers`) see the merged headers; every hop keeps
+them (`nextHop` copies custom headers).
+
+```ts
+IntegrationFlow.from('wa.inbound')
+  .headers((payload) => ({
+    organizationId: (payload as Submit).organizationId,
+    businessNumber: (payload as Submit).businessNumber,
+  }), { id: 'routing-keys' })
+  .to('wa.send', { care: { pace: { perSecond: 20, key: (ctx) => String(ctx.message?.headers.businessNumber) } } });
+```
+
+- **Reserved names** (`RESERVED_HEADER_NAMES`: `id`, `timestamp`, `correlationId`, `causationId`,
+  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `history`,
+  `jumpReplies`, `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are never written:
+  in a fixed object they fail `build()` with `FlowDefinitionError` code `RESERVED_HEADER`; returned
+  by a function they fail the run with `FlowHeadersError` (`names` lists them), reported to
+  `error.channel` like any step failure. A function that returns anything but a plain object fails
+  the same way.
+- An `undefined` value is skipped (it never deletes a header); other values replace a custom header
+  of the same name. The step records no hop and refuses `care`.
+- The graph and `inspect()` show `{ kind: 'headers', names: [...] }` for a fixed object and
+  `{ kind: 'headers', computed: true }` for a function: names, never values.
 
 ## Tracing & idempotency
 
@@ -184,6 +214,28 @@ the module default, which overrides the built-in.
 **With nothing configured, nothing changes**: the endpoint answers the estela envelope
 (`{status:'ok'|'accepted'|'duplicate', …}`) and deduplicates on `idempotency-key` under the scope
 `inbound:<channel>`, exactly as in 0.5.0.
+
+### Carrying transport headers
+
+By default an inbound endpoint turns only trace and idempotency headers into message headers.
+`carryHeaders` is an **explicit allowlist** of other transport headers (HTTP headers on
+`@InboundRest`, metadata on `@InboundGrpc`, request headers on `@InboundGraphQL`) to copy; nothing
+outside the list is ever copied.
+
+```ts
+@InboundGrpc({
+  channel: 'wa.inbound',
+  carryHeaders: { 'x-organization-id': 'organizationId', 'x-business-number': 'businessNumber' },
+})
+// or keep the transport names: carryHeaders: ['x-organization-id']
+```
+
+- A list keeps each name; a map renames transport name → message header name. Transport names
+  match case-insensitively; an array or binary value gives its first non-empty string; a missing
+  header is skipped.
+- A target in `RESERVED_HEADER_NAMES`, an empty name or two names onto one target fail boot with
+  `InboundError`; so does `carryHeaders` on `@InboundRabbit`.
+- The graph lists the carried message header names on the inbound ref (`carries`), never values.
 
 ### Reply mapping
 
@@ -873,8 +925,10 @@ changes only.
 | `estela_care_shared_state_lost` | gauge | edge, binding |
 | `estela_care_tries_left_invalid_total` | counter | edge |
 
-`valve.key` and `pace.key` split state per key (tenant, phone number, account). Raw keys never
-reach logs, events, metrics, errors or state keys:
+`valve.key` and `pace.key` split state per key (tenant, phone number, account). In a flow, put the
+key in a header with a `headers` step (or `carryHeaders` on the inbound endpoint) before the step
+whose care reads it, rather than reading the payload. Raw keys never reach logs, events, metrics,
+errors or state keys:
 
 - `keyHasher` (module option) builds the state-port key. It is **required** with a custom key and
   shared state, and it **must be an HMAC** with a secret of at least 32 bytes, never a plain digest
@@ -1039,7 +1093,7 @@ tries left and the remaining `totalMs` only narrow a resolved value.
 | `jump(channel, opts?)`, `jumpTo(dests, opts?)` | `flow-jump` | all, per target; `planB` only on awaited targets |
 | `to(channel, opts?)` | `flow-send` | all but `planB`, except `planB: { channel }` (a plain send of the same hop) |
 | `publish`, `fanoutTo`, `route` | `flow-send` | all but `planB`, per target |
-| `filter`, `transform`, `reply`, `wireTap` | none | refused at build (`wireTap` never: `WIRETAP_CARE`) |
+| `filter`, `transform`, `headers`, `reply`, `wireTap` | none | refused at build (`wireTap` never: `WIRETAP_CARE`) |
 
 ```ts
 IntegrationFlow.from('orders.place', { care: { send: 'send-std', jump: { patience: { eachTryMs: 3_000 } } } })

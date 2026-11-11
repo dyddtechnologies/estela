@@ -270,7 +270,7 @@ Every requirement has an acceptance criterion and at least one named test (secti
 
 | DSL method | Edge kind | `care` | Allowed primitives |
 |---|---|---|---|
-| `filter`, `transform`, `reply` | none | refused (RS-57) | none |
+| `filter`, `transform`, `headers` (D37), `reply` | none | refused (RS-57) | none |
 | `wireTap` | none | **never** (RS-58) | none |
 | `handle(fn, opts?)` | `flow-handle` | yes | all; `planB` `value` or `channel` |
 | `jump(channel, { wait?, timeoutMs?, care?, sensitive?, id? })`, `jumpTo(dests, opts?)` | `flow-jump` | yes, per target | all; `planB` only on awaited targets |
@@ -1023,7 +1023,7 @@ the degraded flag is per binding and set once (compare-and-set), so N concurrent
 | Flow `handle` (`flow-handle`) | all; `planB` `value` or `channel` | RS-60: message key, step key resolver, or `idempotent: true` | around `this.fn(...)` in `HandleStep.execute` (`handle.step.ts:14-18`), inside the step claim |
 | Flow `jump`/`jumpTo` (`flow-jump`) | all; `planB` only on awaited targets | RS-60 | around one `runJump` attempt per target (`jump.step.ts:50-78`); section 5.7 |
 | Flow `to`, `publish`, `route`, `fanoutTo` (`flow-send`) | all except `planB`; `to` accepts `planB: { channel }` as a plain send | RS-60 | around `ctx.registry.sendMessage(target, hop)` per target (`to.step.ts:22`, `publish.step.ts:24`, `route.step.ts:29`, `fanout.step.ts:27`) |
-| `wireTap`, `filter`, `transform`, `reply` | none (RS-57, RS-58) | n/a | n/a |
+| `wireTap`, `filter`, `transform`, `headers` (D37), `reply` | none (RS-57, RS-58) | n/a | n/a |
 
 ### 5.6 Configuration validation at boot (RS-03)
 
@@ -1530,6 +1530,7 @@ Notes on that order:
 | D36 | Coupled fields inside `use` and `extends` (RS-53) | Inside one reference, a part's field that decides a sibling also clears the inherited sibling it does not set: `valve.onQuota` clears `quotaShutMs`; `valve.lookBack.lastCalls` and `lastMs` replace each other; `planB.value` and `planB.channel` replace each other. Without this, a child profile that only changed `onQuota` inherited the parent's `quotaShutMs` and failed boot. Test RU-53c. |
 | D-PHONE | How keys holding phone numbers are shown in sinks | Customer numbers: `'hash'` (salted HMAC) via `keyLabel` and `keyHasher`. The platform's own business or sender numbers MAY use `'partial'` through the app's `keyLabel`. Without configuration, custom keys are omitted from events, metrics and logs, and shared state with a custom key is refused | Owner default 2026-11-09 (OQ-7) |
 | D-REDIS-DOWN | Shared limiter or breaker state unavailable | Degrade to local per-pod state (never unlimited), emit `shared-state.lost`, probe and recover. Idempotency store unavailable: fail closed for side-effecting channels (the `MR-` spec owns it; section 5.4 only states how the engine classifies the error) | Owner default 2026-11-09 (OQ-7) |
+| D37 | Where a flow care key reads a tenant or sender number (SPI-448 gap headers) | A flow puts routing keys in headers with the `headers(values \| fn)` step, and an inbound endpoint can copy an allowlist of transport headers with `carryHeaders`; `valve.key` and `pace.key` read `ctx.message.headers`. Neither writes `RESERVED_HEADER_NAMES` (trace, reply, idempotency, `triesLeft`, `planB`, jump bookkeeping). Care code is unchanged | The WhatsApp pipeline scenario had to keep `organizationId` and `businessNumber` in the payload because no step could add headers and the gRPC mapper copied trace headers only. Both options are opt-in; flows without them behave as before |
 
 ## 15. Open questions
 
