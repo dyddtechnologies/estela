@@ -869,8 +869,25 @@ Your `classify` hooks run first (the first defined answer wins), then the edge d
 | HTTP 501, 505, 511, 4xx, 3xx | rejected | n/a |
 
 Activators, saga steps and flow edges use `defaultInProcessClassifier`: a REST-shaped error by the
-table above, a `transient: true` flag on the error → transient, anything else unknown (no extra
-try). Flow edges also classify `JumpTimeoutError` as transient, `CapacityExceededError` as busy and
+table above, a `transient: true` flag on the error → transient, a gRPC status by the table below,
+anything else unknown (no extra try).
+
+| gRPC error thrown in process | Kind | `readyInMs` |
+|---|---|---|
+| 14 `UNAVAILABLE` | transient | n/a |
+| 4 `DEADLINE_EXCEEDED` | transient (an extra try still needs `tries.idempotent` or an `idempotencyKey`) | n/a |
+| 8 `RESOURCE_EXHAUSTED` | busy; rejected when the pushback is negative or not an integer | from `grpc-retry-pushback-ms` |
+| 8 `RESOURCE_EXHAUSTED` with a quota detail (`details` or message names a quota, or a `google.rpc.QuotaFailure` in `grpc-status-details-bin`) | unknown: only your classifier can call it `quota` | n/a |
+| any other code | unknown, as in 0.9.0 | n/a |
+
+The code is read structurally, without importing `@grpc/grpc-js`: a numeric `code` (grpc-js
+`ServiceError`, nice-grpc, connect) or `status` from 0 to 16, or the code name
+(`'UNAVAILABLE'`, `'DEADLINE_EXCEEDED'`, `'RESOURCE_EXHAUSTED'`). Metadata is read through
+`metadata.get(key)` or as a plain record. A `DOMException` is never read as gRPC (its legacy
+numeric `code` overlaps the range), and a `retryable` or `transient` flag on the error wins over
+the code. A `classify` hook that already answered `transient` for code 14 keeps working; it is no
+longer needed. Behaviour change since 0.9.0 (SPI-448): an error with one of these three codes was
+unknown before, so it got no extra try and no plan B. Flow edges also classify `JumpTimeoutError` as transient, `CapacityExceededError` as busy and
 `NoSubscriberError` / `ChannelNotFoundError` / `FanoutCycleError` as rejected. `'quota'` only comes
 from your own classifier.
 
