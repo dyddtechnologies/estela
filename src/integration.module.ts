@@ -32,7 +32,7 @@ import { IdempotencyService } from './idempotency/idempotency.service';
 import type { IdempotencyStore } from './idempotency/idempotency-store';
 import { createMessage } from './message';
 import { ReplyGateway } from './gateway/reply-gateway';
-import { ChannelGraph } from './graph/channel-graph';
+import { ChannelGraph, type GraphOutboundRef } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
 import {
@@ -48,7 +48,7 @@ import {
   outboundRestBindingOf,
   type OutboundRestSpec,
 } from './outbound/outbound.decorators';
-import type { OutboundModuleOptions } from './outbound/outbound.types';
+import type { OutboundModuleOptions, OutboundRestBindingInfo } from './outbound/outbound.types';
 import { CareControl } from './resilience/registry';
 import { describeCare } from './resilience/resilience.plan';
 import { inboundShedPlan } from './inbound/inbound.resilience';
@@ -65,7 +65,12 @@ import {
   outboundPrivacyScope,
   outboundScopeName,
 } from './outbound/outbound.privacy';
-import { flowPrivacyScopes, resolveFlowPrivacy, type FlowPrivacy } from './flow/flow-privacy';
+import {
+  flowGraphPrivacy,
+  flowPrivacyScopes,
+  resolveFlowPrivacy,
+  type FlowPrivacy,
+} from './flow/flow-privacy';
 import {
   activatorPrivacyScope,
   channelLevels,
@@ -181,6 +186,14 @@ function privacyProvider(): Provider {
     },
     inject: [INTEGRATION_OPTIONS],
   };
+}
+
+/** A declared REST binding as the graph shows it: target, care summary and privacy names. */
+function graphOutboundRef(info: OutboundRestBindingInfo): GraphOutboundRef {
+  const ref: GraphOutboundRef = { transport: 'rest', target: info.target };
+  if (info.care !== undefined) ref.care = info.care;
+  if (info.privacy !== undefined) ref.privacy = info.privacy;
+  return ref;
 }
 
 function hopLoggerOf(
@@ -511,8 +524,11 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       this.graph.recordChannelCare(channel, care);
     }
     this.graph.recordCareProfiles(Object.keys(this.care.options.profiles ?? {}));
+    this.recordPrivacyNames();
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(this.options.channels, name);
     for (const flow of resolution.flows) {
-      this.graph.recordFlow(flow.name, flow.built, flow.described);
+      const named = flowGraphPrivacy(this.privacy, flow.name, flow.built, flow.described, levelsOf);
+      this.graph.recordFlow(flow.name, flow.built, named.steps, named.options);
       const executorDeps: FlowDeps = {
         registry: this.registry,
         trace: this.trace,
@@ -529,6 +545,19 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       const flowLog = this.hopLogger();
       if (flowLog !== undefined) executorDeps.logger = flowLog;
       new FlowExecutor(flow.name, flow.built, executorDeps).attachTo(this.registry);
+    }
+  }
+
+  /** SD-59: privacy names of declared channels and the module's profile names in the graph. */
+  private recordPrivacyNames(): void {
+    const channels = this.options.channels;
+    for (const spec of channels) {
+      const names = this.privacy.graphNames({ levels: channelLevels(channels, spec.name) });
+      if (names !== undefined) this.graph.recordChannelPrivacy(spec.name, names);
+    }
+    const privacy = this.options.privacy;
+    if (privacy !== undefined && privacy !== false) {
+      this.graph.recordPrivacyProfiles(Object.keys(privacy.profiles ?? {}));
     }
   }
 
@@ -635,11 +664,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
     for (const info of this.outbound.bindings()) {
       if (info.channel !== undefined) {
-        const ref = { transport: 'rest' as const, target: info.target };
-        this.graph.recordOutbound(
-          info.channel,
-          info.care === undefined ? ref : { ...ref, care: info.care },
-        );
+        this.graph.recordOutbound(info.channel, graphOutboundRef(info));
       }
       // The binding summary (RS-42) names `tries xN` only when more than one try is allowed.
       if (info.channel !== undefined && /\btries x\d+/.test(info.care ?? '')) {
@@ -674,7 +699,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       carriedHeadersOf(inbound.spec);
       const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.care);
       const summary = plan === undefined ? undefined : describeCare(plan);
-      this.graph.recordInbound(inbound.spec, summary);
+      const scope = inboundPrivacyScope(this.options.channels, inbound.spec, this.options.inbound);
+      this.graph.recordInbound(inbound.spec, summary, this.privacy.graphNames(scope));
       this.logger.log(summary === undefined ? inbound.line : `${inbound.line} [${summary}]`);
     }
   }

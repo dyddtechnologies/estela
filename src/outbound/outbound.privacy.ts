@@ -88,6 +88,11 @@ export class OutboundPrivacy {
     throwFindings(this.deps.engine.addScopes(scopes));
   }
 
+  /** SD-59: the graph names of a binding; undefined when no reference reaches it. */
+  graphNames(refs: OutboundBindingRefs): string[] | undefined {
+    return this.deps.engine.graphNames(outboundPrivacyScope(refs, this.deps.channelLevels));
+  }
+
   /** Checks an ad-hoc binding's references without keeping a scope. */
   checkAdHoc(refs: OutboundBindingRefs): void {
     if (refs.defaults === undefined && refs.privacy === undefined) return;

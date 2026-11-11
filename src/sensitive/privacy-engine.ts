@@ -24,8 +24,10 @@ import {
   type CompileEnv,
   type FrozenPlan,
   type ModuleLevel,
+  type PrivacyScope,
   type PrivacyScopes,
 } from './policy-resolver';
+import { BASELINE_PACK } from './packs';
 import { nativeRegexEngine } from './regex-engine';
 import { createRecordCodec, type RecordCodec } from './sealed-record';
 import type { SealKeyProvider } from './seal-key';
@@ -424,6 +426,23 @@ export class PrivacyEngine {
   /** @internal True when the scope has delivery-reach rules (SD-50). */
   delivers(scope: string): boolean {
     return this.parts.scopes.get(scope)?.delivery !== undefined;
+  }
+
+  /**
+   * @internal SD-59: the names that reach a scope, for the graph: the baseline pack, then profile
+   * names, pack names with version and 'inline', in the order of the boot summary. Undefined when
+   * no level of the scope carries a reference (the baseline and module rules alone add no key).
+   * Never a rule, a path or a reason.
+   */
+  graphNames(scope: PrivacyScope): string[] | undefined {
+    if (this.parts.disabled) return undefined;
+    if (!scope.levels.some((level) => level.ref !== undefined && level.ref !== false)) {
+      return undefined;
+    }
+    const { findings, resolved } = this.resolve({ graph: { ...scope, summary: 'none' } }, {});
+    const plan = resolved.plans.get('graph');
+    if (findings.count > 0 || plan === undefined) return undefined;
+    return [...new Set([`${BASELINE_PACK.name}@${BASELINE_PACK.version}`, ...plan.names])];
   }
 
   /** @internal The frozen plan of a scope, for the boot resolver and the graph (SD-59). */

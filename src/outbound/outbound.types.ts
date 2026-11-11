@@ -394,4 +394,6 @@ export interface OutboundRestBindingInfo {
   line: string;
   /** Care summary (RS-42); absent without care. */
   care?: string;
+  /** Privacy names that reach the binding (SD-59); absent without a reference. */
+  privacy?: string[];
 }

@@ -11,6 +11,8 @@ export interface GraphInboundRef {
   care?: string;
   /** Message header names the endpoint copies from transport headers (`carryHeaders`). */
   carries?: string[];
+  /** Privacy names that reach the endpoint (SD-59); absent without a reference. */
+  privacy?: string[];
 }
 
 /** Outbound transports a channel can be bound to. */
@@ -22,6 +24,8 @@ export interface GraphOutboundRef {
   target: string;
   /** Care summary (RS-42); absent without care. */
   care?: string;
+  /** Privacy names that reach the binding (SD-59); absent without a reference. */
+  privacy?: string[];
 }
 
 export interface GraphNode {
@@ -34,6 +38,8 @@ export interface GraphNode {
   flowsFrom: string[];
   /** Summary of the channel's `care` reference (RS-66); absent without one. */
   care?: string;
+  /** Privacy names of the channel's `privacy` reference (SD-59); absent without one. */
+  privacy?: string[];
 }
 
 export type GraphEdgeVia =
@@ -62,6 +68,17 @@ export interface GraphFlowEntry {
   name: string;
   source: string;
   steps: Record<string, unknown>[];
+  /** Names of the flow's own options (SD-59); absent when the flow sets none. */
+  options?: { privacy?: string[] };
+}
+
+/**
+ * Module-wide names (RS-66, SD-59), never values: `careProfiles` when `care.profiles` is non-empty,
+ * `privacyProfiles` when `privacy.profiles` is.
+ */
+export interface GraphModule {
+  careProfiles?: string[];
+  privacyProfiles?: string[];
 }
 
 export interface GraphSnapshot {
@@ -69,8 +86,8 @@ export interface GraphSnapshot {
   edges: GraphEdge[];
   flows: GraphFlowEntry[];
   mermaid: string;
-  /** Module-wide names (RS-66); present only when `care.profiles` is non-empty. */
-  module?: { careProfiles: string[] };
+  /** Module-wide names; present only when a profile list is non-empty. */
+  module?: GraphModule;
 }
 
 interface DestLike {
@@ -114,7 +131,9 @@ export class ChannelGraph {
   private readonly flows: GraphFlowEntry[] = [];
   private readonly flowEdges: GraphEdge[] = [];
   private readonly channelCare = new Map<string, string>();
+  private readonly channelPrivacy = new Map<string, string[]>();
   private careProfiles: string[] = [];
+  private privacyProfiles: string[] = [];
 
   /** RS-66: summary of a channel declared with `care`. */
   recordChannelCare(channel: string, care: string): void {
@@ -126,13 +145,23 @@ export class ChannelGraph {
     this.careProfiles = [...names].sort((a, b) => a.localeCompare(b));
   }
 
+  /** SD-59: privacy names of a channel declared with `privacy` (names only, never rules). */
+  recordChannelPrivacy(channel: string, names: readonly string[]): void {
+    this.channelPrivacy.set(channel, [...names]);
+  }
+
+  /** SD-59: names of the module's privacy profiles (names only, never rules). */
+  recordPrivacyProfiles(names: readonly string[]): void {
+    this.privacyProfiles = [...names].sort((a, b) => a.localeCompare(b));
+  }
+
   recordActivator(channel: string, label: string): void {
     const labels = this.activators.get(channel) ?? [];
     if (!labels.includes(label)) labels.push(label);
     this.activators.set(channel, labels);
   }
 
-  recordInbound(spec: InboundSpec, care?: string): void {
+  recordInbound(spec: InboundSpec, care?: string, privacy?: readonly string[]): void {
     const refs = this.inbounds.get(spec.channel) ?? [];
     const ref: GraphInboundRef = {
       transport: spec.transport,
@@ -142,6 +171,7 @@ export class ChannelGraph {
     if (care !== undefined) ref.care = care;
     const carries = carriedHeaderNames(spec);
     if (carries !== undefined) ref.carries = carries;
+    if (privacy !== undefined) ref.privacy = [...privacy];
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
   }
@@ -149,19 +179,28 @@ export class ChannelGraph {
   /** Records an outbound adapter bound to `channel` (declared bindings and `@OutboundRest`). */
   recordOutbound(channel: string, ref: GraphOutboundRef): void {
     const refs = this.outbounds.get(channel) ?? [];
-    refs.push(
-      ref.care === undefined
-        ? { transport: ref.transport, target: ref.target }
-        : { transport: ref.transport, target: ref.target, care: ref.care },
-    );
+    const own: GraphOutboundRef = { transport: ref.transport, target: ref.target };
+    if (ref.care !== undefined) own.care = ref.care;
+    if (ref.privacy !== undefined) own.privacy = [...ref.privacy];
+    refs.push(own);
     this.outbounds.set(channel, refs);
   }
 
-  /** `described` replaces `describe()` of each step with its RS-66 annotations. */
-  recordFlow(name: string, built: BuiltFlow, described?: readonly Record<string, unknown>[]): void {
+  /**
+   * `described` replaces `describe()` of each step with its RS-66 and SD-59 annotations;
+   * `options` holds the names of the flow's own options (SD-59).
+   */
+  recordFlow(
+    name: string,
+    built: BuiltFlow,
+    described?: readonly Record<string, unknown>[],
+    options?: GraphFlowEntry['options'],
+  ): void {
     const steps =
       described === undefined ? built.steps.map((step) => step.describe()) : [...described];
-    this.flows.push({ name, source: built.source, steps });
+    const entry: GraphFlowEntry = { name, source: built.source, steps };
+    if (options !== undefined) entry.options = options;
+    this.flows.push(entry);
     this.flows.sort((a, b) => a.name.localeCompare(b.name));
     for (const step of steps) {
       const via = String(step.kind);
@@ -206,6 +245,8 @@ export class ChannelGraph {
       };
       const care = this.channelCare.get(channel.name);
       if (care !== undefined) node.care = care;
+      const privacy = this.channelPrivacy.get(channel.name);
+      if (privacy !== undefined) node.privacy = [...privacy];
       nodes.push(node);
       edges.push(...this.channelEdges(channel.name, bindings));
     }
@@ -217,8 +258,16 @@ export class ChannelGraph {
       flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })),
       mermaid,
     };
-    if (this.careProfiles.length > 0) snapshot.module = { careProfiles: [...this.careProfiles] };
+    const module = this.moduleNames();
+    if (module !== undefined) snapshot.module = module;
     return snapshot;
+  }
+
+  private moduleNames(): GraphModule | undefined {
+    const module: GraphModule = {};
+    if (this.careProfiles.length > 0) module.careProfiles = [...this.careProfiles];
+    if (this.privacyProfiles.length > 0) module.privacyProfiles = [...this.privacyProfiles];
+    return Object.keys(module).length === 0 ? undefined : module;
   }
 
   /** Edges that hang off one channel: fanout bindings, inbounds, outbounds and activators. */

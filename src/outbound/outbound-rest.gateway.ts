@@ -124,7 +124,13 @@ export class OutboundRestGateway {
 
   /** Declared bindings, in declaration order. */
   bindings(): OutboundRestBindingInfo[] {
-    return [...this.plans.values()].map(describeBinding);
+    return [...this.plans.values()].map((plan) => {
+      const info = describeBinding(plan);
+      const refs = this.privacyRefs.get(plan);
+      const privacy = refs === undefined ? undefined : this.privacy().graphNames(refs);
+      if (privacy !== undefined) info.privacy = privacy;
+      return info;
+    });
   }
 
   /**

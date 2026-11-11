@@ -58,6 +58,8 @@ interface StepLayout {
   readonly tapLevels?: readonly PrivacyLevel[];
   /** `route` only: the levels of one run-time target channel (SD-55). */
   readonly routeLevels?: (channel: string) => PrivacyLevel[];
+  /** `fanoutTo`/`jumpTo` only: the levels of each target's hop, by target index (SD-59). */
+  readonly destLevels?: readonly (readonly PrivacyLevel[])[];
 }
 
 /** Destinations of a send step: its static targets, else the channel its graph entry names. */
@@ -163,15 +165,22 @@ function sendLayout(input: SendInput): StepLayout {
   const levels = [...source, ...channels.flatMap(levelsOf), flow, own, ...dests.map(targetLevel)];
   const targets = new Map<number, ScopedLevels>();
   const used = new Set<string>();
+  const hopLevels = (target: FlowTarget): PrivacyLevel[] => [
+    ...source,
+    ...levelsOf(target.channel),
+    flow,
+    own,
+    targetLevel(target),
+  ];
   for (const [at, target] of dests.entries()) {
     if (!ownScope(step, target)) continue;
     const base = `${scope}:${target.channel}`;
     const targetScope = used.has(base) ? `${base}~${at}` : base;
     used.add(base);
-    const targetLevels = [...source, ...levelsOf(target.channel), flow, own, targetLevel(target)];
-    targets.set(at, { scope: targetScope, levels: targetLevels });
+    targets.set(at, { scope: targetScope, levels: hopLevels(target) });
   }
   const layout: StepLayout = { id, scope, levels, targets };
+  if (MULTI_KINDS.has(step.kind)) return { ...layout, destLevels: dests.map(hopLevels) };
   if (step.kind !== 'route') return layout;
   return { ...layout, routeLevels: (channel) => [...source, ...levelsOf(channel), flow, own] };
 }
@@ -208,6 +217,50 @@ export function flowPrivacyScopes(
     }
   }
   return scopes;
+}
+
+/** SD-59: a flow's graph entry with its privacy names. */
+export interface FlowGraphPrivacy {
+  /** Each step's graph entry; a step a reference reaches gets `privacy` and its `id`. */
+  readonly steps: readonly Record<string, unknown>[];
+  /** Present when the flow sets `privacy` (L3): the names that reach the flow sinks. */
+  readonly options?: { privacy: string[] };
+}
+
+/**
+ * SD-59: profile names, pack names with version and 'inline' on the graph entry of a flow, its
+ * steps and the dests of `fanoutTo`/`jumpTo`. A key appears only where a reference reaches; the
+ * step `id` comes with it (RS-66). Rules, paths and reasons never reach the graph.
+ */
+export function flowGraphPrivacy(
+  engine: PrivacyEngine,
+  name: string,
+  built: BuiltFlow,
+  described: readonly Record<string, unknown>[],
+  levelsOf: ChannelPrivacyLevels,
+): FlowGraphPrivacy {
+  const layouts = layoutOf(name, built, levelsOf);
+  const steps = described.map((base, index) => {
+    const layout = layouts[index];
+    const privacy = layout === undefined ? undefined : engine.graphNames({ levels: layout.levels });
+    if (layout === undefined || privacy === undefined) return base;
+    const out: Record<string, unknown> = { kind: base.kind, id: layout.id, ...base };
+    if (Array.isArray(base.dests) && layout.destLevels !== undefined) {
+      const destLevels = layout.destLevels;
+      out.dests = (base.dests as Record<string, unknown>[]).map((dest, at) => {
+        const levels = destLevels[at];
+        const names = levels === undefined ? undefined : engine.graphNames({ levels });
+        return names === undefined ? dest : { ...dest, privacy: names };
+      });
+    }
+    out.privacy = privacy;
+    return out;
+  });
+  if (built.options?.privacy === undefined) return { steps };
+  const options = engine.graphNames({
+    levels: [...levelsOf(built.source), flowLevel(name, built)],
+  });
+  return options === undefined ? { steps } : { steps, options: { privacy: options } };
 }
 
 interface TapPlan {
