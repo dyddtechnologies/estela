@@ -6,7 +6,8 @@
   (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
 - The e2e HTTP tests (`test/orders.e2e.spec.ts`, `test/outbound-rest.e2e.spec.ts`,
-  `test/resilience.e2e.spec.ts`) bind loopback sockets: run them with network permissions.
+  `test/resilience.e2e.spec.ts`, `test/privacy-leak.e2e.spec.ts`) bind loopback sockets: run them
+  with network permissions.
 - The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
   set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
   Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
@@ -18,7 +19,10 @@
   `src/resilience/redis/`, `state-port.ts`, `circuit-breaker.ts` or `rate-limiter.ts`, and paste the
   result in the PR.
 - `test/dist-*.spec.ts` check the built package (`dist/`) and are skipped when it is absent: run
-  `npm run build` first (`npm run verify` already builds before it tests).
+  `npm run build` first (`npm run verify` already builds before it tests). `dist-privacy` checks
+  privacy error identity across the ESM and CJS copies and the testing entry's `expectNoLeak`.
+- `test/privacy-readme.spec.ts` runs the README "Privacy" examples and asserts their trail lines
+  verbatim: change it together with the README section.
 
 ## Non-negotiable runtime invariants (SPEC §17 · PLAN §8)
 
@@ -43,6 +47,9 @@
    `headers` step refuses them (build: `RESERVED_HEADER`; run: `FlowHeadersError`) and so does an
    inbound `carryHeaders` target. A new Estela-owned header goes into that list.
    Inbound endpoints copy transport headers only through the explicit `carryHeaders` allowlist.
+10. Privacy (SPI-433): trail writers (logs, records, ledgers, tap copies, error envelopes) write
+   hidden **copies**; never mutate the delivered message, the reply or the thrown error. Every new
+   trail writer goes through `PrivacyEngine` (or the baseline) and gets an `expectNoLeak` test.
 
 ## Layer boundaries (enforced by dependency-cruiser)
 
@@ -61,7 +68,7 @@
   `src/activator`, `src/saga` or `src/flow`; those depend on it (edge adapters live with their edge).
 - `src/sensitive/` (`sensitive-no-npm`, `sensitive-is-leaf`): the privacy engine imports no npm
   package (only `node:` core modules) and no other `src/` file; its log sink is an injected
-  `PrivacyLogger`. `test/sensitive-bounds.spec.ts` proves the npm rule on a fixture.
+  `PrivacyLogger`. `test/sensitive-bounds.spec.ts` proves both rules on fixtures.
 
 ## Adding features (OCP)
 
