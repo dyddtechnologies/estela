@@ -25,7 +25,8 @@
 1. Flows reference channels **by name only** — never import business classes.
 2. `replyChannel` precedence per hop — every step passes `reply` **explicitly** to `nextHop`:
    `wireTap/fanout/publish → 'none'` · `to/route → 'inherit'` · `jump → its own ephemeral 'reply.<uuid>'`
-   (the parent keeps the inbound reply untouched).
+   (the parent keeps the inbound reply untouched). A `wireTap` copy carries neither `replyChannel`
+   nor `x-integration-jump-reply` (bug fix vs 0.9.0, SPI-448).
 3. Awaited failures (direct send, fanout `wait:true`, jump timeout, `publish`, `to`) report to
    `error.channel` **and** fail the flow. Forget (`wait:false`) never crashes the flow.
    `wireTap` swallows all errors, always.
