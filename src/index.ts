@@ -98,6 +98,7 @@ export * from './saga/transaction-port';
 export * from './saga/idempotency-ledger';
 export * from './saga/saga';
 export * from './saga/saga-runner';
+export type { SagaPrivacyOptions } from './saga/saga-privacy';
 export * from './saga/concurrency-errors';
 export * from './saga/lock-port';
 export * from './saga/state-machine';
