@@ -5,7 +5,8 @@ import { Logger } from '@nestjs/common';
 import { IntegrationModule, type IntegrationModuleOptions } from '../integration.module';
 import { ChannelRegistry } from '../channel-registry';
 import { MemoryIdempotencyStore } from '../idempotency/memory-idempotency.store';
-import { createMessage, type IntegrationMessage } from '../message';
+import { ChannelGraph } from '../graph/channel-graph';
+import { createMessage, JUMP_REPLY_HEADER, type IntegrationMessage } from '../message';
 import { PrivacyConfigError } from '../sensitive/privacy-errors';
 import { captureTrail } from '../testing/capture-trail';
 import { expectNoLeak } from '../testing/expect-no-leak';
@@ -128,6 +129,70 @@ describe('S10 wire-tap copies (SD-28, SD-52)', () => {
     await mod.get(ChannelRegistry).send('pay.in', { pan: '4111111111111111' });
     await settle();
     expect(audit[0]?.payload).toEqual({ pan: '[HIDDEN:field]' });
+    await mod.close();
+  });
+});
+
+describe('S10 wire-tap copies compose with the reply routing strip (SD-52, D38)', () => {
+  it('a hidden tap copy has no reply routing and the main path keeps it', async () => {
+    const mod = await boot([tapFlow({ copy: TapCopy.AsShown })]);
+    const audit = collect(mod, 'audit');
+    const main = collect(mod, 'sink');
+    const input = createMessage(
+      { token: TOKEN },
+      { authorization: `Bearer ${TOKEN}`, replyChannel: 'caller.reply', [JUMP_REPLY_HEADER]: true },
+    );
+    await mod.get(ChannelRegistry).sendMessage('pay.in', input);
+    await settle();
+    expect(audit[0]?.payload).toEqual({ token: '[HIDDEN:secrets.keys]' });
+    expect(audit[0]?.headers.authorization).toBe('[HIDDEN:header]');
+    expect(audit[0]?.headers).not.toHaveProperty('replyChannel');
+    expect(audit[0]?.headers).not.toHaveProperty(JUMP_REPLY_HEADER);
+    expect(audit[0]?.headers.id).toBe(input.headers.id);
+    expect(main[0]?.headers.replyChannel).toBe('caller.reply');
+    expect(input.headers.replyChannel).toBe('caller.reply');
+    await mod.close();
+  });
+});
+
+describe('S10 headers step under privacy (SD-27, SD-52, D37)', () => {
+  const PARTNER = 'CANARYPARTNER0042';
+
+  function headersFlow(): FlowDefinition {
+    return {
+      name: 'enrich',
+      build: () =>
+        IntegrationFlow.from('pay.in')
+          .headers({ partnerRef: PARTNER, tenant: 'acme' }, { id: 'fixed' })
+          .headers(() => ({ sessionRef: PARTNER }), { id: 'computed' })
+          .wireTap('audit', { id: 'audit' })
+          .to('sink'),
+    };
+  }
+
+  it('headers step graph shows header names only, never values, under privacy', async () => {
+    const mod = await boot([headersFlow()], { privacy: { headers: ['partnerRef', 'sessionRef'] } });
+    const text = JSON.stringify(mod.get(ChannelGraph).snapshot(mod.get(ChannelRegistry)));
+    expect(text).toContain('partnerRef');
+    expect(text).toContain('tenant');
+    expect(text).not.toContain(PARTNER);
+    expect(text).not.toContain('acme');
+    await mod.close();
+  });
+
+  it('headers set by a headers step pass the privacy header rules on the tap copy', async () => {
+    const mod = await boot([headersFlow()], { privacy: { headers: ['partnerRef', 'sessionRef'] } });
+    const capture = captureTrail();
+    capture.channel(mod.get(ChannelRegistry), 'audit');
+    const main = collect(mod, 'sink');
+    await mod.get(ChannelRegistry).send('pay.in', { amount: 1 });
+    await settle();
+    const tap = capture.writes.find((w) => w.where === 'channel audit');
+    expect(tap?.text).toContain('[HIDDEN:header]');
+    expect(tap?.text).toContain('acme');
+    expect(main[0]?.headers.partnerRef).toBe(PARTNER);
+    expect(main[0]?.headers.sessionRef).toBe(PARTNER);
+    expectNoLeak(capture, [PARTNER]);
     await mod.close();
   });
 });
