@@ -85,7 +85,8 @@ export function urlForTrail(url: string): string {
   } catch {
     const text = String(url);
     const noQuery = text.split(/[?#]/, 1)[0] ?? '';
-    return noQuery.replace(/\/\/[^/@]*@/, '//');
+    // Userinfo ends at the LAST '@' of the authority: a password may hold a raw '@'.
+    return noQuery.replace(/\/\/[^/]*@/, '//');
   }
 }
 

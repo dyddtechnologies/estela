@@ -625,6 +625,12 @@ describe('PrivacyEngine: errors and urls', () => {
     expect(urlForTrail('nonsense://u:p@h?x')).toBe('nonsense://h');
   });
 
+  it('SD-05 urlForTrail drops a password that holds a raw @ whole', () => {
+    expect(urlForTrail('https://svc:Lg@Pw-Secret-6630@h/x?k=1')).toBe('https://h/x');
+    expect(urlForTrail('nonsense://svc:Lg@Pw-Secret-6630@h /x?k=1')).toBe('nonsense://h /x');
+    expect(urlForTrail('/relative/a@b?k=1')).toBe('/relative/a@b');
+  });
+
   it('SD-43 in-progress errors keep the key out of message and sinks', async () => {
     class IdempotencyInProgressError extends Error {
       constructor(readonly key: string) {
