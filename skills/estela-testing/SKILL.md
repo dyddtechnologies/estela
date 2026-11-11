@@ -1,6 +1,6 @@
 ---
 name: estela-testing
-description: Test ESTELA flows, channels and activators deterministically with the /testing subpath — bindFlow, waitFor, collect, createTestMessage and the invariant checklists. Use when writing tests for ESTELA-based features.
+description: Test ESTELA flows, channels and activators deterministically with the /testing subpath — bindFlow, waitFor, collect, createTestMessage, captureTrail/expectNoLeak and the invariant checklists. Use when writing tests for ESTELA-based features.
 ---
 
 # estela-testing — deterministic tests for ESTELA
@@ -88,6 +88,35 @@ await sent;
   classifier); anything else is unknown and gets no extra try.
 - Assert tries by counting calls, `mapError` once, and one hop per call when `logging.hops` is on.
 - Real Redis (`redisCareState`) belongs in a test gated by `ESTELA_REDIS_URL`.
+
+## Privacy
+
+```ts
+import { captureTrail, expectNoLeak, leakForms, LeakForm } from '@estela/nest/testing';
+import { PrivacyEngine, TrailOutput } from '@estela/nest';
+
+const capture = captureTrail();                                // never { keepOriginals: true } here
+const app = moduleRef.createNestApplication({ logger: capture.logger });
+Logger.overrideLogger(capture.logger);
+// forRoot({ idempotency: { store: capture.store(new MemoryIdempotencyStore()) }, privacy, ... })
+capture.channel(moduleRef.get(ChannelRegistry), 'error.channel');   // envelopes
+capture.channel(moduleRef.get(ChannelRegistry), 'orders.audit');    // wire-tap copies
+const ledger = capture.ledger(new MemoryIdempotencyLedger());       // saga ledger rows
+
+// drive success, failure, duplicate and replay with canary values, then:
+expectNoLeak(capture, [jwt, apiKey, phone, email, card, idempotencyKey]);
+```
+
+- `expectNoLeak` checks every `LeakForm` (as is, base64/base64url at offsets 0..2, URI, form, JSON)
+  and names only a SHA-256 prefix, never the secret. Use canaries, never real secrets.
+- Assert both sides: the trail holds `[HIDDEN:<rule>]` / `fp:` tokens, while the delivered message
+  and the caller's reply hold the real values (`expect(charged).toEqual([order])`).
+- An inbound handler's own throw reaches Nest's `ExceptionsHandler`, an app surface: install a
+  filter that logs `privacy.errorForTrail(error, { output: TrailOutput.Log })` in the test app.
+- Durable records: assert the stored record per `remember` (`{ estelaOutcomeOnly: { v: 1 } }`, the
+  sealed `estelaSealed` envelope) and the boot errors (`OUTCOME_ONLY_REPLAY`,
+  `SEALED_WITHOUT_KEYS`); seal key outages throw `SealKeyUnavailableError` before the claim.
+- Pack changes need positive and negative corpus tests (timestamps, ids, offsets must stay visible).
 
 ## Rules
 

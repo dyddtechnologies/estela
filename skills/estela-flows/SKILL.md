@@ -112,6 +112,21 @@ on awaited targets; `to` → all but `planB`, except `planB: { channel }` (plain
 - Read the running try's abort signal with `currentTrySignal()` inside activators, flow functions
   and saga steps.
 
+## Privacy (what the trail shows)
+
+- Put rules where the data lives: `ChannelSpec.privacy` (a profile name such as `'card'`, a list of
+  names, or an inline `Privacy`), `@ServiceActivator(ch, { privacy })`, `@InboundRest({ privacy })`.
+  A flow's trail follows its source channel and every channel it sends to; flow and step
+  `privacy` options and `Reach.Delivery` are not in this build.
+- `wireTap(ch)` sends a hidden copy (`TapCopy.AsShown`) once explicit privacy reaches the tap. A tap
+  that needs the raw payload writes `{ copy: TapCopy.Original, copyReason: '...' }` (1..200 chars,
+  logged at boot); without the reason boot fails (`COPY_REASON_MISSING`). Never mutate a tap copy:
+  unchanged subtrees are shared with the live message.
+- Customer phone numbers: `Show.Fingerprint` (needs `fingerprintSecret`). Our own sender numbers:
+  an `exempt` entry with `show: Show.Ends` and a reason. `Show.Ends` on a customer value is
+  identifying.
+- Selectors: `**.pan` for any depth; a bare name matches the root key only.
+
 ## Anti-patterns (reject in review)
 
 - Importing business classes from a flow (flows are strings + functions only).
@@ -119,3 +134,5 @@ on awaited targets; `to` → all but `planB`, except `planB: { channel }` (plain
 - Relying on ambient ALS across `setImmediate`/buffers — context is rebuilt from `msg.headers`.
 - Adding Kafka/BullMQ to channels (v1 out of scope — propose an adapter instead).
 - A hand-written retry loop around an Estela call (use `care` instead).
+- Logging a payload or an upstream error yourself without `privacy.forLog(...)` /
+  `privacy.errorForTrail(...)` from the injected `PrivacyEngine`.
