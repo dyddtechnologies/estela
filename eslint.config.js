@@ -20,6 +20,8 @@ module.exports = tseslint.config(
       'tsup.config.ts',
       '.dependency-cruiser.cjs',
       '.github/',
+      // Compiled against the installed tarball by scripts/consumer-smoke.sh, not against src.
+      'test/consumer/',
     ],
   },
   js.configs.recommended,

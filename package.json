@@ -74,8 +74,9 @@
     "complexity": "madge --extensions ts --circular src && jscpd src --min-tokens 60 --ignore '**/*.spec.ts' --reporters consoleSummary --threshold 1",
     "audit:ci": "node scripts/audit-ci.cjs && npx lockfile-lint --path package-lock.json --allowed-hosts npm --validate-https --empty-hostname false",
     "test": "jest",
+    "test:dist": "jest test/dist-",
     "bounds": "depcruise src test --config .dependency-cruiser.cjs",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test && npm run bounds && npm run complexity && npm run audit:ci",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test && npm run test:dist && npm run bounds && npm run complexity && npm run audit:ci",
     "release": "semantic-release"
   },
   "peerDependencies": {
@@ -105,6 +106,7 @@
     "@nestjs/testing": "^11.0.0",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^10.0.1",
+    "@swc/core": "^1.16.22",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.23.1",
