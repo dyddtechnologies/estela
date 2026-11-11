@@ -63,6 +63,8 @@ module.exports = {
   ],
   options: {
     doNotFollow: { path: 'node_modules' },
+    // The consumer fixture imports the packed @estela/nest tarball, not the sources.
+    exclude: { path: '^test/consumer/' },
     tsConfig: { fileName: 'tsconfig.json' },
     enhancedResolveOptions: {
       extensions: ['.ts', '.js', '.mjs'],

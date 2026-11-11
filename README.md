@@ -784,7 +784,7 @@ parseable by TypeScript 4.9 (no TS 5-only syntax such as `const` type parameters
 | Boundaries | pure domain · broker-free barrel · testing w/o inbound (0 violations) |
 | Build | ESM + CJS + d.ts · Node ≥ 18 |
 
-Runnable example: [`src/example/`](./src/example) · `npm run verify` = typecheck → **eslint (type-checked + sonarjs + security)** → prettier → build → jest → bounds → **madge + jscpd** → **npm audit + lockfile-lint**.
+Runnable example: [`src/example/`](./src/example) · `npm run verify` = typecheck → **eslint (type-checked + sonarjs + security)** → prettier → build (tsup + SWC, keeps decorator metadata) → jest → `test:dist` (built dist) → bounds → **madge + jscpd** → **npm audit + lockfile-lint**.
 
 ---
 

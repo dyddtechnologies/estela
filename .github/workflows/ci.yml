@@ -37,6 +37,8 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test
+      - name: Built dist keeps decorator metadata and class identity
+        run: npm run test:dist
       - run: npm run bounds
 
   complexity:
@@ -94,6 +96,24 @@ jobs:
         run: |
           kill "$(cat .example-pid)" 2>/dev/null || true
 
+  packed-dist:
+    name: packed dist boots in Nest ${{ matrix.nest }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        nest: [10, 11]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      # npm pack + a throwaway consumer compiled with plain tsc: the example-app job compiles the
+      # sources with tsc, so it cannot see what tsup ships (SPI-452).
+      - name: Consumer app on the packed tarball
+        run: scripts/consumer-smoke.sh ${{ matrix.nest }}
+
   audit:
     name: vulnerabilities + lockfile
     runs-on: ubuntu-latest
@@ -106,7 +126,7 @@ jobs:
 
   release:
     name: semver + GitHub Release artifact
-    needs: [lint, test, complexity, example-app, audit]
+    needs: [lint, test, complexity, example-app, packed-dist, audit]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

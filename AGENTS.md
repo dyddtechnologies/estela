@@ -3,14 +3,22 @@
 ## Commands
 
 - `npm run verify` — typecheck → eslint (type-checked + sonarjs + security) → prettier → build
-  (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
+  (ESM+CJS+d.ts) → jest → `test:dist` → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
 - The e2e HTTP test (`test/orders.e2e.spec.ts`) binds a loopback socket: run it with network permissions.
 - The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
   set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
   Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
 - `test/dist-*.spec.ts` check the built package (`dist/`) and are skipped when it is absent: run
-  `npm run build` first (`npm run verify` already builds before it tests).
+  `npm run build` first (`npm run verify` already builds before it tests). `npm run test:dist` runs
+  only them and fails when `dist/` is missing.
+- The build is tsup (esbuild). esbuild alone drops `design:paramtypes`, so Nest would inject
+  `undefined` into constructors without `@Inject`; tsup switches to its SWC path because
+  `tsconfig.json` sets `emitDecoratorMetadata` and `@swc/core` is a devDependency. Keep both.
+  `test/dist-metadata.spec.ts` fails if the metadata disappears (SPI-452).
+- `scripts/consumer-smoke.sh <10|11>` packs the dist, installs the tarball into the
+  `test/consumer/` app pinned to that Nest major, compiles it with plain `tsc`, boots it and probes
+  it over HTTP. Run `npm run build` first; CI runs it for both majors.
 
 ## Non-negotiable runtime invariants (SPEC §17 · PLAN §8)
 
@@ -127,7 +135,7 @@ is a blocker.
 ### Required checks and review
 
 - Before marking the PR ready: `npm run verify` green locally, and all CI jobs green — `lint +
-  format`, `test + build` (node 20 and 22), `complexity + clones + circular`, `example app`,
+  format`, `test + build` (node 20 and 22), `complexity + clones + circular`, `example app`, `packed dist boots in Nest 10/11`,
   `vulnerabilities + lockfile`, CodeQL, Dependency Review. Never merge on red or with a skipped job.
 - `npm run comments:en` must pass on every file the PR touches, even though CI still runs it with
   `continue-on-error` (advisory until the 183 legacy comments are translated). Removing
