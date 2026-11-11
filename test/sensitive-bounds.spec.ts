@@ -1,7 +1,7 @@
 /**
  * SD-40: `src/sensitive` imports no npm package and only its own files. The rules live in
  * `.dependency-cruiser.cjs` and `npm run bounds` enforces them on the real tree; this spec proves the
- * npm rule bites on a fixture. dependency-cruiser is ESM-only, so the cruise runs in a child `node`.
+ * npm and leaf rules bite on fixtures. dependency-cruiser is ESM-only, so the cruise runs in a child `node`.
  */
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -21,6 +21,7 @@ interface Violation {
 
 const root = join(__dirname, '..');
 const FIXTURE = 'test/fixtures/sensitive-npm';
+const LEAF_FIXTURE = 'test/fixtures/sensitive-leaf';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- the config is a CommonJS file
 const config = require('../.dependency-cruiser.cjs') as { forbidden: Rule[] };
@@ -68,6 +69,19 @@ describe('privacy layer boundaries (SD-40)', () => {
     const violations = cruise([FIXTURE], [fixtureRule]);
     expect(violations.map((v) => [v.rule.name, v.from])).toEqual([
       ['sensitive-no-npm', `${FIXTURE}/npm-import.ts`],
+    ]);
+  }, 30_000);
+
+  it('SD-40 depcruise sensitive-is-leaf forbids imports of other src folders and allows siblings', () => {
+    const leaf = rule('sensitive-is-leaf');
+    const fixtureRule = {
+      ...leaf,
+      from: { path: `^${LEAF_FIXTURE}/` },
+      to: { path: '^src/', pathNot: `^${LEAF_FIXTURE}/` },
+    };
+    const violations = cruise([LEAF_FIXTURE], [fixtureRule]);
+    expect(violations.map((v) => [v.rule.name, v.from, v.to])).toEqual([
+      ['sensitive-is-leaf', `${LEAF_FIXTURE}/src-import.ts`, 'src/message.ts'],
     ]);
   }, 30_000);
 
