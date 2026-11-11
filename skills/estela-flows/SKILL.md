@@ -36,7 +36,9 @@ pipeline; `reply()` does not (put it before `to`, or last without `to`).
   `error.channel` AND fail the flow (propagates to the producer).
 - **Forget** (`wait:false`): never crashes the flow; envelope `{ fireAndForget:true, channel }` to `error.channel`.
 - **wireTap**: swallows everything.
-- **filter false**: success `{ filtered:true }`.
+- **filter false**: success `{ filtered:true }`; silent by default, so a request/reply caller waits
+  until its timeout. `filter(pred, { whenDropped: { reply: value | (payload, msg) => value } })`
+  answers the caller's `replyChannel` at once (inbound request/reply, jump).
 - **Duplicate** idempotency: silent; cached result re-sent to `replyChannel` when present.
 
 ## Activators

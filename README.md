@@ -127,7 +127,7 @@ export class OrdersController {
 
 | Step | Semantics |
 |---|---|
-| `filter` | exits successfully (idempotency `{filtered:true}`) |
+| `filter` | exits successfully (idempotency `{filtered:true}`); `whenDropped.reply` answers the caller at once |
 | `transform` / `handle` | replace the payload; `handle` never triggers a reply |
 | `headers(values \| fn)` | merges custom headers into the message (header enricher); payload and trace stay |
 | `wireTap` | fire-and-forget copy; swallows errors |
@@ -169,6 +169,37 @@ IntegrationFlow.from('wa.inbound')
   of the same name. The step records no hop and refuses `care`.
 - The graph and `inspect()` show `{ kind: 'headers', names: [...] }` for a fixed object and
   `{ kind: 'headers', computed: true }` for a function: names, never values.
+
+### Answering the caller of a dropped message
+
+By default `filter` drops a message silently, as in 0.9.0: in a request/reply flow (an inbound
+`requestReply` endpoint, a `jump`) nothing answers the caller, which waits until its timeout and
+then fails (`ReplyTimeoutError`, a 5xx on REST). Pass `whenDropped.reply` to answer at once:
+
+```ts
+IntegrationFlow.from('wa.inbound')
+  .filter((payload) => (payload as Submit).body.trim().length > 0, {
+    id: 'skip-empty',
+    whenDropped: { reply: (payload) => ({ status: 'ignored', inReplyTo: (payload as Submit).messageSid }) },
+  })
+  .handle(loadConversation)
+  // ...
+```
+
+- `reply` is a fixed value or a function `(payload, msg) => value | Promise<value>` of the dropped
+  message (a function is always called, never sent as the value). The answer goes to the message
+  `replyChannel` with its trace (`traceId`, `correlationId`, `causationId`, `parentSpanId`), exactly
+  like `reply()`; an inbound endpoint maps it like any flow result (`{ status: 'ok', result }` with
+  the default envelope, the value itself with `reply: 'raw'`), so a webhook gets its 2xx at once.
+- A message with no `replyChannel` (fire-and-forget inbound, a `to` with no caller) is still
+  dropped silently and the function is not called. Kept messages never see the option.
+- The run still ends `filtered`: the flow claim completes `{ filtered: true }`, and an inbound
+  `requestReply` claim stores the answer, so `onDuplicate: 'replay'` replays it.
+- A function that throws fails the flow and reports to `error.channel`, like any step failure.
+- `whenDropped` without `reply` (reachable from JavaScript) fails `build()` with
+  `FlowDefinitionError` code `DROP_REPLY_MISSING`. `filter` still refuses `care`.
+- The graph and `inspect()` show `{ kind: 'filter', whenDropped: 'reply' }`, never the value; a
+  filter without the option keeps its 0.9.0 description `{ kind: 'filter' }`.
 
 ## Tracing & idempotency
 
