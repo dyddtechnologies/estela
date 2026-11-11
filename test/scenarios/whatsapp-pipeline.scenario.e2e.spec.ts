@@ -19,6 +19,7 @@ import {
   MemoryIdempotencyStore,
   OnQuota,
   OutboundHttpError,
+  PlanBMode,
   ServiceActivator,
   type CareClassifierFn,
   type CareContext,
@@ -35,10 +36,12 @@ import { MemoryCareState, manualCareClock, type ManualCareClock } from '../../sr
  * Scenario "whatsapp-pipeline": a WhatsApp message that ms-whatsapp submits over gRPC is answered
  * by an AI agent and the reply goes back through ms-whatsapp.
  *
- *   wa.inbound (gRPC submit) -> flow wa-inbound: filter -> handle loadConversation
+ *   wa.inbound (gRPC submit) -> flow wa-inbound: filter (an empty message is answered at once)
+ *     -> headers businessNumber -> handle loadConversation
  *     -> jumpTo routing.resolve (ms-campaigns, care 'routing') -> route wa.turn | wa.handoff
  *   wa.turn -> flow wa-turn: jumpTo ai.turn (outbound REST binding to the LLM, care 'llm-turn')
- *     -> wireTap wa.audit -> transform toOutboundMessage -> to wa.send (activator, care 'wa-send')
+ *     -> wireTap wa.audit -> transform toOutboundMessage -> to wa.send (activator, care 'wa-send',
+ *     plan B leaves the reply on the wa.reply.parked queue and answers 'parked')
  *
  * Real Nest apps, a real loopback HTTP server playing the LLM provider, and every care timer on
  * `manualCareClock`; the only real waits are bounded polls while a loopback request runs.
@@ -47,9 +50,9 @@ import { MemoryCareState, manualCareClock, type ManualCareClock } from '../../sr
  * through the module's own `InboundInterceptor` with an RPC execution context carrying a
  * grpc-js-shaped `Metadata`, which is what Nest hands the interceptor under the gRPC transport.
  *
- * Tenant and sender keys: the gRPC header mapper turns only trace and idempotency metadata into
- * message headers, so `organizationId` and `businessNumber` travel as fields of the submit (as
- * ms-whatsapp sends them) and the `valve.key` / `pace.key` functions read them from there.
+ * Tenant and sender keys travel as message headers: `carryHeaders` copies the `x-organization-id`
+ * metadata into `organizationId`, a `headers` step adds `businessNumber` from the submit, and the
+ * `valve.key` / `pace.key` functions read both from the headers, never from the payload.
  */
 
 jest.setTimeout(30_000);
@@ -147,12 +150,7 @@ const campaigns = {
     campaigns.calls += 1;
     if (campaigns.mode === 'hang') return new Promise<Routing>(() => undefined);
     if (campaigns.mode === 'down') {
-      // What the ms-campaigns gRPC client raises for UNAVAILABLE.
-      const error = Object.assign(new Error('14 UNAVAILABLE: ms-campaigns'), {
-        code: 14,
-        transient: true,
-      });
-      return Promise.reject(error);
+      return Promise.reject(grpcUnavailable('ms-campaigns'));
     }
     return Promise.resolve({
       agentId: request.organizationId === ORG_FARMACRO ? 'agt_sofia_farmacro' : 'agt_lucia_sur',
@@ -160,6 +158,18 @@ const campaigns = {
     });
   },
 };
+
+/**
+ * What a grpc-js client raises for UNAVAILABLE (a `ServiceError`). The default in-process classifier
+ * calls it transient; no custom `classify` and no `transient` flag are needed.
+ */
+function grpcUnavailable(service: string): Error {
+  return Object.assign(new Error(`14 UNAVAILABLE: ${service}`), {
+    code: 14,
+    details: service,
+    metadata: { get: () => [] },
+  });
+}
 
 interface SendRecord {
   pod: string;
@@ -175,9 +185,11 @@ const whatsapp = {
   sent: [] as SendRecord[],
 };
 
-const parked: { pod: string; request: OutboundWhatsApp }[] = [];
+const parked: { pod: string; request: OutboundWhatsApp; headers: IntegrationMessage['headers'] }[] =
+  [];
 const handoffs: { pod: string; request: ConversationTurn; routing: Routing }[] = [];
 const audited: IntegrationMessage[] = [];
+const dropped: IntegrationMessage[] = [];
 
 /** The conversation store `loadConversation` reads (Postgres in ms-ai-core). */
 const conversations = new Map<string, Turn[]>([
@@ -199,6 +211,7 @@ function resetDoubles(): void {
   parked.length = 0;
   handoffs.length = 0;
   audited.length = 0;
+  dropped.length = 0;
 }
 
 // ---------- The LLM provider (loopback HTTP, Gemini-shaped) ----------
@@ -307,15 +320,16 @@ const providerQuota: CareClassifierFn = (error) => {
     : undefined;
 };
 
-/** gRPC UNAVAILABLE (14) from ms-whatsapp is worth another try. */
-const grpcUnavailable: CareClassifierFn = (error) =>
-  (error as { code?: unknown } | null)?.code === 14 ? 'transient' : undefined;
+/** Care keys read the headers the inbound endpoint and the flow set, never the payload. */
+function headerOf(ctx: CareContext, name: string): string {
+  const value = ctx.message?.headers[name];
+  if (typeof value !== 'string') throw new Error(`care key header ${name} is missing`);
+  return value;
+}
 
-const organizationOf = (ctx: CareContext): string =>
-  (ctx.message?.payload as { organizationId: string }).organizationId;
+const organizationOf = (ctx: CareContext): string => headerOf(ctx, 'organizationId');
 
-const businessNumberOf = (ctx: CareContext): string =>
-  (ctx.message?.payload as { businessNumber: string }).businessNumber;
+const businessNumberOf = (ctx: CareContext): string => headerOf(ctx, 'businessNumber');
 
 function profiles(state: CareStatePort): Record<string, CareProfile> {
   return {
@@ -343,11 +357,17 @@ function profiles(state: CareStatePort): Record<string, CareProfile> {
       },
     },
     'wa-send': {
-      classify: grpcUnavailable,
       patience: { eachTryMs: 3_000, totalMs: 10_000 },
       tries: { max: 3, requireIdempotencyKey: true, spacing: { firstMs: 300, growth: 2 } },
       pace: { perSecond: 20, burst: 40, state, replicas: 2, key: businessNumberOf },
-      planB: { channel: 'wa.reply.parked' },
+      planB: {
+        channel: 'wa.reply.parked',
+        mode: PlanBMode.Leave,
+        value: (_error, ctx) => ({
+          status: 'parked',
+          inReplyTo: (ctx.message?.payload as OutboundWhatsApp).inReplyTo,
+        }),
+      },
     },
   };
 }
@@ -365,6 +385,7 @@ class WhatsAppInboundGrpc {
     channel: 'wa.inbound',
     requestReply: true,
     reply: 'raw',
+    carryHeaders: { 'x-organization-id': 'organizationId' },
     idempotency: {
       clientKey: (ctx) => (ctx.payload as SubmitInbound).messageSid,
       onDuplicate: 'replay',
@@ -402,7 +423,7 @@ class WhatsAppSendActivator {
     whatsapp.attempts.push(record);
     if (whatsapp.failNext > 0) {
       whatsapp.failNext -= 1;
-      return Promise.reject(Object.assign(new Error('14 UNAVAILABLE: ms-whatsapp'), { code: 14 }));
+      return Promise.reject(grpcUnavailable('ms-whatsapp'));
     }
     whatsapp.sent.push(record);
     return Promise.resolve({
@@ -410,18 +431,6 @@ class WhatsAppSendActivator {
       providerMessageId: `SMout${String(whatsapp.sent.length).padStart(4, '0')}`,
       inReplyTo: request.inReplyTo,
     });
-  }
-}
-
-/** Replies that could not be sent: kept for a later drain, acknowledged to the sender. */
-@Injectable()
-class ParkedRepliesActivator {
-  constructor(@Inject(POD) private readonly pod: string) {}
-
-  @ServiceActivator('wa.reply.parked')
-  park(request: OutboundWhatsApp): unknown {
-    parked.push({ pod: this.pod, request });
-    return { status: 'parked', inReplyTo: request.inReplyTo };
   }
 }
 
@@ -437,15 +446,28 @@ class HandoffActivator {
   }
 }
 
+/** Returns a value on purpose: a wireTap copy carries no reply routing, so it answers nobody. */
 @Injectable()
 class AuditActivator {
   @ServiceActivator('wa.audit')
-  record(_payload: unknown, msg: IntegrationMessage): void {
+  record(_payload: unknown, msg: IntegrationMessage): unknown {
     audited.push(msg);
+    return { audited: true, auditId: `aud_${String(audited.length)}` };
   }
 }
 
 // ---------- Flows ----------
+
+/** The answer ms-whatsapp gets at once for a message with no text (a sticker, a read receipt). */
+function ignoredReply(payload: unknown, msg: IntegrationMessage): unknown {
+  dropped.push(msg);
+  return { status: 'ignored', inReplyTo: (payload as SubmitInbound).messageSid, reason: 'empty' };
+}
+
+/** The business number the `wa-send` pace key reads. */
+function senderHeaders(payload: unknown): { businessNumber: string } {
+  return { businessNumber: (payload as SubmitInbound).businessNumber };
+}
 
 function loadConversation(payload: unknown): ConversationTurn {
   const inbound = payload as SubmitInbound;
@@ -480,7 +502,9 @@ const waInbound: FlowDefinition = {
     IntegrationFlow.from('wa.inbound')
       .filter((payload) => (payload as SubmitInbound).body.trim().length > 0, {
         id: 'skip-empty',
+        whenDropped: { reply: ignoredReply },
       })
+      .headers(senderHeaders, { id: 'sender' })
       .handle(loadConversation, { id: 'load-conversation' })
       .jumpTo(['routing.resolve'], { id: 'routing', care: 'routing' })
       .route(
@@ -641,13 +665,21 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         WhatsAppInboundGrpc,
         RoutingActivator,
         WhatsAppSendActivator,
-        ParkedRepliesActivator,
         HandoffActivator,
         AuditActivator,
       ],
     }).compile();
     const app = moduleRef.createNestApplication({ logger: false });
     await app.listen(0, '127.0.0.1');
+    // The parking lot: plan B leaves unsent replies on this queue and nobody waits on it. A plain
+    // subscriber, not an activator: an activator claims the idempotencyKey the left message keeps,
+    // so the same reply left again after a failed drain would be a silent duplicate.
+    app
+      .get(ChannelRegistry)
+      .get('wa.reply.parked')
+      .subscribe((msg) => {
+        parked.push({ pod: name, request: msg.payload as OutboundWhatsApp, headers: msg.headers });
+      });
     const interceptor = new InboundInterceptor(app.get<InboundInterceptorDeps>(INBOUND_DEPS));
     const endpoint = app.get(WhatsAppInboundGrpc);
     const pod: Pod = {
@@ -688,6 +720,12 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
   }
 
   const sentBodies = (): string[] => whatsapp.sent.map((s) => s.request.body);
+  /** A drain worker re-sends a parked reply with the key and the tenant headers it was left with. */
+  const drainHeaders = (entry: (typeof parked)[number]) => ({
+    idempotencyKey: String(entry.headers.idempotencyKey),
+    organizationId: entry.headers.organizationId,
+    businessNumber: entry.headers.businessNumber,
+  });
   const inboundRecord = async (sid: string) => store.get('inbound:wa.inbound', sid);
 
   it('RS-53 RS-58 RS-09: one inbound message gets exactly one send with the LLM text, one audit copy and one key end to end', async () => {
@@ -728,6 +766,16 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     await until('the audit copy', () => audited.length === 1);
     expect(audited[0]?.headers.jumpReplies?.[LLM_BINDING]).toEqual({ text: LLM_TEXT });
     expect(audited[0]?.headers).not.toHaveProperty('triesLeft');
+    // The audit activator returns a value, yet the tap copy has no reply routing: the caller got
+    // exactly one reply, the real send result, and the audit value went nowhere.
+    expect(audited[0]?.headers).not.toHaveProperty('replyChannel');
+    expect(audited[0]?.headers).not.toHaveProperty('x-integration-jump-reply');
+    expect(outcome).not.toEqual(expect.objectContaining({ reply: { audited: true } }));
+    // Tenant and sender travel as headers end to end, on the tap copy too.
+    expect(audited[0]?.headers).toMatchObject({
+      organizationId: ORG_FARMACRO,
+      businessNumber: BUSINESS_NUMBER,
+    });
     expect((await inboundRecord(request.messageSid))?.status).toBe('completed');
     expect(pod.events.filter((e) => e.type === 'plan-b.used')).toHaveLength(0);
     expect(clock.monotonic()).toBe(0);
@@ -909,6 +957,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
       ok: true,
       reply: { status: 'parked', inReplyTo: request.messageSid },
     });
+    await until('the parked reply', () => parked.length === 1);
 
     expect(whatsapp.attempts.map((a) => a.at)).toEqual([0, 300, 900]);
     expect(whatsapp.attempts.every((a) => a.idempotencyKey === request.messageSid)).toBe(true);
@@ -919,6 +968,16 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
       to: `whatsapp:${CUSTOMER_NUMBER}`,
       body: LLM_TEXT,
     });
+    // Plan B left the reply on the queue without waiting: the parked copy cannot answer anyone.
+    expect(parked[0]?.headers).not.toHaveProperty('replyChannel');
+    expect(parked[0]?.headers).toMatchObject({
+      idempotencyKey: request.messageSid,
+      organizationId: ORG_FARMACRO,
+      businessNumber: BUSINESS_NUMBER,
+    });
+    expect(
+      pod.events.filter((e) => e.binding === SEND_BINDING && e.type === 'plan-b.used'),
+    ).toHaveLength(1);
     expect(provider.seen).toHaveLength(1);
     expect(pod.events.filter((e) => e.binding === SEND_BINDING && e.type === 'try.again')).toEqual([
       expect.objectContaining({ class: 'transient', tryNumber: 1, delayMs: 300 }),
@@ -927,7 +986,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     expect((await inboundRecord(request.messageSid))?.status).not.toBe('completed');
 
     // ms-whatsapp is back: draining the parked reply sends it once, with the same key.
-    await pod.registry.send('wa.send', parked[0]!.request, { idempotencyKey: request.messageSid });
+    await pod.registry.send('wa.send', parked[0]!.request, drainHeaders(parked[0]!));
     expect(whatsapp.sent.map((s) => [s.request.inReplyTo, s.request.body])).toEqual([
       [request.messageSid, LLM_TEXT],
     ]);
@@ -968,7 +1027,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     // At t = 0 the shared bucket holds 40 turns for both pods together; the rest are parked.
     expect(whatsapp.sent).toHaveLength(40);
     expect(new Set(whatsapp.sent.map((s) => s.pod))).toEqual(new Set(['pod-a', 'pod-b']));
-    expect(parked).toHaveLength(60);
+    await until('60 parked replies', () => parked.length === 60);
     expect(
       [...podA.events, ...podB.events].filter(
         (e) => e.type === 'pace.over' && e.binding === SEND_BINDING,
@@ -981,9 +1040,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
       const batch = parked.splice(0);
       await Promise.all(
         batch.map((entry, n) =>
-          (n % 2 === 0 ? podA : podB).registry.send('wa.send', entry.request, {
-            idempotencyKey: entry.request.inReplyTo,
-          }),
+          (n % 2 === 0 ? podA : podB).registry.send('wa.send', entry.request, drainHeaders(entry)),
         ),
       );
       expect(whatsapp.sent.filter((s) => s.at === second * 1_000)).toHaveLength(20);
@@ -996,6 +1053,30 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     // Every admitted message was sent exactly once; no refused one was.
     const sentFor = whatsapp.sent.map((s) => s.request.inReplyTo).sort();
     expect(sentFor).toEqual([...admitted].sort());
+  });
+
+  it('SPI-448: an empty inbound message is answered at once with the ack; no routing, no LLM call, no send', async () => {
+    const pod = await startPod();
+    const request = submit({ body: '   ', numMedia: 0 });
+
+    const outcome = await pod.submit(request);
+
+    expect(outcome).toEqual({
+      ok: true,
+      reply: { status: 'ignored', inReplyTo: request.messageSid, reason: 'empty' },
+    });
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]?.headers).toMatchObject({ organizationId: ORG_FARMACRO });
+    expect(clock.monotonic()).toBe(0);
+    expect(campaigns.calls).toBe(0);
+    expect(provider.seen).toHaveLength(0);
+    expect(whatsapp.attempts).toHaveLength(0);
+    expect(parked).toHaveLength(0);
+    expect(handoffs).toHaveLength(0);
+    // A redelivery of the same empty message replays the ack and still calls nothing.
+    expect(await pod.submit({ ...request })).toEqual(outcome);
+    expect(provider.seen).toHaveLength(0);
+    expect(whatsapp.attempts).toHaveLength(0);
   });
 
   it('RS-42 RS-66: GET /integration/graph shows the care summaries of these steps and no payload value', async () => {
@@ -1019,7 +1100,8 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     };
     const steps = (flow: string) => graph.flows.find((f) => f.name === flow)?.steps;
     expect(steps('wa-inbound')).toEqual([
-      { kind: 'filter', id: 'skip-empty' },
+      { kind: 'filter', id: 'skip-empty', whenDropped: 'reply' },
+      { kind: 'headers', id: 'sender', computed: true },
       { kind: 'handle', id: 'load-conversation' },
       {
         kind: 'jump',
@@ -1049,10 +1131,15 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
       },
     ]);
     expect(node('wa.send')?.activators).toEqual([
-      'WhatsAppSendActivator.send [patience 3s · total 10s · tries x3 · pace · plan-b]',
+      'WhatsAppSendActivator.send [patience 3s · total 10s · tries x3 · pace · plan-b leave]',
     ]);
     expect(node('wa.inbound')?.inbounds).toEqual([
-      expect.objectContaining({ transport: 'grpc', requestReply: true, care: 'lanes · pace' }),
+      expect.objectContaining({
+        transport: 'grpc',
+        requestReply: true,
+        care: 'lanes · pace',
+        carries: ['organizationId'],
+      }),
     ]);
     expect(graph.module?.careProfiles).toEqual(['llm-turn', 'routing', 'wa-send']);
     for (const value of [
