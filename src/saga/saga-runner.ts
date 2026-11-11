@@ -117,7 +117,7 @@ export class SagaRunner<Tx = unknown> {
     }
     this.maxLocksPerUnit = max;
     this.privacy = new SagaPrivacy(options.privacy);
-    this.tracer = new SagaTracer(options.logger, this.privacy.engine);
+    this.tracer = new SagaTracer(options.logger, this.privacy.engine, this.privacy.scope);
     this.care = new SagaCare(options.care);
     this.units = new UnitOfWorkExecutor<Tx>({
       transactions: options.transactions,

@@ -61,9 +61,21 @@ export class HopLogger {
     this.emit(`← hop ${channel} ${target} ${ok ? 'ok' : 'FAIL'} ${ms}ms [${this.tag(h)}]`);
   }
 
-  /** Always logged at error level, regardless of the configured hop level. */
-  hopError(channel: string, target: string, h: MessageHeaders, error: unknown): void {
-    const { reason, stack } = errorForLog(this.privacy, error, { channel });
+  /**
+   * Always logged at error level, regardless of the configured hop level. `runner`: a saga
+   * runner's engine and scope, whose rules hide the line instead of this logger's engine.
+   */
+  hopError(
+    channel: string,
+    target: string,
+    h: MessageHeaders,
+    error: unknown,
+    runner?: { engine: PrivacyEngine; scope: string },
+  ): void {
+    const { reason, stack } =
+      runner === undefined
+        ? errorForLog(this.privacy, error, { channel })
+        : errorForLog(runner.engine, error, { channel, scope: runner.scope });
     this.logger.error(`✖ hop ${channel} ${target} ERROR ${reason} [${this.tag(h)}]`, stack);
   }
 }

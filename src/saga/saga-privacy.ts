@@ -28,16 +28,20 @@ let runners = 0;
 /** Ledger codec and log engine of one saga runner (SD-29, SD-33, D7). */
 export class SagaPrivacy {
   readonly engine: PrivacyEngine | undefined;
+  /** The runner's scope in `engine`: its error lines and ledger rows use the runner's rules. */
+  readonly scope: string | undefined;
   private readonly codec: RecordCodec | undefined;
 
   constructor(private readonly options?: SagaPrivacyOptions) {
     if (options === undefined) {
       this.engine = undefined;
+      this.scope = undefined;
       this.codec = undefined;
       return;
     }
     runners++;
     const scope = `saga-runner#${runners}`;
+    this.scope = scope;
     const scopes: PrivacyScopes = {
       [scope]: {
         levels: [

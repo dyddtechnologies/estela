@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
+import { Logger } from '@nestjs/common';
 import { PrivacyEngine } from '../sensitive/privacy-engine';
-import { Remember } from '../sensitive/privacy.types';
+import { Pack, Remember } from '../sensitive/privacy.types';
 import {
   PrivacyConfigError,
   ReplayUnavailableError,
@@ -14,6 +15,7 @@ import { MemoryIdempotencyLedger } from './idempotency-ledger';
 import { saga } from './saga';
 import { SagaRunner, type SagaRunnerOptions } from './saga-runner';
 import type { TransactionPort } from './transaction-port';
+import { HopLogger } from '../trace/hop-logger';
 
 const TOKEN = 'CANARYTOKEN0001';
 
@@ -151,5 +153,65 @@ describe('S9 saga ledger (SD-29, SD-33, SD-63, 8.2)', () => {
 
   it('remember Sealed without seal keys fails when the runner is built', () => {
     expect(() => runner({ remember: Remember.Sealed })).toThrow(PrivacyConfigError);
+  });
+});
+
+describe('S1, S2 saga error lines follow the runner rules (SD-27, SD-63)', () => {
+  const PAN = '4532015112830366';
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsZWFrIn0.bGVhay1zaWduYXR1cmUtY2FuYXJ5';
+
+  const failingReceipt = saga<{ key: string }, null, { ok: boolean }>('refund')
+    .transaction('book', (_ctx, _tx, unit) => {
+      unit.afterCommit(() => {
+        throw new Error(`receipt for card ${PAN} bounced, session ${JWT}`);
+      });
+    })
+    .reply(() => ({ ok: true }));
+
+  async function errorLines(options: Partial<SagaRunnerOptions<null>>): Promise<string[]> {
+    const lines: string[] = [];
+    const quiet = (['log', 'debug'] as const).map((level) =>
+      jest.spyOn(Logger.prototype, level).mockImplementation(() => undefined),
+    );
+    const spy = jest.spyOn(Logger.prototype, 'error').mockImplementation((...parts: unknown[]) => {
+      lines.push(parts.map(String).join(' '));
+    });
+    try {
+      await new SagaRunner<null>({ transactions: transactions(), ...options }).run(failingReceipt, {
+        key: 'r-1',
+      });
+    } finally {
+      spy.mockRestore();
+      for (const muted of quiet) muted.mockRestore();
+    }
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    return lines;
+  }
+
+  it('the hop error line uses the profile the runner resolves through the module engine', async () => {
+    const engine = await PrivacyEngine.compile({
+      packs: [Pack.SecretsV1],
+      profiles: { card: { packs: [Pack.PersonalV1] } },
+    });
+    const lines = await errorLines({
+      logger: new HopLogger('debug', engine),
+      privacy: { engine, rules: 'card', remember: Remember.AsShown },
+    });
+    for (const line of lines) {
+      expect(line).toContain('***0366');
+      expect(line).not.toContain(PAN);
+      expect(line).not.toContain(JWT);
+    }
+  });
+
+  it('the fallback error line uses inline runner rules and keeps the baseline', async () => {
+    const lines = await errorLines({
+      privacy: { rules: { packs: [Pack.PersonalV1] }, remember: Remember.AsShown },
+    });
+    for (const line of lines) {
+      expect(line).toContain('***0366');
+      expect(line).not.toContain(PAN);
+      expect(line).not.toContain(JWT);
+    }
   });
 });
