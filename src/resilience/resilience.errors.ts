@@ -146,7 +146,7 @@ export class CareKeyError extends CareError {
 
 /** One finding of the boot resolver, shared by every concern (RS-67). Names only, never values. */
 export interface FlowParameterFinding {
-  readonly concern: 'flow' | 'care' | 'sensitive' | 'idempotency';
+  readonly concern: 'flow' | 'care' | 'privacy' | 'idempotency';
   readonly code: string;
   readonly severity: 'error' | 'warning' | 'info';
   /** For example "flow 'loan' step 'credit'". */
