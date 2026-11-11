@@ -6,6 +6,7 @@ import { DiscoveryService } from '@nestjs/core';
 import { IntegrationModule, type IntegrationModuleOptions } from './integration.module';
 import { IntegrationFlow, type FlowDefinition } from './flow/integration-flow';
 import { ChannelRegistry } from './channel-registry';
+import { ChannelGraph } from './graph/channel-graph';
 import { ServiceActivator } from './decorators';
 import { OutboundHttpError } from './outbound/outbound.errors';
 import { IdempotencyInProgressError } from './saga/idempotency-ledger';
@@ -250,6 +251,79 @@ describe('PrivacyEngine provider (SD-39, SD-36, section 2)', () => {
     const line = lines.find((l) => l.startsWith('inbound discovery skipped')) ?? '';
     expect(line).toContain('discovery broke');
     expect(line).not.toContain(SECRET1);
+    await mod.close();
+  });
+});
+
+@Injectable()
+class Flaky {
+  @ServiceActivator('flaky.call', {
+    care: { tries: { max: 2, idempotent: true, spacing: 1 } },
+  })
+  call(): never {
+    throw Object.assign(new Error(`upstream 503 token=${SECRET1} card 4111 1111 1111 1111`), {
+      transient: true,
+    });
+  }
+}
+
+describe('S13 graph endpoint and care events (SD-27, SD-62)', () => {
+  it('graph endpoint never shows an outbound url query, userinfo or a payload', async () => {
+    const mod = await boot({
+      outbound: {
+        rest: {
+          bindings: [
+            {
+              name: 'psp',
+              channel: 'pay.in',
+              url: `https://u:p@psp.example/charge?api_key=${SECRET1}`,
+            },
+          ],
+        },
+      },
+    });
+    const graph = mod.get(ChannelGraph).snapshot(mod.get(ChannelRegistry));
+    const text = JSON.stringify(graph);
+    expect(text).toContain('https://psp.example/charge');
+    expect(text).not.toContain(SECRET1);
+    expect(text).not.toContain('u:p@');
+    await mod.close();
+  });
+
+  it('care events and metrics labels carry names and numbers, never payload or error text', async () => {
+    const labels: Record<string, string>[] = [];
+    const metrics = {
+      counter: (_: string, l: Record<string, string>) => labels.push(l),
+      histogram: (_: string, l: Record<string, string>) => labels.push(l),
+      gauge: (_: string, l: Record<string, string>) => labels.push(l),
+    };
+    const mod = await boot(
+      {
+        channels: [
+          { name: 'pay.in', type: 'direct' },
+          { name: 'flaky.call', type: 'direct' },
+        ],
+        care: { metrics },
+        privacy: { packs: ['secrets@1', 'personal@1'] },
+      },
+      [],
+      [Flaky],
+    );
+    const capture = captureTrail();
+    capture.channel(mod.get(ChannelRegistry), 'estela.care.events');
+    capture.channel(mod.get(ChannelRegistry), 'error.channel');
+    const { restore } = errorLines();
+    await mod
+      .get(ChannelRegistry)
+      .send('flaky.call', { pan: '4111111111111111' }, { idempotencyKey: KEY })
+      .catch(() => undefined);
+    await new Promise((resolve) => setImmediate(resolve));
+    restore();
+    expect(capture.writes.some((w) => w.where === 'channel estela.care.events')).toBe(true);
+    expect(labels.length).toBeGreaterThan(0);
+    const labelText = JSON.stringify(labels);
+    for (const leak of [SECRET1, KEY, '4111111111111111']) expect(labelText).not.toContain(leak);
+    expectNoLeak(capture, [SECRET1, KEY, '4111 1111 1111 1111']);
     await mod.close();
   });
 });
