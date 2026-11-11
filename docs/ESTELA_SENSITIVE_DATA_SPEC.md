@@ -551,6 +551,7 @@ Finding codes (every one is an error unless marked):
 | `FINGERPRINT_SECRET_SHORT` | a fingerprint secret under 32 bytes, or a bad secret id | SD-15, SD-42 |
 | `SEALED_WITHOUT_KEYS` | `Remember.Sealed` resolved and no `sealKeys` | SD-31 |
 | `OUTCOME_ONLY_REPLAY` | request/reply inbound with `onDuplicate: 'replay'` and `Remember.OutcomeOnly` | SD-30 |
+| `INBOUND_SCOPE_CONFLICT` | two inbound endpoints on one channel declare a different privacy or `remember` for its shared `inbound:<channel>` scope; the problem names both handlers (endpoints that all declare none never conflict; the scope replays when any endpoint replays) | 6.6, SD-64 |
 | `INVALID_SELECTOR` | a selector that does not parse | SD-08 |
 | `PROTECTED_TRACE_FIELD` | a field rule on a protected trace field | SD-10 |
 | `UNKNOWN_PACK` | an unknown pack name or version | SD-12 |

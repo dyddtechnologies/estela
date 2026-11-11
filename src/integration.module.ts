@@ -76,6 +76,7 @@ import {
   careEventTrail,
   channelLevels,
   channelScopes,
+  inboundChannelScopes,
   inboundPrivacyGuard,
   inboundPrivacyScope,
   nestPrivacyLogger,
@@ -468,10 +469,10 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       const name = `${instance.constructor.name}.${methodName}`;
       scopes[`activator:${name}`] = activatorPrivacyScope(channels, name, metadata);
     }
-    for (const inbound of inbounds) {
-      const scope = inboundPrivacyScope(channels, inbound.spec, this.options.inbound);
-      scopes[`inbound:${inbound.spec.channel}`] = scope;
-    }
+    const inbound = inboundChannelScopes(channels, inbounds, this.options.inbound);
+    Object.assign(scopes, inbound.scopes);
+    findings.push(...inbound.findings);
+    problems.push(...inbound.problems);
     Object.assign(scopes, this.outboundPrivacyScopes());
     const levelsOf = (name: string): PrivacyLevel[] => channelLevels(channels, name);
     const flowScopes: Record<string, PrivacyScope> = {};

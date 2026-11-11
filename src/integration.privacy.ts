@@ -9,7 +9,11 @@ import type {
 import type { CareEdge, CareEvent } from './resilience/resilience.types';
 import type { PrivacyLevel, PrivacyScope, PrivacyScopes } from './sensitive/policy-resolver';
 import type { PrivacyEngine, PrivacyLogger } from './sensitive/privacy-engine';
-import { PrivacyConfigError } from './sensitive/privacy-errors';
+import {
+  PRIVACY_FINDING_CODES,
+  PrivacyConfigError,
+  type PrivacyFinding,
+} from './sensitive/privacy-errors';
 import type { PrivacyRef, Remember } from './sensitive/privacy.types';
 
 /**
@@ -73,7 +77,7 @@ export function inboundPrivacyScope(
   defaults: InboundDefaults | undefined,
 ): PrivacyScope {
   const { remember, onDuplicate } = idempotencyOf(spec, defaults);
-  const subject = `inbound '${spec.channel}'`;
+  const subject = subjectOf(spec);
   return {
     levels: [
       level('defaults', 'inbound defaults', defaults?.privacy),
@@ -83,6 +87,75 @@ export function inboundPrivacyScope(
     durable: true,
     replays: spec.requestReply === true && onDuplicate === 'replay' && spec.idempotency !== false,
   };
+}
+
+/**
+ * 6.6: endpoints that feed one channel share its `inbound:<channel>` scope, so they must declare
+ * the same privacy and `remember`. One error finding per channel whose endpoints differ; its
+ * problem names the handlers only. The scope replays when any of those endpoints replays, so
+ * `OUTCOME_ONLY_REPLAY` covers every endpoint. Endpoints that all declare none never conflict.
+ */
+export function inboundChannelScopes(
+  channels: readonly ChannelSpec[],
+  inbounds: readonly { spec: InboundSpec; handler: string }[],
+  defaults: InboundDefaults | undefined,
+): { scopes: Record<string, PrivacyScope>; findings: PrivacyFinding[]; problems: string[] } {
+  const first = new Map<string, { handler: string; scope: PrivacyScope }>();
+  const scopes: Record<string, PrivacyScope> = {};
+  const findings: PrivacyFinding[] = [];
+  const problems: string[] = [];
+  for (const { spec, handler } of inbounds) {
+    const name = `inbound:${spec.channel}`;
+    const scope = inboundPrivacyScope(channels, spec, defaults);
+    const seen = first.get(spec.channel);
+    if (seen === undefined) {
+      first.set(spec.channel, { handler, scope });
+      scopes[name] = scope;
+      continue;
+    }
+    if (scope.replays === true) scopes[name] = { ...scopes[name]!, replays: true };
+    if (sameLevels(seen.scope, scope) || findings.some((f) => f.subject === subjectOf(spec))) {
+      continue;
+    }
+    findings.push({
+      code: PRIVACY_FINDING_CODES.INBOUND_SCOPE_CONFLICT,
+      severity: 'error',
+      subject: subjectOf(spec),
+      path: 'privacy',
+    });
+    problems.push(
+      `${subjectOf(spec)}: endpoints ${seen.handler} and ${handler} declare different privacy ` +
+        'or remember for one channel',
+    );
+  }
+  return { scopes, findings, problems };
+}
+
+function subjectOf(spec: InboundSpec): string {
+  return `inbound '${spec.channel}'`;
+}
+
+function sameLevels(a: PrivacyScope, b: PrivacyScope): boolean {
+  if (a.levels.length !== b.levels.length) return false;
+  return a.levels.every((level, i) => sameValue(level.ref, b.levels[i]?.ref));
+}
+
+/** Structural equality of references: plain data by value, regexes by source, functions by identity. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a instanceof RegExp || b instanceof RegExp) {
+    return a instanceof RegExp && b instanceof RegExp && String(a) === String(b);
+  }
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every(
+    (key) =>
+      Object.hasOwn(b, key) &&
+      sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]),
+  );
 }
 
 /** The endpoint's `remember` and `onDuplicate` over the module inbound defaults. */

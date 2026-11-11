@@ -303,7 +303,9 @@ IntegrationModule.forRoot({
   references one.
 - **Levels:** module (`forRoot`), `inbound.privacy` (every endpoint), `ChannelSpec.privacy`, then
   `@InboundRest({ privacy })` (and the other inbound decorators), `@ServiceActivator(ch, { privacy })`
-  and `SagaRunnerOptions.privacy`. Outbound: `outbound.rest.defaults.privacy`, then a binding's or
+  and `SagaRunnerOptions.privacy`. Endpoints on one channel share its `inbound:<channel>` scope:
+  when they declare a different privacy or `remember`, boot fails (`INBOUND_SCOPE_CONFLICT`,
+  naming both handlers). Outbound: `outbound.rest.defaults.privacy`, then a binding's or
   `@OutboundRest`'s `privacy` (scope `outbound:<name>`, unioned with its bound channel), and a
   call's `request(target, message, { privacy })`, checked on the first call that carries it:
   an unknown name or `false` rejects with `PrivacyConfigError` before the request is sent.
