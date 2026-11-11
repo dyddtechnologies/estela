@@ -50,6 +50,10 @@
 10. Privacy (SPI-433): trail writers (logs, records, ledgers, tap copies, error envelopes) write
    hidden **copies**; never mutate the delivered message, the reply or the thrown error. Every new
    trail writer goes through `PrivacyEngine` (or the baseline) and gets an `expectNoLeak` test.
+   The one change to delivered data is a step's `Reach.Delivery` (SD-50): it goes through
+   `StepTrailPort.deliver` (`PrivacyEngine.forDelivery`), is built before anything is sent and
+   outside care's tries, and fails with non-retryable `DeliveryCopyError` instead of sending a
+   copy that is not faithful.
 
 ## Layer boundaries (enforced by dependency-cruiser)
 

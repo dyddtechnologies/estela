@@ -55,6 +55,14 @@ export interface StepTrailPort {
   tapCopy(msg: IntegrationMessage): IntegrationMessage | undefined;
   /** A `route` send to `channel` failed: the flow error envelope then adds that channel (SD-55). */
   routeFailed(error: unknown, channel: string): void;
+  /**
+   * The message a step delivers under `Reach.Delivery` (SD-50): the output of `transform` and
+   * `handle`, or the source of the hop copy sent to the target at index `target` of a send step.
+   * Only the payload and each `headers.jumpReplies` value are hidden; the same message comes back
+   * when no delivery-reach rule applies. Throws a non-retryable `DeliveryCopyError` when the copy
+   * cannot be faithful (SD-51), before anything is sent.
+   */
+  deliver(msg: IntegrationMessage, target?: number): IntegrationMessage;
 }
 
 /** One try as the care engine hands it to a step. */

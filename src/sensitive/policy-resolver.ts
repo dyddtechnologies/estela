@@ -747,7 +747,15 @@ export function checkPrivacy(
 // ---------- Scope resolution (6.6, 18.2) ----------
 
 const DELIVERY_KINDS: ReadonlySet<PrivacyLevelKind> = new Set(['step', 'target']);
-const NO_DELIVERY_STEPS: ReadonlySet<string> = new Set(['filter', 'wireTap', 'route', 'reply']);
+/** Step kinds whose output or hop copy a `Reach.Delivery` reference hides (18.3). */
+const DELIVERY_STEPS: ReadonlySet<string> = new Set([
+  'transform',
+  'handle',
+  'publish',
+  'to',
+  'fanout',
+  'jump',
+]);
 const NO_REMEMBER_KINDS: ReadonlySet<PrivacyLevelKind> = new Set(['flow', 'step', 'target']);
 
 function checkLevel(level: PrivacyLevel, expanded: ExpandedRef, env: CompileEnv): void {
@@ -756,7 +764,7 @@ function checkLevel(level: PrivacyLevel, expanded: ExpandedRef, env: CompileEnv)
     env.findings.add(CODE.INVALID_OPTION, subject, 'privacy.reach', 'is not a Reach value');
   }
   if (expanded.reach === Reach.Delivery) {
-    const allowed = DELIVERY_KINDS.has(level.kind) && !NO_DELIVERY_STEPS.has(level.stepKind ?? '');
+    const allowed = DELIVERY_KINDS.has(level.kind) && DELIVERY_STEPS.has(level.stepKind ?? '');
     if (!allowed) {
       env.findings.add(
         CODE.DELIVERY_REACH_LEVEL,
@@ -829,7 +837,8 @@ export function resolveScope(
   const builder = new PlanBuilder(env);
   const layers: (readonly Privacy[])[] = [moduleParts(module)];
   const notes: string[] = [];
-  let delivery: ExpandedRef | undefined;
+  // A send target's scope holds its step's reference and its own: both reach its hop copy.
+  const deliveries: ExpandedRef[] = [];
   for (const level of scope.levels) {
     const expanded = expandLevel(level, module, env);
     if (expanded === undefined) {
@@ -837,11 +846,11 @@ export function resolveScope(
       continue;
     }
     builder.names.push(...expanded.names);
-    if (expanded.reach === Reach.Delivery) delivery = expanded;
+    if (expanded.reach === Reach.Delivery) deliveries.push(expanded);
     layers.push(expanded.parts);
   }
   const subjects = ['module', ...scope.levels.map((level) => level.subject)];
-  const plan = buildPlan(builder, layers, subjects, module, scope, env, delivery);
+  const plan = buildPlan(builder, layers, subjects, module, scope, env, deliveries);
   if (plan.rememberDefaulted)
     notes.push(`privacy scope '${name}': remember defaulted to ${Remember.OutcomeOnly}`);
   if (scope.replays === true && plan.remember === Remember.OutcomeOnly) {
@@ -852,8 +861,8 @@ export function resolveScope(
       "Remember.OutcomeOnly cannot replay a request/reply endpoint (onDuplicate: 'replay')",
     );
   }
-  if (delivery !== undefined && scope.summary !== 'none')
-    notes.push(`privacy delivery-reach ${name}: ${delivery.reachReason ?? ''}`);
+  if (deliveries.length > 0 && scope.summary !== 'none')
+    notes.push(`privacy delivery-reach ${name}: ${plan.deliveryReason ?? ''}`);
   return { plan, notes };
 }
 
@@ -893,7 +902,7 @@ function buildPlan(
   module: ModuleLevel,
   scope: PrivacyScope,
   env: CompileEnv,
-  delivery: ExpandedRef | undefined,
+  deliveries: readonly ExpandedRef[],
 ): FrozenPlan {
   if (!module.off) builder.addBaseline();
   for (const [index, parts] of layers.entries()) {
@@ -915,15 +924,23 @@ function buildPlan(
     rememberDefaulted: defaulted,
     names: [...new Set(builder.names)],
     fieldCount: builder.fieldCount,
-    delivery: delivery === undefined ? undefined : deliveryPlan(delivery, env),
-    deliveryReason: delivery?.reachReason,
+    delivery: deliveries.length === 0 ? undefined : deliveryPlan(deliveries, env),
+    deliveryReason:
+      deliveries.length === 0
+        ? undefined
+        : deliveries.map((expanded) => expanded.reachReason ?? '').join('; '),
   };
 }
 
-/** D19: a delivery copy uses only the step's own reference, never the baseline or L1..L3. */
-function deliveryPlan(expanded: ExpandedRef, env: CompileEnv): FrozenPlan {
+/**
+ * D19: a delivery copy uses only the delivery-reach references of the step and its target, never
+ * the baseline or L1..L3.
+ */
+function deliveryPlan(deliveries: readonly ExpandedRef[], env: CompileEnv): FrozenPlan {
   const builder = new PlanBuilder(env);
-  for (const part of expanded.parts) builder.addPrivacy(part, 0, 'delivery', 'privacy');
+  for (const expanded of deliveries) {
+    for (const part of expanded.parts) builder.addPrivacy(part, 0, 'delivery', 'privacy');
+  }
   builder.finish();
   return {
     trie: builder.trie,
@@ -931,7 +948,7 @@ function deliveryPlan(expanded: ExpandedRef, env: CompileEnv): FrozenPlan {
     explicit: true,
     remember: undefined,
     rememberDefaulted: false,
-    names: expanded.names,
+    names: [...new Set(deliveries.flatMap((expanded) => expanded.names))],
     fieldCount: builder.fieldCount,
     delivery: undefined,
     deliveryReason: undefined,
@@ -948,7 +965,7 @@ export function resolveModule(module: ModuleLevel, env: CompileEnv): FrozenPlan 
     module,
     { levels: [], durable: true },
     env,
-    undefined,
+    [],
   );
 }
 

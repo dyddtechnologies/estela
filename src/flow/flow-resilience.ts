@@ -207,8 +207,9 @@ export function jumpWithCare(
   ctx: FlowStepContext,
   target: TargetCarePort,
   channel: string,
+  source: IntegrationMessage = ctx.msg,
 ): Promise<{ value: unknown; planB: boolean }> {
-  const hop = nextHop(ctx.msg, { channel, component: `jump:${ctx.flowName}` }, { reply: 'none' });
+  const hop = nextHop(source, { channel, component: `jump:${ctx.flowName}` }, { reply: 'none' });
   hop.headers[JUMP_REPLY_HEADER] = '1';
   return target.run(ctx.msg, (current) => jumpTry(ctx, channel, hop, current));
 }

@@ -17,8 +17,9 @@ export class PublishStep implements FlowStep {
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
+    // SD-50: the hop copy is hidden before care runs; the main path keeps ctx.msg.
     const hop = nextHop(
-      ctx.msg,
+      ctx.trail?.deliver(ctx.msg) ?? ctx.msg,
       { channel: this.channel, component: `publish:${ctx.flowName}` },
       { reply: 'none' },
     );

@@ -3,11 +3,13 @@ import {
   DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_NODES,
   DEFAULT_MAX_SCAN_BYTES,
+  Reach,
   Remember,
   type PrivacyModuleOptions,
 } from './privacy.types';
 import {
   PRIVACY_FINDING_CODES as CODE,
+  DeliveryCopyError,
   PrivacyConfigError,
   type PrivacyFinding,
 } from './privacy-errors';
@@ -397,8 +399,15 @@ export class PrivacyEngine {
       return this.walkWith(plan, value, { output: TrailOutput.Capture, scope }, true);
     } catch (error) {
       this.counters.deliveryCopyFailed++;
-      throw error;
+      // A throwing rule (a `confirm` callback) must not reach the sender as a retryable error.
+      if (error instanceof DeliveryCopyError) throw error;
+      throw new DeliveryCopyError(scope, 'hiding threw');
     }
+  }
+
+  /** @internal True when the scope has delivery-reach rules (SD-50). */
+  delivers(scope: string): boolean {
+    return this.parts.scopes.get(scope)?.delivery !== undefined;
   }
 
   /** @internal The frozen plan of a scope, for the boot resolver and the graph (SD-59). */
@@ -570,6 +579,15 @@ function checkModule(options: PrivacyModuleOptions, env: CompileEnv): void {
         `must be an integer in ${range[0]}..${range[1]}`,
       );
     }
+  }
+  // The type has no `reach`; a JavaScript caller can still pass it (SD-50).
+  if ((options as { reach?: unknown }).reach === Reach.Delivery) {
+    env.findings.add(
+      CODE.DELIVERY_REACH_LEVEL,
+      'module',
+      'privacy.reach',
+      'Reach.Delivery is accepted only on a flow step or target',
+    );
   }
   checkPrivacy(options, 'module', 'privacy', env);
   checkProfiles(env);

@@ -3,6 +3,7 @@ import type { PrivacyLevel, PrivacyScope, PrivacyScopes } from '../sensitive/pol
 import type { PrivacyEngine, PrivacyLogger } from '../sensitive/privacy-engine';
 import { TrailOutput } from '../sensitive/privacy-engine';
 import { PRIVACY_FINDING_CODES, type PrivacyFinding } from '../sensitive/privacy-errors';
+import { Reach, type PrivacyRef } from '../sensitive/privacy.types';
 import { envelopeBody, envelopeError, storedError } from '../trace/trail';
 import {
   TapCopy,
@@ -22,9 +23,23 @@ const REASON_MAX = 200;
 /** Steps whose subject unions the destination channels and the target levels (18.2). */
 const SEND_KINDS: ReadonlySet<FlowStepKind> = new Set(['to', 'publish', 'route', 'fanout', 'jump']);
 
+/** Send steps with several targets: each target's hop copy has its own scope (SD-47, SD-50). */
+const MULTI_KINDS: ReadonlySet<FlowStepKind> = new Set(['fanout', 'jump']);
+
+/** Only an inline reference carries `reach` (profiles cannot). */
+function deliveryReach(ref: PrivacyRef | false | undefined): boolean {
+  return (
+    typeof ref === 'object' &&
+    !Array.isArray(ref) &&
+    (ref as { reach?: unknown }).reach === Reach.Delivery
+  );
+}
+
 const flowScope = (flow: string): string => `flow:${flow}`;
 const stepScope = (flow: string, id: string): string => `flow:${flow}#${id}`;
 const stepSubject = (flow: string, id: string): string => `flow '${flow}' step '${id}'`;
+const replyScopeName = (scope: string, channel: string): string =>
+  `${scope}:jumpReplies:${channel}`;
 
 /** Where the subjects of one step live, by scope name. */
 interface StepLayout {
@@ -32,8 +47,15 @@ interface StepLayout {
   /** `flow:<flow>#<stepId>`: every sink of the step and the flow sinks when it fails. */
   readonly scope: string;
   readonly levels: readonly PrivacyLevel[];
-  /** Scope of each `wait: false` target, by target index; siblings never share one (SD-47). */
-  readonly targets: ReadonlyMap<number, { scope: string; levels: readonly PrivacyLevel[] }>;
+  /**
+   * Scope of each `wait: false` or delivery-reach target of `fanoutTo`/`jumpTo`, by target index;
+   * siblings never share one (SD-47, SD-50).
+   */
+  readonly targets: ReadonlyMap<number, ScopedLevels>;
+  /** Wire tap only: one scope per `jumpReplies` channel this flow jumps to (SD-53). */
+  readonly replies?: ReadonlyMap<string, ScopedLevels>;
+  /** Wire tap only: the levels of the tap copy, for a `jumpReplies` channel met at run time. */
+  readonly tapLevels?: readonly PrivacyLevel[];
   /** `route` only: the levels of one run-time target channel (SD-55). */
   readonly routeLevels?: (channel: string) => PrivacyLevel[];
 }
@@ -44,6 +66,35 @@ function targetsOf(step: FlowStep): readonly FlowTarget[] {
   if (targets !== undefined) return targets;
   const channel = step.describe().channel;
   return typeof channel === 'string' ? [{ channel }] : [];
+}
+
+/**
+ * The levels of each channel the steps before `upTo` jump to: the jump step and that target
+ * (SD-53). A channel jumped to twice unions both.
+ */
+function jumpLevels(name: string, built: BuiltFlow, upTo: number): Map<string, PrivacyLevel[]> {
+  const out = new Map<string, PrivacyLevel[]>();
+  for (const [index, step] of built.steps.slice(0, upTo).entries()) {
+    if (step.kind !== 'jump') continue;
+    const subject = stepSubject(name, stepIdOf(step, index));
+    const own: PrivacyLevel = {
+      kind: 'step',
+      subject,
+      ref: step.params?.privacy,
+      stepKind: 'jump',
+    };
+    for (const target of targetsOf(step)) {
+      const levels = out.get(target.channel) ?? [];
+      levels.push(own, {
+        kind: 'target',
+        subject: `${subject} target '${target.channel}'`,
+        ref: target.privacy,
+        stepKind: 'jump',
+      });
+      out.set(target.channel, levels);
+    }
+  }
+  return out;
 }
 
 function flowLevel(name: string, built: BuiltFlow): PrivacyLevel {
@@ -60,45 +111,79 @@ function layoutOf(name: string, built: BuiltFlow, levelsOf: ChannelPrivacyLevels
   const flow = flowLevel(name, built);
   return built.steps.map((step, index) => {
     const id = stepIdOf(step, index);
-    const subject = stepSubject(name, id);
     const own: PrivacyLevel = {
       kind: 'step',
-      subject,
+      subject: stepSubject(name, id),
       ref: step.params?.privacy,
       stepKind: step.kind,
     };
     const scope = stepScope(name, id);
-    const targets = new Map<number, { scope: string; levels: readonly PrivacyLevel[] }>();
     if (step instanceof WireTapStep) {
       const levels = [...levelsOf(step.channel), ...source, flow, own];
-      return { id, scope, levels, targets };
+      const replies = new Map<string, ScopedLevels>();
+      for (const [channel, jumps] of jumpLevels(name, built, index)) {
+        const replyLevels = [...levels, ...levelsOf(channel), ...jumps];
+        replies.set(channel, { scope: replyScopeName(scope, channel), levels: replyLevels });
+      }
+      return { id, scope, levels, targets: new Map(), replies, tapLevels: levels };
     }
-    if (!SEND_KINDS.has(step.kind)) return { id, scope, levels: [...source, flow, own], targets };
-    const dests = targetsOf(step);
-    const targetLevel = (target: FlowTarget): PrivacyLevel => ({
-      kind: 'target',
-      subject: `${subject} target '${target.channel}'`,
-      ref: target.privacy,
-      stepKind: step.kind,
-    });
-    const channels = [...new Set(dests.map((target) => target.channel))];
-    const levels = [...source, ...channels.flatMap(levelsOf), flow, own, ...dests.map(targetLevel)];
-    const used = new Set<string>();
-    for (const [at, target] of dests.entries()) {
-      if (target.wait !== false) continue;
-      const base = `${scope}:${target.channel}`;
-      const targetScope = used.has(base) ? `${base}~${at}` : base;
-      used.add(base);
-      const targetLevels = [...source, ...levelsOf(target.channel), flow, own, targetLevel(target)];
-      targets.set(at, { scope: targetScope, levels: targetLevels });
+    if (!SEND_KINDS.has(step.kind)) {
+      return { id, scope, levels: [...source, flow, own], targets: new Map() };
     }
-    const layout: StepLayout = { id, scope, levels, targets };
-    if (step.kind !== 'route') return layout;
-    return {
-      ...layout,
-      routeLevels: (channel) => [...source, ...levelsOf(channel), flow, own],
-    };
+    return sendLayout({ id, scope, step, own, source, flow, levelsOf });
   });
+}
+
+interface ScopedLevels {
+  readonly scope: string;
+  readonly levels: readonly PrivacyLevel[];
+}
+
+interface SendInput {
+  readonly id: string;
+  readonly scope: string;
+  readonly step: FlowStep;
+  readonly own: PrivacyLevel;
+  readonly source: readonly PrivacyLevel[];
+  readonly flow: PrivacyLevel;
+  readonly levelsOf: ChannelPrivacyLevels;
+}
+
+/** A send step: destination channels and target levels; own scopes per target where needed. */
+function sendLayout(input: SendInput): StepLayout {
+  const { id, scope, step, own, source, flow, levelsOf } = input;
+  const dests = targetsOf(step);
+  const targetLevel = (target: FlowTarget): PrivacyLevel => ({
+    kind: 'target',
+    subject: `${own.subject} target '${target.channel}'`,
+    ref: target.privacy,
+    stepKind: step.kind,
+  });
+  const channels = [...new Set(dests.map((target) => target.channel))];
+  const levels = [...source, ...channels.flatMap(levelsOf), flow, own, ...dests.map(targetLevel)];
+  const targets = new Map<number, ScopedLevels>();
+  const used = new Set<string>();
+  for (const [at, target] of dests.entries()) {
+    if (!ownScope(step, target)) continue;
+    const base = `${scope}:${target.channel}`;
+    const targetScope = used.has(base) ? `${base}~${at}` : base;
+    used.add(base);
+    const targetLevels = [...source, ...levelsOf(target.channel), flow, own, targetLevel(target)];
+    targets.set(at, { scope: targetScope, levels: targetLevels });
+  }
+  const layout: StepLayout = { id, scope, levels, targets };
+  if (step.kind !== 'route') return layout;
+  return { ...layout, routeLevels: (channel) => [...source, ...levelsOf(channel), flow, own] };
+}
+
+/**
+ * A target gets its own scope for its `wait: false` envelope (SD-47) or, on `fanoutTo`/`jumpTo`,
+ * for a delivery-reach hop copy of the step or the target (SD-50).
+ */
+function ownScope(step: FlowStep, target: FlowTarget): boolean {
+  if (target.wait === false) return true;
+  if (!MULTI_KINDS.has(step.kind)) return false;
+  return deliveryReach(step.params?.privacy) || deliveryReach(target.privacy);
 }
 
 /**
@@ -118,7 +203,7 @@ export function flowPrivacyScopes(
   };
   for (const layout of layoutOf(name, built, levelsOf)) {
     scopes[layout.scope] = { levels: layout.levels, summary: 'explicit' };
-    for (const target of layout.targets.values()) {
+    for (const target of [...layout.targets.values(), ...(layout.replies?.values() ?? [])]) {
       scopes[target.scope] = { levels: target.levels, summary: 'none' };
     }
   }
@@ -199,8 +284,11 @@ export class FlowPrivacy {
   private readonly ports = new Map<number, StepTrailPort>();
   /** The channel a `route` send failed on, by the error it threw. */
   private readonly routed = new WeakMap<object, string>();
-  /** Run-time `route` target scopes, by step index and registered channel (SD-55). */
-  private readonly routeScopes = new Map<number, Map<string, string>>();
+  /**
+   * Scopes resolved at run time, by step index and registered channel: `route` targets (SD-55)
+   * and `jumpReplies` channels a tap copy meets that this flow does not jump to (SD-53).
+   */
+  private readonly lateScopes = new Map<number, Map<string, string>>();
 
   constructor(
     private readonly engine: PrivacyEngine,
@@ -243,17 +331,43 @@ export class FlowPrivacy {
 
   /** One plan per registered channel, resolved at its first failure (SD-55, 18.5). */
   private routeScope(step: number, layout: StepLayout, channel: string): string | undefined {
-    if (layout.routeLevels === undefined || !this.env.isRegistered(channel)) return undefined;
-    let cache = this.routeScopes.get(step);
+    const levels = layout.routeLevels;
+    if (levels === undefined) return undefined;
+    return this.lateScope(step, layout, channel, `${layout.scope}:${channel}`, () =>
+      levels(channel),
+    );
+  }
+
+  /** SD-53: the scope of `jumpReplies[channel]` in the tap copy of step `step`. */
+  private replyScope(step: number, layout: StepLayout, channel: string): string {
+    const known = layout.replies?.get(channel);
+    if (known !== undefined) return known.scope;
+    const tap = layout.tapLevels ?? layout.levels;
+    const scope = replyScopeName(layout.scope, channel);
+    const late = this.lateScope(step, layout, channel, scope, () => [
+      ...tap,
+      ...this.env.levelsOf(channel),
+    ]);
+    return late ?? layout.scope;
+  }
+
+  private lateScope(
+    step: number,
+    layout: StepLayout,
+    channel: string,
+    scope: string,
+    levels: () => PrivacyLevel[],
+  ): string | undefined {
+    if (!this.env.isRegistered(channel)) return undefined;
+    let cache = this.lateScopes.get(step);
     if (cache === undefined) {
       cache = new Map();
-      this.routeScopes.set(step, cache);
+      this.lateScopes.set(step, cache);
     }
     const cached = cache.get(channel);
     if (cached !== undefined) return cached;
-    const scope = `${layout.scope}:${channel}`;
     const added = this.engine.addScopes(
-      { [scope]: { levels: layout.routeLevels(channel), summary: 'none' } },
+      { [scope]: { levels: levels(), summary: 'none' } },
       this.env.logger === undefined ? {} : { logger: this.env.logger },
     );
     // Boot validated every reference, so a finding here cannot happen; the step subject stays.
@@ -270,12 +384,71 @@ export class FlowPrivacy {
     return {
       envelopeBody: (body, target) =>
         envelopeBody(engine, body, { scope: layout?.targets.get(target)?.scope ?? scope }),
-      tapCopy: (msg) => (tap?.shown === true ? shownCopy(engine, tap.scope, msg) : undefined),
+      tapCopy: (msg) => {
+        if (tap?.shown !== true || layout === undefined) return undefined;
+        return shownCopy(engine, tap.scope, msg, (channel) =>
+          this.replyScope(index, layout, channel),
+        );
+      },
       routeFailed: (error, channel) => {
         if (typeof error === 'object' && error !== null) this.routed.set(error, channel);
       },
+      deliver: (msg, target) => {
+        // Every delivery-reach target of fanoutTo/jumpTo has its own scope; the step scope
+        // unions all of them, so a target without one gets the message as it is.
+        const delivery = target === undefined ? scope : layout?.targets.get(target)?.scope;
+        if (delivery === undefined || !engine.delivers(delivery)) return msg;
+        return deliveredCopy(engine, delivery, msg);
+      },
     };
   }
+}
+
+/**
+ * SD-50, SD-51: the payload and each `jumpReplies` value through the scope's delivery-reach
+ * rules; other headers are untouched and unchanged parts keep their reference.
+ */
+function deliveredCopy(
+  engine: PrivacyEngine,
+  scope: string,
+  msg: IntegrationMessage,
+): IntegrationMessage {
+  const payload = engine.forDelivery(msg.payload, scope);
+  const replies = msg.headers.jumpReplies;
+  let delivered = replies;
+  if (replies !== undefined) {
+    const out: Record<string, unknown> = {};
+    for (const [channel, value] of Object.entries(replies)) {
+      out[channel] = engine.forDelivery(value, scope);
+      if (out[channel] !== value) delivered = out;
+    }
+  }
+  if (payload === msg.payload && delivered === replies) return msg;
+  if (delivered === replies || delivered === undefined) return { payload, headers: msg.headers };
+  return { payload, headers: { ...msg.headers, jumpReplies: delivered } };
+}
+
+/**
+ * SD-53: each `jumpReplies` value shown as a payload, with the tap's policy united with the
+ * jumped channel and that jump's privacy. Keys are channel names and are kept.
+ */
+function shownReplies(
+  engine: PrivacyEngine,
+  replies: Readonly<Record<string, unknown>>,
+  scopeOf: (channel: string) => string,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [channel, value] of Object.entries(replies)) {
+    const shown = engine.forTrail(
+      { payload: value },
+      { output: TrailOutput.WireTap, scope: scopeOf(channel) },
+    );
+    out[channel] =
+      typeof shown === 'object' && shown !== null
+        ? (shown as { payload?: unknown }).payload
+        : shown;
+  }
+  return out;
 }
 
 /** SD-28: same id, copied history, hidden payload and headers (trace fields stay intact). */
@@ -283,14 +456,20 @@ function shownCopy(
   engine: PrivacyEngine,
   scope: string,
   msg: IntegrationMessage,
+  replyScope: (channel: string) => string,
 ): IntegrationMessage {
+  const { jumpReplies, ...rest } = msg.headers;
+  const own = jumpReplies === undefined ? msg.headers : (rest as MessageHeaders);
   const shown = engine.forTrail(
-    { payload: msg.payload, headers: msg.headers },
+    { payload: msg.payload, headers: own },
     { output: TrailOutput.WireTap, scope },
   ) as { payload?: unknown; headers?: MessageHeaders } | string;
+  const history = [...msg.headers.history];
+  const replies =
+    jumpReplies === undefined ? {} : { jumpReplies: shownReplies(engine, jumpReplies, replyScope) };
   if (typeof shown !== 'object') {
-    return { payload: shown, headers: { ...msg.headers, history: [...msg.headers.history] } };
+    return { payload: shown, headers: { ...own, ...replies, history } };
   }
-  const headers = { ...(shown.headers ?? msg.headers) };
-  return { payload: shown.payload, headers: { ...headers, history: [...msg.headers.history] } };
+  const headers = { ...(shown.headers ?? own) };
+  return { payload: shown.payload, headers: { ...headers, ...replies, history } };
 }
