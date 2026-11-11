@@ -8,7 +8,7 @@ import {
   type CarePlan,
 } from '../resilience/resilience.plan';
 import { CareConfigError, type FlowParameterFinding } from '../resilience/resilience.errors';
-import { planBLeaveRunner } from '../resilience/fallback';
+import { planBLeaveRunner, withLeftKeys } from '../resilience/fallback';
 import type { Care, CareRef } from '../resilience/resilience.types';
 import type { CareEngine } from '../resilience/runtime';
 import { PrivacyConfigError, type PrivacyFinding } from '../sensitive/privacy-errors';
@@ -602,9 +602,9 @@ export class FlowParameterResolver {
         }
       : this.runtime.channelPlanB();
     const planBLeave = send
-      ? // D39: `PlanBMode.Leave` on `to` sends the same hop without its reply routing.
+      ? // D39, D42: `PlanBMode.Leave` on `to` sends the hop without reply routing, with its own key.
         async (channel: string, ctx: { data?: unknown }): Promise<unknown> => {
-          await registry.sendMessage(channel, withoutReplyRouting(hopOf(ctx)));
+          await registry.sendMessage(channel, withLeftKeys(withoutReplyRouting(hopOf(ctx))));
           return undefined;
         }
       : planBLeaveRunner((channel, payload, headers) => registry.send(channel, payload, headers));

@@ -156,9 +156,13 @@ export const DEFAULT_HIDDEN_HEADERS: readonly string[] = Object.freeze([
   'x-xsrf-token',
 ]);
 
-/** Headers that carry an idempotency key: fingerprint-or-hide (SD-09). */
+/**
+ * Headers that carry an idempotency key: fingerprint-or-hide (SD-09). `leftFromKey` is the key a
+ * message left by plan B was left from (D42).
+ */
 export const IDEMPOTENCY_KEY_HEADERS: readonly string[] = Object.freeze([
   'idempotencyKey',
+  'leftFromKey',
   'idempotency-key',
   'x-idempotency-key',
 ]);

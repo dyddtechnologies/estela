@@ -517,6 +517,21 @@ class HandoffActivator {
   }
 }
 
+/**
+ * The parking lot: plan B leaves unsent replies on the wa.reply.parked queue and nobody waits on
+ * them. Each leave has a key of its own (D42), so the same reply left again after a failed drain
+ * reaches this activator too; `leftFromKey` is the key the drain sends it on with.
+ */
+@Injectable()
+class ParkingActivator {
+  constructor(@Inject(POD) private readonly pod: string) {}
+
+  @ServiceActivator('wa.reply.parked', { privacy: 'wa-outbound' })
+  park(request: OutboundWhatsApp, msg: IntegrationMessage): void {
+    parked.push({ pod: this.pod, request, headers: msg.headers });
+  }
+}
+
 /** Returns a value on purpose: a wireTap copy carries no reply routing, so it answers nobody. */
 @Injectable()
 class AuditActivator {
@@ -740,20 +755,12 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         RoutingActivator,
         WhatsAppSendActivator,
         HandoffActivator,
+        ParkingActivator,
         AuditActivator,
       ],
     }).compile();
     const app = moduleRef.createNestApplication({ logger: false });
     await app.listen(0, '127.0.0.1');
-    // The parking lot: plan B leaves unsent replies on this queue and nobody waits on it. A plain
-    // subscriber, not an activator: an activator claims the idempotencyKey the left message keeps,
-    // so the same reply left again after a failed drain would be a silent duplicate.
-    app
-      .get(ChannelRegistry)
-      .get('wa.reply.parked')
-      .subscribe((msg) => {
-        parked.push({ pod: name, request: msg.payload as OutboundWhatsApp, headers: msg.headers });
-      });
     trail.channel(app.get(ChannelRegistry), 'error.channel');
     trail.channel(app.get(ChannelRegistry), 'estela.care.events');
     const interceptor = new InboundInterceptor(app.get<InboundInterceptorDeps>(INBOUND_DEPS));
@@ -796,9 +803,9 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
   }
 
   const sentBodies = (): string[] => whatsapp.sent.map((s) => s.request.body);
-  /** A drain worker re-sends a parked reply with the key and the tenant headers it was left with. */
+  /** A drain worker re-sends a parked reply with the key it was left from and its tenant headers. */
   const drainHeaders = (entry: (typeof parked)[number]) => ({
-    idempotencyKey: String(entry.headers.idempotencyKey),
+    idempotencyKey: String(entry.headers.leftFromKey),
     organizationId: entry.headers.organizationId,
     businessNumber: entry.headers.businessNumber,
   });
@@ -1047,10 +1054,13 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     // Plan B left the reply on the queue without waiting: the parked copy cannot answer anyone.
     expect(parked[0]?.headers).not.toHaveProperty('replyChannel');
     expect(parked[0]?.headers).toMatchObject({
-      idempotencyKey: request.messageSid,
+      leftFromKey: request.messageSid,
       organizationId: ORG_FARMACRO,
       businessNumber: BUSINESS_NUMBER,
     });
+    expect(
+      String(parked[0]?.headers.idempotencyKey).startsWith(`${request.messageSid}:left:`),
+    ).toBe(true);
     expect(
       pod.events.filter((e) => e.binding === SEND_BINDING && e.type === 'plan-b.used'),
     ).toHaveLength(1);
@@ -1061,11 +1071,29 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     ]);
     expect((await inboundRecord(request.messageSid))?.status).not.toBe('completed');
 
-    // ms-whatsapp is back: draining the parked reply sends it once, with the same key.
-    await pod.registry.send('wa.send', parked[0]!.request, drainHeaders(parked[0]!));
+    // The first drain finds ms-whatsapp still down: plan B leaves the same reply a second time,
+    // and the parking activator takes it (D42: each leave has a key of its own).
+    whatsapp.failNext = 3;
+    const failedDrain = pod.registry.send('wa.send', parked[0]!.request, drainHeaders(parked[0]!));
+    await until('the first drain try', () => whatsapp.attempts.length === 4);
+    await clock.advance(300);
+    await until('the second drain try', () => whatsapp.attempts.length === 5);
+    await clock.advance(600);
+    await failedDrain;
+    await until('the reply parked again', () => parked.length === 2);
+    expect(whatsapp.attempts.slice(3).every((a) => a.idempotencyKey === request.messageSid)).toBe(
+      true,
+    );
+    expect(parked[1]?.request).toEqual(parked[0]?.request);
+    expect(parked[1]?.headers.leftFromKey).toBe(request.messageSid);
+    expect(parked[1]?.headers.idempotencyKey).not.toBe(parked[0]?.headers.idempotencyKey);
+
+    // ms-whatsapp is back: draining the parked reply sends it once, with the key it was left from.
+    await pod.registry.send('wa.send', parked[1]!.request, drainHeaders(parked[1]!));
     expect(whatsapp.sent.map((s) => [s.request.inReplyTo, s.request.body])).toEqual([
       [request.messageSid, LLM_TEXT],
     ]);
+    expect(whatsapp.sent[0]?.idempotencyKey).toBe(request.messageSid);
   });
 
   it('RS-22 RS-23 RS-37 RS-21: a 120-message burst on two pods: inbound sheds before any claim, and sends keep 20/s + burst 40 across both pods', async () => {

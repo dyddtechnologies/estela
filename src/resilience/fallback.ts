@@ -1,4 +1,10 @@
-import { isReservedHeader, type IntegrationMessage } from '../message';
+import {
+  isReservedHeader,
+  LEFT_FROM_KEY_HEADER,
+  newId,
+  type IntegrationMessage,
+  type MessageHeaders,
+} from '../message';
 import { turnedAwayTrigger, PlanBFailedError } from './resilience.errors';
 import type { PlanBPlan } from './resilience.plan';
 import {
@@ -63,10 +69,39 @@ export type ChannelSendFn = (
   headers: Record<string, unknown>,
 ) => Promise<unknown>;
 
+/** The idempotency headers of one left message (D42). */
+export interface LeftKeyHeaders {
+  idempotencyKey?: string;
+  leftFromKey?: string;
+}
+
 /**
- * Headers of a message left by plan B: its trace, its idempotency key and its own headers, never
- * the headers Estela owns (reply routing, care, history), so the channel's consumer cannot answer
- * the caller.
+ * D42: the idempotency headers of one leave. The left message gets a key of its own, the origin
+ * key + `:left:` + a fresh id, so a consumer that claims keys (an activator) takes every leave of
+ * the same message and still drops a redelivery of one leave. `leftFromKey` keeps the origin key
+ * for correlation and for a drain that sends the message on again. A message that was itself left
+ * keeps its origin key, so keys do not grow when a parked message is left again.
+ */
+export function leftKeyHeaders(headers: MessageHeaders): LeftKeyHeaders {
+  const key = headers.idempotencyKey;
+  if (typeof key !== 'string') return {};
+  const from = headers[LEFT_FROM_KEY_HEADER];
+  const origin = typeof from === 'string' && key.startsWith(`${from}:left:`) ? from : key;
+  return { idempotencyKey: `${origin}:left:${newId()}`, [LEFT_FROM_KEY_HEADER]: origin };
+}
+
+/** `msg` with the idempotency headers of one leave (D42) in place of its own. */
+export function withLeftKeys(msg: IntegrationMessage): IntegrationMessage {
+  const headers: MessageHeaders = { ...msg.headers };
+  delete headers.idempotencyKey;
+  delete headers[LEFT_FROM_KEY_HEADER];
+  return { payload: msg.payload, headers: { ...headers, ...leftKeyHeaders(msg.headers) } };
+}
+
+/**
+ * Headers of a message left by plan B: its trace, a key of its own derived from its idempotency
+ * key (D42) and its own headers, never the headers Estela owns (reply routing, care, history), so
+ * the channel's consumer cannot answer the caller.
  */
 export function leftHeaders(msg: IntegrationMessage | undefined): Record<string, unknown> {
   if (msg === undefined) return {};
@@ -77,10 +112,7 @@ export function leftHeaders(msg: IntegrationMessage | undefined): Record<string,
   headers.traceId = msg.headers.traceId;
   headers.correlationId = msg.headers.correlationId;
   headers.causationId = msg.headers.id;
-  if (msg.headers.idempotencyKey !== undefined) {
-    headers.idempotencyKey = msg.headers.idempotencyKey;
-  }
-  return headers;
+  return { ...headers, ...leftKeyHeaders(msg.headers) };
 }
 
 /**

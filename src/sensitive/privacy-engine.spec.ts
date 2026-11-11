@@ -279,7 +279,7 @@ describe('PrivacyEngine: marking and patterns', () => {
   it('SD-09 idempotency key header is fingerprinted, or hidden without a fingerprint secret', async () => {
     const message = {
       payload: {},
-      headers: { idempotencyKey: 'K-555', 'Idempotency-Key': 'K-555' },
+      headers: { idempotencyKey: 'K-555', 'Idempotency-Key': 'K-555', leftFromKey: 'K-555' },
     };
     const hidden = (await PrivacyEngine.compile(undefined)).forTrail(
       message,
@@ -288,10 +288,13 @@ describe('PrivacyEngine: marking and patterns', () => {
     expect(hidden.headers).toEqual({
       idempotencyKey: '[HIDDEN:header]',
       'Idempotency-Key': '[HIDDEN:header]',
+      leftFromKey: '[HIDDEN:header]',
     });
     const engine = await PrivacyEngine.compile(withSecret);
     const shown = engine.forTrail(message, LOG) as typeof message;
     expect(shown.headers.idempotencyKey).toMatch(/^fp:k1:[0-9a-f]{16}$/);
+    // D42: the origin key of a left message correlates with the key it was left from.
+    expect(shown.headers.leftFromKey).toBe(shown.headers.idempotencyKey);
   });
 
   it('SD-11 patterns redact nested strings, messages, stacks and causes', async () => {
@@ -529,7 +532,7 @@ describe('PrivacyEngine: fingerprint secret, stats and boot lines', () => {
     );
     const summary = logger.lines.find((line) => line.startsWith("log privacy scope 'module'"));
     expect(summary).toBe(
-      "log privacy scope 'module': fields=28 patterns=8 uses=secrets@1 remember=outcome-only fingerprint=k1",
+      "log privacy scope 'module': fields=29 patterns=8 uses=secrets@1 remember=outcome-only fingerprint=k1",
     );
     const text = logger.lines.join('\n');
     expect(text).not.toContain('ssn');

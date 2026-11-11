@@ -236,11 +236,12 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       expect(parked).toHaveLength(1);
       expect(parked[0]?.payload).toEqual(request);
       expect(parked[0]?.headers).toMatchObject({
-        idempotencyKey: 'SM01',
+        leftFromKey: 'SM01',
         traceId: 'trace-1',
         causationId: msg.headers.id,
         organizationId: 'org-1',
       });
+      expect(parked[0]?.headers.idempotencyKey).toMatch(/^SM01:left:.+/);
       expect(parked[0]?.headers).not.toHaveProperty('replyChannel');
       expect(parked[0]?.headers).not.toHaveProperty(JUMP_REPLY_HEADER);
       expect(parked[0]?.headers).not.toHaveProperty(PLAN_B_HEADER);
@@ -279,6 +280,9 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       const parked = drain(w.registry);
       await tick();
       expect(parked.map((m) => m.payload)).toEqual([{ body: 'x' }]);
+      // Without a key there is nothing to derive: the left message carries no key either.
+      expect(parked[0]?.headers).not.toHaveProperty('idempotencyKey');
+      expect(parked[0]?.headers).not.toHaveProperty('leftFromKey');
       expect(w.events.map((e) => e.type)).toContain('plan-b.used');
     });
 
@@ -307,6 +311,75 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       );
       expect(events.map((e) => e.type)).toContain('plan-b.failed');
       expect(errors).toHaveLength(1);
+    });
+
+    describe('an activator on the parking channel (D42)', () => {
+      class ParkingActivator {
+        received: IntegrationMessage[] = [];
+
+        @ServiceActivator('wa.reply.parked')
+        park(_payload: unknown, msg: IntegrationMessage): void {
+          this.received.push(msg);
+        }
+      }
+
+      it('receives the same message every time it is left, with the original key in leftFromKey', async () => {
+        const w = world();
+        const parking = new ParkingActivator();
+        subscribe(w, new SendActivator(), parking);
+        const request = { inReplyTo: 'SM05', body: 'Hola' };
+        // Two separate failures of the same message: the second is left again.
+        for (let n = 0; n < 2; n += 1) {
+          await w.registry.send('wa.send', request, { idempotencyKey: 'SM05' });
+          await tick();
+        }
+
+        expect(parking.received.map((m) => m.payload)).toEqual([request, request]);
+        const keys = parking.received.map((m) => m.headers.idempotencyKey);
+        expect(new Set(keys).size).toBe(2);
+        for (const left of parking.received) {
+          expect(left.headers.idempotencyKey).toMatch(/^SM05:left:.+/);
+          expect(left.headers.leftFromKey).toBe('SM05');
+        }
+      });
+
+      it('still drops a redelivery of one left message', async () => {
+        const w = world();
+        const parking = new ParkingActivator();
+        subscribe(w, new SendActivator(), parking);
+        await w.registry.send('wa.send', { inReplyTo: 'SM06' }, { idempotencyKey: 'SM06' });
+        await tick();
+        expect(parking.received).toHaveLength(1);
+
+        // The transport delivers the same left message again (at-least-once).
+        await w.registry.sendMessage('wa.reply.parked', parking.received[0]!);
+        await tick();
+        expect(parking.received).toHaveLength(1);
+      });
+
+      it('a message left again by the parking consumer keeps the first key as leftFromKey', async () => {
+        class FailingParking {
+          @ServiceActivator('wa.reply.parked', {
+            care: {
+              tries: { max: 1 },
+              planB: { channel: 'wa.reply.later', mode: PlanBMode.Leave },
+            },
+          })
+          park(): never {
+            throw flaky();
+          }
+        }
+        const w = world();
+        w.registry.create({ name: 'wa.reply.later', type: 'queue' });
+        subscribe(w, new SendActivator(), new FailingParking());
+        await w.registry.send('wa.send', { inReplyTo: 'SM07' }, { idempotencyKey: 'SM07' });
+        await tick();
+        const later = drain(w.registry, 'wa.reply.later');
+        await tick();
+        expect(later).toHaveLength(1);
+        expect(later[0]?.headers.leftFromKey).toBe('SM07');
+        expect(later[0]?.headers.idempotencyKey).toMatch(/^SM07:left:[^:]+$/);
+      });
     });
 
     it('refuses an unknown Leave channel when the activator subscribes', () => {
@@ -370,9 +443,10 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       await tick();
       expect(parked.map((m) => m.payload)).toEqual([{ body: 'Hola' }]);
       expect(parked[0]?.headers).toMatchObject({
-        idempotencyKey: 'SM04',
+        leftFromKey: 'SM04',
         organizationId: 'org-1',
       });
+      expect(parked[0]?.headers.idempotencyKey).toMatch(/^SM04:left:.+/);
       expect(w.events.map((e) => e.type)).toContain('plan-b.used');
     });
 
@@ -439,7 +513,8 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       await tick();
       expect(parked.map((m) => m.payload)).toEqual(['question']);
       expect(parked[0]?.headers).not.toHaveProperty('replyChannel');
-      expect(parked[0]?.headers.idempotencyKey).toBe('k-1');
+      expect(parked[0]?.headers.idempotencyKey).toMatch(/^k-1:left:.+/);
+      expect(parked[0]?.headers.leftFromKey).toBe('k-1');
     });
 
     it('to: Leave sends the same hop without reply routing; the default re-send keeps it (0.9.0)', async () => {
@@ -470,14 +545,24 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
         w.registry,
         { care: w.runtime },
       );
-      const headers = { replyChannel: 'caller', [JUMP_REPLY_HEADER]: '1', organizationId: 'o' };
+      const headers = {
+        replyChannel: 'caller',
+        [JUMP_REPLY_HEADER]: '1',
+        organizationId: 'o',
+        idempotencyKey: 'k-2',
+      };
       await w.registry.send('in.leave', 'x', headers);
       await w.registry.send('in.resend', 'y', headers);
       expect(left.map((m) => m.payload)).toEqual(['x']);
       expect(left[0]?.headers).not.toHaveProperty('replyChannel');
       expect(left[0]?.headers).not.toHaveProperty(JUMP_REPLY_HEADER);
       expect(left[0]?.headers.organizationId).toBe('o');
+      expect(left[0]?.headers.idempotencyKey).toMatch(/^k-2:left:.+/);
+      expect(left[0]?.headers.leftFromKey).toBe('k-2');
       expect(kept[0]?.headers.replyChannel).toBe('caller');
+      // The default re-send is the same hop: it keeps its key (0.9.0).
+      expect(kept[0]?.headers.idempotencyKey).toBe('k-2');
+      expect(kept[0]?.headers).not.toHaveProperty('leftFromKey');
       expect(w.events.filter((e) => e.type === 'plan-b.used')).toHaveLength(2);
     });
 

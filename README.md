@@ -169,7 +169,7 @@ IntegrationFlow.from('wa.inbound')
 ```
 
 - **Reserved names** (`RESERVED_HEADER_NAMES`: `id`, `timestamp`, `correlationId`, `causationId`,
-  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `history`,
+  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `leftFromKey`, `history`,
   `jumpReplies`, `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are never written:
   in a fixed object they fail `build()` with `FlowDefinitionError` code `RESERVED_HEADER`; returned
   by a function they fail the run with `FlowHeadersError` (`names` lists them), reported to
@@ -1359,14 +1359,26 @@ An optional `value` is what the caller gets after the message is left; without i
 | A failed send or no answer | `PlanBFailedError`, `plan-b.failed` | `PlanBFailedError`, `plan-b.failed` (a queue accepts with no consumer) |
 
 The left message has the payload, the trace (`traceId`, `correlationId`, `causationId` = the
-failed message id), the `idempotencyKey` and the message's own headers, so a drain can re-send it
-with the same key. It never has reply routing (`replyChannel`, the jump reply marker) or any other
-Estela-owned header, so its consumer cannot answer the caller.
+failed message id) and the message's own headers. It never has reply routing (`replyChannel`, the
+jump reply marker) or any other Estela-owned header, so its consumer cannot answer the caller.
 
-Consume the parking channel with a plain subscriber (`registry.get(name).subscribe(...)`), not
-with a `@ServiceActivator`. An activator claims the `idempotencyKey` the left message keeps, so
-when a drain re-sends the message, fails again and plan B leaves it a second time, the activator
-treats it as a duplicate and the message is dropped without a trace.
+Each leave gets an idempotency key of its own (D42): when the message has an `idempotencyKey` K,
+the left message carries `idempotencyKey: '<K>:left:<uuid>'` (a fresh id per leave) and
+`leftFromKey: K`. So a `@ServiceActivator` on the parking channel is the natural consumer: it takes
+every leave of the same message (a drain that fails again leaves it a second time, and that copy
+arrives too), and its claim still drops a transport redelivery of one leave. A drain sends the
+message on with `leftFromKey` as its key, so the downstream call keeps the original key:
+
+```ts
+@ServiceActivator('wa.reply.parked')
+park(reply: OutboundWhatsApp, msg: IntegrationMessage) {
+  return this.parking.save(reply, { key: msg.headers.leftFromKey }); // drained later with that key
+}
+```
+
+A message left again keeps the first key in `leftFromKey`. A message without a key is left without
+one. `leftFromKey` is reserved, and every trail output (tap copies, logs, error envelopes) shows it
+like `idempotencyKey`: a keyed fingerprint, or hidden without a `fingerprintSecret`.
 
 Where it applies:
 
