@@ -8,6 +8,7 @@ export const FLOW_SHAPE_CODES = {
   duplicateStepId: 'DUPLICATE_STEP_ID',
   carePartNotAllowed: 'CARE_PART_NOT_ALLOWED',
   reservedHeader: 'RESERVED_HEADER',
+  dropReplyMissing: 'DROP_REPLY_MISSING',
 } as const;
 
 function summarize(findings: readonly FlowParameterFinding[]): string {

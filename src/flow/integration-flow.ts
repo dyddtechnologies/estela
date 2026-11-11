@@ -18,7 +18,12 @@ import {
   type StepParams,
 } from './flow-step';
 import { FanoutStep } from './steps/fanout.step';
-import { FilterStep } from './steps/filter.step';
+import {
+  FilterStep,
+  type DropReplyFn,
+  type DropReplyValue,
+  type FilterWhenDropped,
+} from './steps/filter.step';
 import { HandleStep } from './steps/handle.step';
 import {
   HeadersStep,
@@ -54,10 +59,22 @@ export type RouteFn = (
   msg: IntegrationMessage,
 ) => string | string[] | Promise<string | string[]>;
 
-export type { HeaderValues, HeadersFn };
+export type { HeaderValues, HeadersFn, DropReplyFn, DropReplyValue, FilterWhenDropped };
+
+/** Options of `filter`; care is never accepted there (RS-58). */
+export interface FilterOptions extends StepCommonOptions {
+  /** Answer the caller when the message is dropped; absent = silent drop (0.9.0). */
+  whenDropped?: FilterWhenDropped;
+}
 
 /** Options of `wireTap`; care is never accepted there (RS-58). */
 export type WireTapOptions = StepCommonOptions;
+
+function hasReply(whenDropped: unknown): boolean {
+  return (
+    typeof whenDropped === 'object' && whenDropped !== null && Object.hasOwn(whenDropped, 'reply')
+  );
+}
 
 /** Effective id of the step at `index` (RS-57). */
 export function stepIdOf(step: FlowStep, index: number): string {
@@ -93,9 +110,26 @@ export class IntegrationFlow {
     return new IntegrationFlow(source, options);
   }
 
-  filter(predicate: PredicateFn, opts?: StepCommonOptions): this {
+  /**
+   * Drops the messages `predicate` refuses. `whenDropped.reply` answers the caller of a dropped
+   * message (its `replyChannel`) with a fixed value or `reply(payload, msg)`; without it the drop
+   * is silent and a request/reply caller waits until its timeout.
+   */
+  filter(predicate: PredicateFn, opts?: FilterOptions): this {
     this.refuseCare('filter', opts);
-    return this.push(new FilterStep(predicate, paramsOf(opts, undefined)));
+    const whenDropped = opts?.whenDropped;
+    if (whenDropped !== undefined && !hasReply(whenDropped)) {
+      const id = opts?.id ?? `filter#${this.steps.length}`;
+      this.findings.push(
+        flowFinding(
+          `step '${id}'`,
+          'whenDropped.reply',
+          FLOW_SHAPE_CODES.dropReplyMissing,
+          'is required',
+        ),
+      );
+    }
+    return this.push(new FilterStep(predicate, paramsOf(opts, undefined), whenDropped));
   }
 
   transform(fn: MapFn, opts?: StepCommonOptions): this {
