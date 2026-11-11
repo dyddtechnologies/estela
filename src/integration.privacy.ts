@@ -6,6 +6,7 @@ import type {
   InboundIdempotencyOptions,
   InboundSpec,
 } from './inbound/inbound.types';
+import type { CareEdge, CareEvent } from './resilience/resilience.types';
 import type { PrivacyLevel, PrivacyScope, PrivacyScopes } from './sensitive/policy-resolver';
 import type { PrivacyEngine, PrivacyLogger } from './sensitive/privacy-engine';
 import { PrivacyConfigError } from './sensitive/privacy-errors';
@@ -152,4 +153,31 @@ export function addPrivacyScopes(
   if (Object.keys(scopes).length === 0) return;
   const result = engine.addScopes(scopes, extra);
   if (result.findings.length > 0) throw new PrivacyConfigError(result.problems, result.findings);
+}
+
+const FLOW_EDGES: ReadonlySet<CareEdge> = new Set(['flow-handle', 'flow-send', 'flow-jump']);
+
+/**
+ * SD-62: where a care event's text is shown, by its subject. An activator's binding is its privacy
+ * scope; an outbound REST binding's is `outbound:<name>`; a flow step's is `flow:<flow>#<id>`, and a
+ * target's own scope adds `:<channel>`, so a target without one falls back to its step. Every other
+ * edge, and an unknown scope, falls back to the event channel and then to the module.
+ */
+export function careEventTrail(
+  event: Pick<CareEvent, 'edge' | 'binding' | 'channel'>,
+  engine: Pick<PrivacyEngine, 'hasScope'>,
+): { scope?: string; channel?: string } {
+  const where: { scope?: string; channel?: string } = {};
+  if (event.channel !== undefined) where.channel = event.channel;
+  if (event.edge === 'activator') where.scope = event.binding;
+  else if (event.edge === 'outbound-rest') where.scope = `outbound:${event.binding}`;
+  else if (FLOW_EDGES.has(event.edge)) {
+    const suffix = event.channel === undefined ? undefined : `:${event.channel}`;
+    const step =
+      suffix !== undefined && event.binding.endsWith(suffix)
+        ? event.binding.slice(0, -suffix.length)
+        : event.binding;
+    where.scope = engine.hasScope(event.binding) ? event.binding : step;
+  }
+  return where;
 }

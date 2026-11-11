@@ -73,6 +73,7 @@ import {
 } from './flow/flow-privacy';
 import {
   activatorPrivacyScope,
+  careEventTrail,
   channelLevels,
   channelScopes,
   inboundPrivacyGuard,
@@ -587,10 +588,18 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     this.care.setPublisher((event) => this.registry.send(channel, this.shownEvent(event)));
   }
 
-  /** Care events hold names and numbers only; an app `keyLabel` is still trail text (SD-62). */
+  /**
+   * Care events hold names and numbers only; an app `keyLabel` is still trail text, shown with the
+   * privacy of the event's subject: its flow step or target, activator or binding (SD-62).
+   */
   private shownEvent(event: CareEvent): CareEvent {
-    if (event.keyLabel === undefined || !this.privacy.reaches({})) return event;
-    const keyLabel = this.privacy.textForTrail(event.keyLabel, { output: TrailOutput.WireTap });
+    if (event.keyLabel === undefined) return event;
+    const where = careEventTrail(event, this.privacy);
+    if (!this.privacy.reaches(where)) return event;
+    const keyLabel = this.privacy.textForTrail(event.keyLabel, {
+      ...where,
+      output: TrailOutput.WireTap,
+    });
     return { ...event, keyLabel };
   }
 
