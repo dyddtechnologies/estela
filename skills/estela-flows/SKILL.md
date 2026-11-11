@@ -116,8 +116,12 @@ on awaited targets; `to` → all but `planB`, except `planB: { channel }` (plain
 
 - Put rules where the data lives: `ChannelSpec.privacy` (a profile name such as `'card'`, a list of
   names, or an inline `Privacy`), `@ServiceActivator(ch, { privacy })`, `@InboundRest({ privacy })`.
-  A flow's trail follows its source channel and every channel it sends to; flow and step
-  `privacy` options and `Reach.Delivery` are not in this build.
+  A flow's trail follows its source channel and every channel it sends to, plus
+  `IntegrationFlow.from(source, { privacy })` and the failing step's (or target's) `privacy`.
+- `privacy: { ..., reach: Reach.Delivery, reachReason }` on `transform`, `handle`, `to`, `publish`,
+  `fanoutTo`, `jumpTo`, `jump` or one target hides those rules in the delivered copy too; it fails
+  with `DeliveryCopyError` instead of sending a copy that is not faithful. Anywhere else boot fails
+  (`DELIVERY_REACH_LEVEL`).
 - `wireTap(ch)` sends a hidden copy (`TapCopy.AsShown`) once explicit privacy reaches the tap. A tap
   that needs the raw payload writes `{ copy: TapCopy.Original, copyReason: '...' }` (1..200 chars,
   logged at boot); without the reason boot fails (`COPY_REASON_MISSING`). Never mutate a tap copy:

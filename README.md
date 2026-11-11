@@ -317,7 +317,9 @@ IntegrationModule.forRoot({
   at flow level, and boot prints one `privacy scope 'flow:…'` line per flow and step that explicit
   privacy reaches (names and counts, never a rule). When care and privacy findings mix at boot, one
   `FlowDefinitionError` carries them all (`concern: 'privacy'` or `'care'`); privacy findings alone
-  throw `PrivacyConfigError`.
+  throw `PrivacyConfigError`. Care events hold names and numbers only; an app `keyLabel` on the
+  events channel is shown with the privacy of the event's flow step (or target), activator or
+  outbound binding.
 - **Added headers:** values set by a `headers` step and transport headers an endpoint copies
   with `carryHeaders` follow the same `headers` rules on every trail output; the graph shows only
   their names.
@@ -395,13 +397,19 @@ IntegrationModule.forRoot({
   },
   channels: [{ name: 'checkout.pay', type: 'direct', privacy: 'card' },
              { name: 'psp.charges', type: 'direct', privacy: 'card' },
-             { name: 'checkout.audit', type: 'pubsub' }],
+             { name: 'checkout.audit', type: 'pubsub' },
+             { name: 'checkout.receipts', type: 'pubsub' }],
 }, [{
   name: 'checkout',
-  build: () => IntegrationFlow.from('checkout.pay')
-    .handle(price, { id: 'price' })
+  build: () => IntegrationFlow.from('checkout.pay', {                // flow level: every step's trail
+      privacy: { fields: [{ path: '**.billing.email', name: 'billing.email', show: Show.Fingerprint }] } })
+    .handle(price, { id: 'price', privacy: { fields: ['**.coupon'] } }) // step level: this step's trail
     .wireTap('checkout.audit', { id: 'audit' })                       // TapCopy.AsShown by default
-    .to('psp.charges', { id: 'charge' }),
+    .publish('psp.charges', { id: 'charge' })                         // the PSP gets the full card
+    .transform(toReceipt, { id: 'receipt', privacy: {                 // Reach.Delivery: the receipt itself
+      fields: [{ path: '**.pan', show: Show.Ends, showLast: 4 }],
+      reach: Reach.Delivery, reachReason: 'a receipt shows the last 4 digits only' } })
+    .to('checkout.receipts', { id: 'send-receipt' }),
 }]);
 
 @InboundRest({ channel: 'checkout.pay', requestReply: true,
@@ -409,7 +417,10 @@ IntegrationModule.forRoot({
 ```
 
 Trail line: `{"pan":"***1111","expiry":"[HIDDEN:card.expiry]","token":"[HIDDEN:secrets.keys]"}`.
-The `cvv` key is absent and the PSP receives the full order. If KMS is down, the call fails with
+The `cvv` key is absent and the PSP receives the full order. The receipt channel receives
+`pan: "***1111"`: `Reach.Delivery` hides it in the delivered receipt, not only in the trail. A
+`billing.email` shows as an `fp:` token on every trail output of the flow, and a failing `price`
+step's error envelope also hides any `coupon`. If KMS is down, the call fails with
 `SealKeyUnavailableError`; a tampered record fails with `SealBrokenError`.
 
 ### Example: WhatsApp customer numbers
@@ -435,13 +446,24 @@ IntegrationModule.forRoot({
              { name: 'wa.agent-inbox', type: 'pubsub' }, { name: 'wa.analytics', type: 'pubsub' }],
 }, [{
   name: 'wa-inbound',
-  build: () => IntegrationFlow.from('wa.inbound')
+  build: () => IntegrationFlow.from('wa.inbound', {                   // flow level: message bodies
+      privacy: { fields: [{ path: '**.messages[*].text.body', name: 'wa.body', show: Show.Length }] } })
     .wireTap('wa.audit', { id: 'audit' })
-    .fanoutTo([{ channel: 'wa.agent-inbox' }, { channel: 'wa.analytics', wait: false }], { id: 'spread' }),
+    .fanoutTo([
+      { channel: 'wa.agent-inbox' },                                  // agents read the real message
+      { channel: 'wa.analytics', wait: false, privacy: {              // target level, delivered copy
+        fields: [{ path: '**.contacts[*].wa_id', show: Show.Fingerprint },
+                 { path: '**.messages[*].from', show: Show.Fingerprint },
+                 { path: '**.contacts[*].profile.name', show: Show.Omitted }],
+        reach: Reach.Delivery, reachReason: 'analytics counts customers, never reads their numbers' } },
+    ], { id: 'spread' }),
 }]);
 ```
 
-Trail line: `from: "fp:k1:9f2c4ab07d1e33c0"`, `display_phone_number: "***2678"`, `name: "[HIDDEN:wa.name]"`.
+Trail line: `from: "fp:k1:9f2c4ab07d1e33c0"`, `display_phone_number: "***2678"`, `name: "[HIDDEN:wa.name]"`,
+`body: "[HIDDEN:wa.body len=4]"`. The agent inbox gets the real webhook; analytics gets `fp:` tokens
+in `wa_id` and `from`, no `name`, and the real body (the flow-level `Show.Length` rule only shapes
+the trail).
 The same customer always gets the same `fp:` token until `refreshFingerprintSecret()` loads a new
 secret. Without `fingerprintSecret` these explicit `Show.Fingerprint` rules fail boot
 (`FINGERPRINT_WITHOUT_SECRET`); built-in rules such as `personal.phone-e164` hide instead.

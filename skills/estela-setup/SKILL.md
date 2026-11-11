@@ -113,7 +113,9 @@ IntegrationModule.forRoot({
   endpoints with `onDuplicate: 'replay'` then fail boot (`OUTCOME_ONLY_REPLAY`) until they choose
   `remember`. Read the boot list of defaulted scopes. `Remember.Everything` needs `rememberReason`.
 - Levels: module, `inbound.privacy`, `ChannelSpec.privacy`, endpoint/activator `privacy`,
-  `SagaRunnerOptions.privacy`. Flow and step levels and `Reach.Delivery` are not in this build.
+  `SagaRunnerOptions.privacy`, outbound bindings and calls, and in flows
+  `IntegrationFlow.from(source, { privacy })`, a step's and a `fanoutTo`/`jumpTo` target's
+  `privacy`. `Reach.Delivery` (with `reachReason`) is valid only on a step or a target.
 - Boot fails once with `PrivacyConfigError { problems, findings }`; providers that are down fail
   closed (`SealKeyUnavailableError`, retryable). Inject `PrivacyEngine` for app logs (`forLog`) and
   exception filters (`errorForTrail`).
