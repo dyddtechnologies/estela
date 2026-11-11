@@ -27,6 +27,7 @@ import {
   HttpInboundStrategy,
   type InboundTransportStrategy,
 } from './inbound.transport';
+import { carryInto } from './inbound.carry';
 import { InboundIdempotencyGate, forwardedHeaders, type InboundClaim } from './inbound.idempotency';
 import { createInboundPlanner, type InboundPlan } from './inbound.plan';
 import {
@@ -168,6 +169,7 @@ export class InboundInterceptor implements NestInterceptor {
     const headersInit = mapper.mapIn(request.rawHeaders as never);
     if (triesLeft !== undefined) headersInit[TRIES_LEFT_MESSAGE_HEADER] = triesLeft;
     const plan = this.planFor(spec);
+    if (plan.carry !== undefined) carryInto(headersInit, request.rawHeaders, plan.carry);
     const clientKey =
       plan.clientKey === undefined ? headersInit.idempotencyKey : plan.clientKey(request);
     const keyContext: InboundKeyContext = { ...request, clientKey };

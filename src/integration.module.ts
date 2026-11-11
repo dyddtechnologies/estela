@@ -16,6 +16,7 @@ import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
 import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.interceptor';
 import type { InboundDefaults } from './inbound/inbound.types';
 import { InboundExplorer } from './inbound/inbound.explorer';
+import { carriedHeadersOf } from './inbound/inbound.carry';
 import { discoverInbounds } from './inbound/inbound.discovery';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
@@ -502,7 +503,8 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       skipped(error);
     }
     for (const inbound of inbounds) {
-      // RS-03, RS-37: invalid inbound care fails the boot, outside the discovery guard.
+      // RS-03, RS-37: invalid inbound care or carryHeaders fails the boot, outside the guard.
+      carriedHeadersOf(inbound.spec);
       const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.care);
       const summary = plan === undefined ? undefined : describeCare(plan);
       this.graph.recordInbound(inbound.spec, summary);

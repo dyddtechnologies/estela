@@ -27,6 +27,13 @@ export interface InboundSpec {
   idempotency?: false | InboundIdempotencyOptions;
   /** Inbound care (RS-37): `lanes` and `pace` only; refused on Rabbit. */
   care?: CareRefOf<InboundCare>;
+  /**
+   * Opt-in allowlist of transport headers (HTTP headers, gRPC metadata) copied into message
+   * headers; nothing else is copied. A list keeps each name; a map renames
+   * (`{ 'x-organization-id': 'organizationId' }`). Transport names match case-insensitively;
+   * a missing header is skipped. Reserved message headers are refused; refused on Rabbit.
+   */
+  carryHeaders?: readonly string[] | Readonly<Record<string, string>>;
 }
 
 export const INBOUND_SPEC_METADATA = 'integration:inbound-spec';

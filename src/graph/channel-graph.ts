@@ -1,5 +1,6 @@
 import type { ChannelRegistry } from '../channel-registry';
 import type { BuiltFlow } from '../flow/integration-flow';
+import { carriedHeaderNames } from '../inbound/inbound.carry';
 import type { GraphqlOperation, InboundSpec, InboundTransport } from '../inbound/inbound.types';
 
 export interface GraphInboundRef {
@@ -8,6 +9,8 @@ export interface GraphInboundRef {
   operation?: GraphqlOperation;
   /** Inbound care summary (RS-42); absent without care. */
   care?: string;
+  /** Message header names the endpoint copies from transport headers (`carryHeaders`). */
+  carries?: string[];
 }
 
 /** Outbound transports a channel can be bound to. */
@@ -137,6 +140,8 @@ export class ChannelGraph {
     };
     if (spec.operation !== undefined) ref.operation = spec.operation;
     if (care !== undefined) ref.care = care;
+    const carries = carriedHeaderNames(spec);
+    if (carries !== undefined) ref.carries = carries;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
   }

@@ -1,3 +1,4 @@
+import { carriedHeadersOf, type CarriedHeader } from './inbound.carry';
 import { HttpExceptionFailureCodec, type InboundFailurePolicy } from './inbound.failure';
 import {
   clientKeyReader,
@@ -39,6 +40,8 @@ export interface InboundPlan {
   forward: 'raw' | 'resolved' | 'none';
   /** Undefined: no inbound claim for this endpoint. */
   idempotency?: InboundIdempotencyPlan;
+  /** Transport headers copied into message headers (`carryHeaders`); undefined: none. */
+  carry?: readonly CarriedHeader[];
 }
 
 type AnyFn = (...args: never[]) => unknown;
@@ -260,6 +263,8 @@ export function resolveInboundPlan(spec: InboundSpec, deps: InboundPlanDeps): In
     reply: resolveReply(spec.reply ?? deps.defaults?.reply ?? 'envelope', deps.resolver),
     forward: resolveForward(spec, merged, failure.mode !== 'keep'),
   };
+  const carry = carriedHeadersOf(spec);
+  if (carry !== undefined) plan.carry = carry;
   const clientKey = clientKeyReader(merged.options.clientKey);
   if (clientKey !== undefined) plan.clientKey = clientKey;
   if (merged.enabled) {
