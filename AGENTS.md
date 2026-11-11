@@ -5,10 +5,18 @@
 - `npm run verify` — typecheck → eslint (type-checked + sonarjs + security) → prettier → build
   (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
-- The e2e HTTP test (`test/orders.e2e.spec.ts`) binds a loopback socket: run it with network permissions.
+- The e2e HTTP tests (`test/orders.e2e.spec.ts`, `test/outbound-rest.e2e.spec.ts`,
+  `test/resilience.e2e.spec.ts`) bind loopback sockets: run them with network permissions.
 - The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
   set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
   Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
+- The Redis care e2e (`test/resilience-redis.e2e.spec.ts`, RE-04 and RE-05) is **skipped unless
+  `ESTELA_REDIS_URL` is set** (CI does not set it). Local target:
+  `docker run -d --rm --name estela-redis -p 6380:6379 redis:7`, then
+  `ESTELA_REDIS_URL=redis://localhost:6380 npx jest test/resilience-redis`. It has no Redis client
+  dependency (a RESP client over `node:net` lives in the test). Run it whenever you touch
+  `src/resilience/redis/`, `state-port.ts`, `circuit-breaker.ts` or `rate-limiter.ts`, and paste the
+  result in the PR.
 - `test/dist-*.spec.ts` check the built package (`dist/`) and are skipped when it is absent: run
   `npm run build` first (`npm run verify` already builds before it tests).
 
@@ -17,7 +25,9 @@
 1. Flows reference channels **by name only** — never import business classes.
 2. `replyChannel` precedence per hop — every step passes `reply` **explicitly** to `nextHop`:
    `wireTap/fanout/publish → 'none'` · `to/route → 'inherit'` · `jump → its own ephemeral 'reply.<uuid>'`
-   (the parent keeps the inbound reply untouched).
+   (the parent keeps the inbound reply untouched). A `wireTap` copy carries neither `replyChannel`
+   nor `x-integration-jump-reply` (bug fix vs 0.9.0, SPI-448), and neither does a message left by
+   plan B with `PlanBMode.Leave` (D39).
 3. Awaited failures (direct send, fanout `wait:true`, jump timeout, `publish`, `to`) report to
    `error.channel` **and** fail the flow. Forget (`wait:false`) never crashes the flow.
    `wireTap` swallows all errors, always.
@@ -28,6 +38,11 @@
 7. Dispatchers rebuild the ALS context from `msg.headers` at every dispatch — never trust ambient
    context across `setImmediate`/buffers/EventEmitter listeners.
 8. Fanout bindings run the cycle guard: repeated channel in `history` or depth > 50 → `FanoutCycleError`.
+9. `RESERVED_HEADER_NAMES` (`src/message.ts`: trace, reply, idempotency, `history`, `jumpReplies`,
+   `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are written only by Estela: a flow
+   `headers` step refuses them (build: `RESERVED_HEADER`; run: `FlowHeadersError`) and so does an
+   inbound `carryHeaders` target. A new Estela-owned header goes into that list.
+   Inbound endpoints copy transport headers only through the explicit `carryHeaders` allowlist.
 
 ## Layer boundaries (enforced by dependency-cruiser)
 
@@ -39,6 +54,11 @@
   take a query function from the app, so the main barrel can export them.
 - `src/` (`src-no-pg`): never imports `pg`, `pg-*` or `@types/pg`; `pg` is a devDependency for the
   `ESTELA_PG_URL`-gated e2e only.
+- `src/resilience/` (`resilience-no-npm`): **zero npm imports**, only `node:` core modules; its log
+  sink is an injected `CareLogger`, never `@nestjs/common`. `test/resilience-bounds.spec.ts`
+  proves the rule on a fixture.
+- `src/resilience/` (`resilience-is-leaf`): never imports `src/outbound`, `src/inbound`,
+  `src/activator`, `src/saga` or `src/flow`; those depend on it (edge adapters live with their edge).
 
 ## Adding features (OCP)
 
@@ -51,12 +71,30 @@
   `postgresTransitionPort`).
 - New saga idempotency ledger → `IdempotencyLedger` implementation; declare `transactional`
   (`false` = the runner releases claims on rollback and rejects it with a retry policy — test-only).
+- New care edge → `CareEdgeAdapter` (kind, classifier, `repeatable`, `overdueError`) run by a
+  `CareExecutor` from `CareEngine.executor()`; **never a private retry loop**.
+  References: `activator-wrapper.ts`, `saga-resilience.ts`, `outbound.resilience.ts`.
+- New shared-state backend for `pace` and `valve` → `CareStatePort` implementation
+  (reference: `redisCareState`, which takes a script-evaluation function from the app).
+
+## Ports a consumer implements
+
+Changing one of these (adding a required member, changing a signature) is a breaking change:
+`IdempotencyStore` · `IdempotencyLedger` · `LockPort` · `TransitionPort` · `TransactionPort` ·
+`ChannelFactory` · `InboundTransportStrategy` (its `rawHeaders(context)` is **optional**: without it,
+an inbound `pace.key` gets `{}`) · `CareStatePort` (shared `pace` and `valve` state:
+`takeTurn`, `markShut`, `shutUntil`, `claimProbe`, `clearShut`) · `CareMetricsPort`
+(`counter`, `histogram`, `gauge`). New members on them must be optional.
 
 ## Testing rules
 
 - Every invariant gets a test. Use `@estela/nest/testing` helpers:
   `bindFlow` · `waitFor` · `collect` · `createTestMessage` · `MemoryIdempotencyStore` ·
-  `MemoryLockPort` · `MemoryTransitionPort` · `testUnitOfWork` (saga concurrency, no database).
+  `MemoryLockPort` · `MemoryTransitionPort` · `testUnitOfWork` (saga concurrency, no database) ·
+  `manualCareClock` (deterministic care time; no jest fake timers) ·
+  `MemoryCareState` (shared state with fault injection: `down`, `slow`, `hang`, `failNext`) ·
+  `collectCareEvents` (events channel) · `bindFlow(flow, registry, { care })` (resolves flow care
+  like module boot, without Nest).
 - Test files: `*.spec.ts` under `src/` or `test/` (jest roots).
 - Handlers subscribed to awaited channels must return their promise (never `void p`) —
   producers of `direct` channels wait for full execution (spec §17.3).
@@ -108,7 +146,8 @@ merge strategy below are release mechanics, not style.
   not even parse as `feat` and releases nothing. `!` is fine for readability, never alone.
 - A breaking change is anything that alters a public export of `@estela/nest` or
   `@estela/nest/testing`, a port/interface a consumer implements (`IdempotencyStore`, `LockPort`,
-  `TransitionPort`, `ChannelFactory`, `InboundTransportStrategy`, …), a header or reply-channel
+  `TransitionPort`, `ChannelFactory`, `InboundTransportStrategy`, `CareStatePort`,
+  `CareMetricsPort`, …; see §"Ports a consumer implements"), a header or reply-channel
   contract, or a runtime invariant from §"Non-negotiable". Consumers (spine, ms-bpm) install from
   the GitHub Release tarball, so the migration note in the footer is their only upgrade guide — say
   which call sites change and how. Prefer an additive path (new option, deprecation warning) over a

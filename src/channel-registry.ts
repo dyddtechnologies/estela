@@ -9,15 +9,17 @@ import type { ChannelDeps } from './channels/channel-deps';
 import type { FanoutChannel } from './channels/fanout.channel';
 import { MessageDispatcher } from './message-dispatcher';
 import type { IntegrationMessage, MessageHeadersInit } from './message';
+import { TRIES_LEFT_MESSAGE_HEADER, CareScope } from './resilience/retry-budget';
 import type { TraceContext } from './trace/trace-context';
 
 /**
- * Mediator (GoF): catalogo de channels + API publishes de envio (spec sec.5).
- * `ChannelRegistry.send/sendMessage` delegan en `MessageDispatcher` (ADR-011).
+ * Mediator (GoF): channel catalog + public send API (spec sec.5).
+ * `ChannelRegistry.send/sendMessage` delegate to `MessageDispatcher` (ADR-011).
  */
 export class ChannelRegistry implements ChannelResolver {
   private readonly channels = new Map<string, MessageChannel>();
   readonly dispatcher: MessageDispatcher;
+  private triesLeftFromScope = false;
 
   constructor(
     private readonly deps: ChannelDeps,
@@ -30,7 +32,7 @@ export class ChannelRegistry implements ChannelResolver {
     return this.deps.trace;
   }
 
-  /** Creates via factory y registra. `deps.resolver` apunta al registry (bindings). */
+  /** Creates through the factory and registers. `deps.resolver` points at the registry (bindings). */
   create(spec: ChannelSpec): MessageChannel {
     const channel = this.factories.create(spec, { ...this.deps, resolver: this });
     return this.register(channel);
@@ -58,7 +60,7 @@ export class ChannelRegistry implements ChannelResolver {
     this.channels.delete(name);
   }
 
-  /** Helper spec sec.5: creates o devuelve el fanout con los bindings dados. */
+  /** Helper spec sec.5: creates or returns the fanout with the given bindings. */
   fanout(name: string, bindings: readonly string[] = []): FanoutChannel {
     const existing = this.tryGet(name);
     if (existing !== undefined) return existing as FanoutChannel;
@@ -69,13 +71,35 @@ export class ChannelRegistry implements ChannelResolver {
     return [...this.channels.values()];
   }
 
-  // ---------- API publishes de envio (spec sec.5) ----------
+  // ---------- Public send API (spec sec.5) ----------
 
   send(channelName: string, payload: unknown, headers?: MessageHeadersInit): Promise<void> {
-    return this.dispatcher.send(channelName, payload, headers);
+    return this.dispatcher.send(
+      channelName,
+      payload,
+      this.triesLeftFromScope ? withScopeTriesLeft(headers) : headers,
+    );
+  }
+
+  /**
+   * Internal (RS-29), set by `IntegrationModule` under `forRoot({ care })`: from then on a
+   * message created by `send` takes the tries left of the active `CareScope` when its
+   * headers carry none, as `OutboundRestGateway.request` does. Off by default.
+   */
+  inheritTriesLeft(): void {
+    this.triesLeftFromScope = true;
   }
 
   sendMessage(channelName: string, msg: IntegrationMessage): Promise<void> {
     return this.dispatcher.sendMessage(channelName, msg);
   }
+}
+
+function withScopeTriesLeft(
+  headers: MessageHeadersInit | undefined,
+): MessageHeadersInit | undefined {
+  if (headers?.[TRIES_LEFT_MESSAGE_HEADER] !== undefined) return headers;
+  const triesLeft = CareScope.current()?.triesLeft;
+  if (triesLeft === undefined) return headers;
+  return { ...headers, [TRIES_LEFT_MESSAGE_HEADER]: triesLeft };
 }

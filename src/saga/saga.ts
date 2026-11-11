@@ -2,6 +2,8 @@ import { SagaDefinitionError } from './concurrency-errors';
 import type { LockMode } from './lock-port';
 import type { RetryPolicy } from './retry-policy';
 import { validateLockDeclaration, validateRetryPolicy } from './saga-definition';
+import { validateOutboundCare } from './saga-resilience';
+import type { CareRef } from '../resilience/resilience.types';
 
 export type { JitterMode, RetryPolicy } from './retry-policy';
 
@@ -69,6 +71,14 @@ export interface OutboundOptions<Ctx, Tx> {
   /** 'inherit' (default): the compensation re-acquires the exact LockRequests resolved for the
    *  transaction segment right before this outbound step. 'none': no locks. */
   compensateLocks?: 'inherit' | 'none';
+  /**
+   * Care of the step (RS-38): a profile name resolved against `SagaRunnerOptions.care`, an inline
+   * `Care`, or both (`{ use, ... }`). All its tries are one `outbound:<name>` hop, and `compensate`
+   * runs once after the last one fails. `planB` is refused (`SagaDefinitionError`), and
+   * `tries.max > 1` needs `tries.idempotent: true`. Extra tries take no ctx checkpoint: a change a
+   * failed try made to ctx stays visible to the next try and to the compensation.
+   */
+  care?: CareRef;
 }
 
 export type SagaStep<Ctx, Tx> =
@@ -84,6 +94,7 @@ export type SagaStep<Ctx, Tx> =
       run: OutboundStep<Ctx>;
       compensate?: TransactionStep<Ctx, Tx>;
       compensateLocks?: 'inherit' | 'none';
+      care?: CareRef;
     };
 
 export interface SagaDefinition<Ctx, Tx, Reply> {
@@ -123,9 +134,11 @@ export class SagaBuilder<Ctx, Tx, Reply> {
 
   outbound(name: string, run: OutboundStep<Ctx>, options: OutboundOptions<Ctx, Tx> = {}): this {
     this.assertNoPendingLocks();
+    validateOutboundCare(this.name, name, options.care);
     const step: OutboundSagaStep<Ctx, Tx> = { kind: 'outbound', name, run };
     if (options.compensate !== undefined) step.compensate = options.compensate;
     if (options.compensateLocks !== undefined) step.compensateLocks = options.compensateLocks;
+    if (options.care !== undefined) step.care = options.care;
     this.steps.push(step);
     return this;
   }

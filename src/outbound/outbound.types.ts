@@ -4,6 +4,8 @@ import type {
   InboundProviderToken,
 } from '../inbound/inbound.types';
 import type { IntegrationMessage, MessageHeadersInit } from '../message';
+import type { CareError } from '../resilience/resilience.errors';
+import type { Care, CareRefOf, Tries } from '../resilience/resilience.types';
 import type { OutboundRestError } from './outbound.errors';
 
 /** DI token of a singleton provider (same contract as the inbound adapters). */
@@ -213,7 +215,7 @@ export interface OutboundResponseMapper<P = unknown, B = unknown> {
 }
 
 export type OutboundErrorMapperFn<P = unknown> = {
-  bivarianceHack(error: OutboundRestError, ctx: OutboundExchangeContext<P>): unknown;
+  bivarianceHack(error: OutboundRestError | CareError, ctx: OutboundExchangeContext<P>): unknown;
 }['bivarianceHack'];
 
 /**
@@ -221,7 +223,7 @@ export type OutboundErrorMapperFn<P = unknown> = {
  * returning `undefined` keeps the typed error.
  */
 export interface OutboundErrorMapper<P = unknown> {
-  mapError(error: OutboundRestError, ctx: OutboundExchangeContext<P>): unknown;
+  mapError(error: OutboundRestError | CareError, ctx: OutboundExchangeContext<P>): unknown;
 }
 
 export type OutboundResolvedKey = OutboundKeyParts | null | undefined;
@@ -291,6 +293,11 @@ export interface OutboundRetryOptions {
   methods?: readonly OutboundRestMethod[];
 }
 
+/** Care of an outbound REST binding; `tries.methods` keeps the REST repeat rule. */
+export interface OutboundRestCare extends Care {
+  tries?: false | (Tries & { methods?: readonly OutboundRestMethod[] });
+}
+
 export interface OutboundRestOptions {
   /** Static url; optional when `target` resolves it. */
   url?: string;
@@ -329,6 +336,11 @@ export interface OutboundRestOptions {
   idempotency?: false | OutboundIdempotencyOptions;
   /** Off unless configured; `false` turns a module default off. */
   retry?: false | OutboundRetryOptions;
+  /**
+   * Care (a profile name, an inline `Care` or `{ use, ...overrides }`). With it, the call runs on
+   * the care engine and the 0.9.0 options above act as their 0.9.0 spellings (section 1).
+   */
+  care?: CareRefOf<OutboundRestCare>;
   /** Translates `OutboundRestError` failures into the error contract of the service. */
   mapError?: OutboundErrorMapperFn | OutboundErrorMapper | OutboundProviderRef<OutboundErrorMapper>;
   /** Injectable for tests. Default: the module `fetchFn`, else `globalThis.fetch`. */
@@ -369,4 +381,6 @@ export interface OutboundRestBindingInfo {
   target: string;
   /** Boot log line, e.g. `outbound rest: orders.http -> POST https://erp.example/orders`. */
   line: string;
+  /** Care summary (RS-42); absent without care. */
+  care?: string;
 }

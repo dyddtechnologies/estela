@@ -31,6 +31,25 @@ Reject the PR if ANY of these fail:
 - [ ] A database error caught and swallowed inside a step (Postgres then turns COMMIT into ROLLBACK).
 - [ ] Advisory locks used to protect a read-then-write check in a REPEATABLE READ transaction (the
       snapshot predates the lock wait): use READ COMMITTED, or SERIALIZABLE + retry on serialization.
+- [ ] A hand-written retry loop around an Estela call (outbound request, channel send, saga step):
+      use `care` so tries left, classification and events apply.
+- [ ] Extra tries on more than one layer of the same call path (activator AND its outbound binding,
+      or channel care AND its activator, `TRIES_STACKED`): keep them on the edge closest to the
+      dependency.
+- [ ] A plan B that hides the failure of a side effect (payment, write, message sent), or
+      `planB.cacheable: true` on such a call.
+- [ ] Valve or pace keys built from personal data hashed with a plain digest: `keyHasher` must be
+      an HMAC with a secret of >= 32 bytes, and `keyLabel` must not echo the raw key.
+- [ ] A side-effecting outbound binding without `tries.requireIdempotencyKey: true`.
+- [ ] `'busy'` added to `valve.countOn` without a written reason (a 429 is not an outage).
+- [ ] Inbound limits (`lanes`, `pace`) placed anywhere but the inbound spec: they must turn calls
+      away before the idempotency claim.
+- [ ] A flow step with extra tries and no idempotency key, or `tries.idempotent: true` without a
+      written reason.
+- [ ] An extra try toward a `pubsub` destination when not every subscriber is idempotent.
+- [ ] A jump with extra tries toward a keyed activator whose `eachTryMs` is not longer than the
+      activator's work.
+- [ ] Channel care and the activator on that channel both trying again (`TRIES_STACKED` at boot).
 - [ ] Missing tests for the touched invariant (error semantics + precedence always have tests).
 
 Approve checklist: `npm run verify` green · invariants intact · graph/`describe()` updated

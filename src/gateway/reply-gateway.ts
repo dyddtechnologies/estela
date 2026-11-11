@@ -1,6 +1,6 @@
 import { openFirstMessageWait } from '../channels/one-shot';
 import { ChannelError, NoSubscriberError } from '../channel';
-import { newId, type MessageHeadersInit } from '../message';
+import { newId, type IntegrationMessage, type MessageHeadersInit } from '../message';
 import type { ChannelRegistry } from '../channel-registry';
 import type { TraceContext } from '../trace/trace-context';
 
@@ -31,6 +31,19 @@ export class ReplyGateway {
     headers: MessageHeadersInit = {},
     timeoutMs?: number,
   ): Promise<unknown> {
+    return (await this.sendAndReceiveMessage(channel, payload, headers, timeoutMs)).payload;
+  }
+
+  /**
+   * Same as `sendAndReceive`, resolving with the whole reply message, so the inbound interceptor
+   * can read reply headers such as `degraded` (RS-27).
+   */
+  async sendAndReceiveMessage(
+    channel: string,
+    payload: unknown,
+    headers: MessageHeadersInit = {},
+    timeoutMs?: number,
+  ): Promise<IntegrationMessage> {
     const timeout = timeoutMs ?? this.deps.defaultTimeoutMs ?? 10_000;
     const replyName = `reply.${newId()}`;
     this.deps.registry.create({ name: replyName, type: 'direct' });
@@ -52,8 +65,7 @@ export class ReplyGateway {
           const lateReply = error instanceof NoSubscriberError && error.message.includes(replyName);
           throw timedOut.error !== undefined && lateReply ? timedOut.error : error;
         });
-      const reply = await wait.promise;
-      return reply.payload;
+      return await wait.promise;
     } finally {
       // A failed send abandons the wait: release its timer and subscription.
       wait.cancel();

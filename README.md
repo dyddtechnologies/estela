@@ -127,9 +127,10 @@ export class OrdersController {
 
 | Step | Semantics |
 |---|---|
-| `filter` | exits successfully (idempotency `{filtered:true}`) |
+| `filter` | exits successfully (idempotency `{filtered:true}`); `whenDropped.reply` answers the caller at once |
 | `transform` / `handle` | replace the payload; `handle` never triggers a reply |
-| `wireTap` | fire-and-forget copy; swallows errors |
+| `headers(values \| fn)` | merges custom headers into the message (header enricher); payload and trace stay |
+| `wireTap` | fire-and-forget copy with no reply routing; swallows errors |
 | `fanoutTo` | awaited group in parallel; `wait:false` → forget → `error.channel` |
 | `jumpTo` / `jump` | own ephemeral channel · awaits reply + timeout · `jumpReplies[channel]` |
 | `publish` | `nextHop` + routingKey · does not cut the pipeline |
@@ -139,6 +140,76 @@ export class OrdersController {
 
 **`replyChannel` precedence** (runtime invariant): `wireTap/fanout/publish → none` ·
 `to/route → inherit` · `jump → its own ephemeral`. The parent always keeps the inbound reply.
+
+A `wireTap` copy keeps the id, the trace, the custom headers and `jumpReplies`, but never carries
+`replyChannel` or the jump reply marker `x-integration-jump-reply`: a tap consumer that returns a
+value (an audit activator, for example) cannot answer the caller or a jump.
+
+**Behaviour change since 0.9.0 (bug fix, SPI-448).** In 0.9.0 the `wireTap` copy kept the inbound
+`replyChannel`, so a tap consumer that returned a value answered the caller first and the flow's
+real reply was lost. The tap copy now drops every reply-routing header in all flows, with or without
+care. A tap consumer that relied on answering the caller must move that answer into the flow
+(`reply()` or `to(...)`).
+
+### Headers in a flow
+
+`headers(values, opts?)` merges headers into the message, so routing keys such as a tenant or a
+sender number travel as headers instead of payload fields. `values` is a fixed object or a function
+`(payload, msg) => object | Promise<object>`. Later steps, activators and care key functions
+(`valve.key`, `pace.key`, which read `ctx.message.headers`) see the merged headers; every hop keeps
+them (`nextHop` copies custom headers).
+
+```ts
+IntegrationFlow.from('wa.inbound')
+  .headers((payload) => ({
+    organizationId: (payload as Submit).organizationId,
+    businessNumber: (payload as Submit).businessNumber,
+  }), { id: 'routing-keys' })
+  .to('wa.send', { care: { pace: { perSecond: 20, key: (ctx) => String(ctx.message?.headers.businessNumber) } } });
+```
+
+- **Reserved names** (`RESERVED_HEADER_NAMES`: `id`, `timestamp`, `correlationId`, `causationId`,
+  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `history`,
+  `jumpReplies`, `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are never written:
+  in a fixed object they fail `build()` with `FlowDefinitionError` code `RESERVED_HEADER`; returned
+  by a function they fail the run with `FlowHeadersError` (`names` lists them), reported to
+  `error.channel` like any step failure. A function that returns anything but a plain object fails
+  the same way.
+- An `undefined` value is skipped (it never deletes a header); other values replace a custom header
+  of the same name. The step records no hop and refuses `care`.
+- The graph and `inspect()` show `{ kind: 'headers', names: [...] }` for a fixed object and
+  `{ kind: 'headers', computed: true }` for a function: names, never values.
+
+### Answering the caller of a dropped message
+
+By default `filter` drops a message silently, as in 0.9.0: in a request/reply flow (an inbound
+`requestReply` endpoint, a `jump`) nothing answers the caller, which waits until its timeout and
+then fails (`ReplyTimeoutError`, a 5xx on REST). Pass `whenDropped.reply` to answer at once:
+
+```ts
+IntegrationFlow.from('wa.inbound')
+  .filter((payload) => (payload as Submit).body.trim().length > 0, {
+    id: 'skip-empty',
+    whenDropped: { reply: (payload) => ({ status: 'ignored', inReplyTo: (payload as Submit).messageSid }) },
+  })
+  .handle(loadConversation)
+  // ...
+```
+
+- `reply` is a fixed value or a function `(payload, msg) => value | Promise<value>` of the dropped
+  message (a function is always called, never sent as the value). The answer goes to the message
+  `replyChannel` with its trace (`traceId`, `correlationId`, `causationId`, `parentSpanId`), exactly
+  like `reply()`; an inbound endpoint maps it like any flow result (`{ status: 'ok', result }` with
+  the default envelope, the value itself with `reply: 'raw'`), so a webhook gets its 2xx at once.
+- A message with no `replyChannel` (fire-and-forget inbound, a `to` with no caller) is still
+  dropped silently and the function is not called. Kept messages never see the option.
+- The run still ends `filtered`: the flow claim completes `{ filtered: true }`, and an inbound
+  `requestReply` claim stores the answer, so `onDuplicate: 'replay'` replays it.
+- A function that throws fails the flow and reports to `error.channel`, like any step failure.
+- `whenDropped` without `reply` (reachable from JavaScript) fails `build()` with
+  `FlowDefinitionError` code `DROP_REPLY_MISSING`. `filter` still refuses `care`.
+- The graph and `inspect()` show `{ kind: 'filter', whenDropped: 'reply' }`, never the value; a
+  filter without the option keeps its 0.9.0 description `{ kind: 'filter' }`.
 
 ## Tracing & idempotency
 
@@ -184,6 +255,28 @@ the module default, which overrides the built-in.
 **With nothing configured, nothing changes**: the endpoint answers the estela envelope
 (`{status:'ok'|'accepted'|'duplicate', …}`) and deduplicates on `idempotency-key` under the scope
 `inbound:<channel>`, exactly as in 0.5.0.
+
+### Carrying transport headers
+
+By default an inbound endpoint turns only trace and idempotency headers into message headers.
+`carryHeaders` is an **explicit allowlist** of other transport headers (HTTP headers on
+`@InboundRest`, metadata on `@InboundGrpc`, request headers on `@InboundGraphQL`) to copy; nothing
+outside the list is ever copied.
+
+```ts
+@InboundGrpc({
+  channel: 'wa.inbound',
+  carryHeaders: { 'x-organization-id': 'organizationId', 'x-business-number': 'businessNumber' },
+})
+// or keep the transport names: carryHeaders: ['x-organization-id']
+```
+
+- A list keeps each name; a map renames transport name → message header name. Transport names
+  match case-insensitively; an array or binary value gives its first non-empty string; a missing
+  header is skipped.
+- A target in `RESERVED_HEADER_NAMES`, an empty name or two names onto one target fail boot with
+  `InboundError`; so does `carryHeaders` on `@InboundRabbit`.
+- The graph lists the carried message header names on the inbound ref (`carries`), never values.
 
 ### Reply mapping
 
@@ -472,9 +565,10 @@ const complete = saga<CompleteCtx, EntityManager, CompleteReply>('complete')
 | `traceHeaders` | `true` | `x-trace-id`, `x-span-id`, `x-parent-span-id`, `x-correlation-id`, `x-causation-id` |
 | `serializer` | `'json'` | `'text'`, `'form'` (`x-www-form-urlencoded`), or a function / instance / ref returning `{ body, contentType }` or a string |
 | `response` | `'full'` | `'body'`, or a mapper receiving `{ response, request, payload, message, target, attempts, durationMs }` |
-| `timeoutMs` | `30000` | per attempt; `0` disables; call > target > binding > module |
+| `timeoutMs` | `30000` | per attempt; `0` disables; call > target > binding > module; 0.9.0 spelling of `care.patience.eachTryMs` |
 | `idempotency` | forward the message key | see below; `false` sends no key |
-| `retry` | off | see below |
+| `retry` | off | see below; 0.9.0 spelling of `care.tries`, with the 0.9.0 semantics |
+| `care` | — | a care reference: `patience`, `tries`, `valve`, `lanes`, `pace`, `planB` (see [Care](#care)) |
 | `mapError` | — | receives `OutboundHttpError` / `OutboundNetworkError` / `OutboundTimeoutError`; what it returns is thrown |
 | `fetchFn` | `globalThis.fetch` | injectable; no HTTP client dependency |
 
@@ -493,7 +587,9 @@ retried only when it is classified retryable (default: network errors, timeouts,
 5xx) **and** the method is safe to repeat: GET, HEAD or OPTIONS, any method while an idempotency key
 is being sent, or a method listed in `methods`. The request is built once, so every attempt carries
 the same key. `backoff` is a fixed delay, `{ initialMs = 200, factor = 2, maxMs = 10000 }` or a
-function; the error mapper runs once, after the last attempt.
+function; the error mapper runs once, after the last attempt. `timeoutMs` and `retry` are the 0.9.0
+spellings of `care.patience.eachTryMs` and `care.tries`, and they keep these 0.9.0 semantics; see
+[0.9.0 spellings](#090-spellings-timeoutms-and-retry).
 
 **Errors.** All three extend `OutboundRestError` (`kind`, `binding`, `url`, `method`, `attempts`):
 `OutboundHttpError` adds `status`, `statusText`, `headers` and the parsed `body`;
@@ -510,8 +606,8 @@ query string (`error.url` keeps the full one).
 Caveats: strategies resolve singleton providers only; `{ useExisting }` and the configuration are
 validated at boot for declared bindings and on the first call for ad-hoc options (keep those in a
 constant so the plan is reused); a response mapper that throws is not passed to `mapError`; the
-timeout applies to each attempt, not to the whole retry sequence; `Retry-After` is not honoured by
-the default backoff (use a backoff function).
+timeout applies to each attempt, not to the whole retry sequence (`care.patience.totalMs` bounds the
+whole call); for `Retry-After`, valves, lanes, pace and plan B see [Care](#care).
 
 ## Sagas: units of work and idempotency
 
@@ -676,6 +772,480 @@ state with CAS before an outbound call); transaction steps only touch the databa
 re-runs them; never swallow a database error inside a step (Postgres turns the COMMIT into a silent
 ROLLBACK); `TransactionPort.run` must open a new top-level transaction, never join an ambient one.
 
+## Care
+
+Every edge that calls something can carry **care**: how carefully Estela calls things that can
+fail. Care is made of six parts (`patience`, `tries`, `valve`, `lanes`, `pace`, `planB`) composed
+by one engine (`src/resilience`, zero npm imports). Nothing changes for code that sets no `care`
+option: the same requests, tries, errors, hop lines and graph JSON as 0.9.0.
+
+```ts
+IntegrationModule.forRoot({
+  channels: [{ name: 'payments.charge', type: 'direct' }],
+  care: {
+    profiles: {
+      'http-std': {
+        patience: { eachTryMs: 2_000, totalMs: 8_000 },
+        tries: { max: 3, requireIdempotencyKey: true },
+        valve: { failPercent: 50, minCalls: 10, shutMs: 30_000 },
+      },
+    },
+    defaults: { activator: { lanes: { count: 20 } } },
+    metrics: prometheusPort,                          // optional CareMetricsPort
+  },
+  outbound: {
+    rest: { bindings: [{ name: 'payments.http', url: 'https://pay.example/charges', care: 'http-std' }] },
+  },
+});
+```
+
+`forRoot({ care })` turns on the module-wide parts: tries left along the call path, the events
+channel and the injectable `CareControl`. Without it, a `care` option on a binding, activator,
+inbound endpoint, saga step, flow step or channel still runs, but no tries left are read or sent.
+
+| Where | Option | Edge (`CareEdge`) |
+|---|---|---|
+| Outbound REST | binding, `outbound.rest.defaults`, `@OutboundRest`, ad-hoc `request()` options | `outbound-rest` |
+| Activator | `@ServiceActivator(channel, { care })` | `activator` |
+| Inbound REST / gRPC / GraphQL | `@InboundRest({ care })`, `InboundDefaults.care`: `lanes` and `pace` only | `inbound` |
+| Saga | `.outbound(name, run, { care })`: everything but `planB` | `saga-outbound` |
+| Flow steps | `from(source, { care })`, step and target options (see [Flow care](#flow-care)) | `flow-handle` · `flow-jump` · `flow-send` |
+| Channel | `ChannelSpec.care`: default of sends and jumps into the channel and of its activator | as the subject |
+
+### Parts and order
+
+A `Care` holds any of these parts, plus a care-wide `classify` hook:
+
+| Part | Meaning | Main fields |
+|---|---|---|
+| `patience` | How long Estela waits. | `eachTryMs` (one try; `0` = no limit), `totalMs` (the whole call) |
+| `tries` | Trying again after a failure. | `max` (counts the first, 1..20, default 3), `spacing`, `on`, `heedServerWait`, `idempotent`, `requireIdempotencyKey`, `triesLeft` |
+| `valve` | Shuts traffic to a dependency that keeps failing, then lets probes through. | `failPercent`, `minCalls`, `lookBack`, `shutMs`, `probes`, `countOn`, `onQuota`, `quotaShutMs`, `key`, `state` |
+| `lanes` | How many calls run at the same time. | `count`, `waitlist`, `waitlistMs` |
+| `pace` | How many calls start per second. | `perSecond`, `burst`, `waitMs`, `key`, `state`, `soloPerSecond`, `replicas` |
+| `planB` | What answers when the call still fails. | `value` or `channel`, `mode` (`PlanBMode.Ask` \| `PlanBMode.Leave`), `on`, `cacheable` |
+
+A `Care` with no part runs the call once, directly, with no timer. The engine composes the parts
+in one fixed order, outermost first, for every edge:
+
+```text
+planB > patience.total > lanes > tries > valve > pace > patience.eachTry > call
+```
+
+So a lane is taken once per call, every try passes the valve and takes a turn, and
+`patience.totalMs` covers waiting turns, every try and the gaps between them. `tries.spacing`
+defaults to `{ firstMs: 200, growth: 2, capMs: 10000, spread: 'full' }` (`spread` is
+`'full' | 'half' | 'none'`); it also takes a fixed number of ms or a `(tryNumber, error) => ms`
+function. The running try's `AbortSignal` is available to activator methods, flow functions and
+saga steps through `currentTrySignal()`.
+
+Errors the engine raises extend `CareError` (`instanceof` works across the `.` and `./testing`
+bundles):
+
+| Error | `kind` | Fields |
+|---|---|---|
+| `ValveShutError` | `'valve-shut'` | `readyInMs`, `forcedBy: 'quota'` |
+| `LanesFullError` | `'lanes-full'` | `reason: 'full' \| 'waitlist-expired'` |
+| `OverPaceError` | `'over-pace'` | `readyInMs` |
+| `OutOfTimeError` | `'out-of-time'` | `totalMs` |
+| `PlanBFailedError` | `'plan-b-failed'` | `original` |
+| `CareKeyError` | `'key'` | `reason` |
+| `CareConfigError` (boot) | `'config'` | `path`, `code`, `findings` |
+
+Every `CareError` carries `binding`, `edge` and `tries`. One in-process try that runs past
+`eachTryMs` fails with `TryOverdueError`; REST keeps `OutboundTimeoutError`.
+
+### Classification
+
+Every failure gets a kind (`FailureClass`): `transient`, `busy`, `rejected`, `quota` or `unknown`.
+Your `classify` hooks run first (the first defined answer wins), then the edge default.
+
+| REST failure (`defaultRestClassifier`) | Kind | `readyInMs` |
+|---|---|---|
+| `OutboundNetworkError`, `OutboundTimeoutError` | transient | n/a |
+| HTTP 408, 425, 503 | transient | from `Retry-After` |
+| HTTP 429 | busy | from `Retry-After` |
+| HTTP 500, 502, 504 and other 5xx | transient | n/a |
+| HTTP 501, 505, 511, 4xx, 3xx | rejected | n/a |
+
+Activators, saga steps and flow edges use `defaultInProcessClassifier`: a REST-shaped error by the
+table above, a `transient: true` flag on the error → transient, a gRPC status by the table below,
+anything else unknown (no extra try).
+
+| gRPC error thrown in process | Kind | `readyInMs` |
+|---|---|---|
+| 14 `UNAVAILABLE` | transient | n/a |
+| 4 `DEADLINE_EXCEEDED` | transient | n/a |
+| 8 `RESOURCE_EXHAUSTED` | busy; rejected when the pushback is negative or not an integer | from `grpc-retry-pushback-ms` |
+| 8 `RESOURCE_EXHAUSTED` with a quota detail (`details` or message names a quota, or a `google.rpc.QuotaFailure` in `grpc-status-details-bin`) | unknown: only your classifier can call it `quota` | n/a |
+| any other code | unknown, as in 0.9.0 | n/a |
+
+Whatever the code, an extra try still needs `tries.idempotent` or an `idempotencyKey` on the
+message: without one the call runs once and `try.held` is emitted (RS-36, RS-60).
+
+The code is read structurally, without importing `@grpc/grpc-js`: the code name
+(`'UNAVAILABLE'`, `'DEADLINE_EXCEEDED'`, `'RESOURCE_EXHAUSTED'`) in `code` or `status`, or a
+numeric `code` or `status` from 0 to 16 **when the error also looks like gRPC**: it has string
+`details` (grpc-js `ServiceError`, nice-grpc), a `metadata` object (grpc-js, connect) or a message
+in the grpc-js format `<code> <NAME>: <details>`. A bare numeric code is not enough: MongoDB
+(`TypeMismatch` is 14) and KafkaJS errors use the same numbers and stay unknown. Metadata is read through
+`metadata.get(key)` or as a plain record. A `DOMException` is never read as gRPC (its legacy
+numeric `code` overlaps the range), and a `retryable` or `transient` flag on the error wins over
+the code. A `classify` hook that already answered `transient` for code 14 keeps working; it is no
+longer needed. Behaviour change since 0.9.0 (SPI-448): an error with one of these three codes was
+unknown before, so it got no extra try and no plan B. Flow edges also classify `JumpTimeoutError` as transient, `CapacityExceededError` as busy and
+`NoSubscriberError` / `ChannelNotFoundError` / `FanoutCycleError` as rejected. `'quota'` only comes
+from your own classifier.
+
+| Kind / turned away | Tried again | Counted by the valve | Plan B by default | Event |
+|---|---|---|---|---|
+| transient | yes | yes (failure) | yes | `try.again` |
+| busy (429) | yes, heeding `Retry-After` | **no** | yes | `try.again` |
+| rejected | no | no | no | none |
+| quota | **no** | shuts it (per `onQuota`) | **no** | `quota.used-up`, `valve.forced-shut` |
+| unknown | no | no | no | none |
+| `valve-shut` (not quota) | no | n/a | yes | `valve.*` on changes |
+| `lanes-full` / `over-pace` | no | no | yes | `lanes.full` / `pace.over` |
+| `out-of-time` | no | no | yes | `patience.ran-out` |
+
+A 429 does not shut the valve: the callee is healthy and asks the caller to slow down. List
+`'busy'` in `valve.countOn` only with a reason. A requested wait longer than `tries.maxServerWaitMs`
+(default `spacing.capMs`) makes the failure final.
+
+An extra try happens only when the failure's kind is in `tries.on`, tries and tries left remain,
+`totalMs` leaves room for the gap, and the call is repeatable: a safe REST method, an idempotency
+key on the call, or `tries.idempotent: true`. With `tries.requireIdempotencyKey: true` a non-safe
+call without a key fails with `CareKeyError` before the first try; set it on every binding that has
+side effects.
+
+### Tries left
+
+Along one call path, the **outermost** layer that may try again owns the extra tries; every layer
+inside it makes single tries. Tries left carry that rule: the message header `triesLeft`, the wire
+header `x-tries-left` (HTTP and gRPC metadata), and an `AsyncLocalStorage` scope in between. A layer
+with extra tries (`min(max - 1, tries left)` > 0) **keeps** them and sends `0` downstream; a layer
+without extra tries forwards what it received. `tries.triesLeft: 'forward'` forwards instead of
+keeping (this allows amplification). Invalid values are ignored and counted
+(`estela_care_tries_left_invalid_total`), values above 20 are capped, and
+`triesLeft: { initial, header }` sets a value for requests that arrive without one. The header can
+only lower extra tries, never raise them. Care that loses its extra tries this way emits `try.held`.
+
+The inbound interceptor reads `x-tries-left`; activators, flows and outbound channel bindings
+rebuild the scope from `msg.headers.triesLeft` at every dispatch; `OutboundRestGateway.request`
+and `ChannelRegistry.send` copy the scope's value onto the messages they create. With two Estela
+services chained over HTTP, each with `tries: { max: 3 }`, a failing leaf gets 3 calls, not 9.
+
+> **Guidance.** Put `tries` on the edge closest to the dependency (the outbound binding, the saga
+> step), and give activators only `lanes` and `patience`. The 0.9.0 `retry` spelling does not take
+> part in tries left: it neither reads nor sends `x-tries-left`, so move it to `care.tries` before
+> you rely on it.
+
+### Shared state across replicas
+
+`pace` and `valve` keep state per pod unless `state` is a `CareStatePort`.
+`redisCareState(evalScript, { prefix? })` is the reference adapter: it imports no Redis client,
+you pass a function that evaluates a Lua script. Turns refill on Redis server time (`TIME`), so
+clock skew between pods does not matter; the shared valve is a "shut" mark with a TTL plus a probe
+lease, so one pod probes at a time; failures are still counted per pod. Shared keys look like
+`estela:care:<part>:<binding>[:<keyHasher(key)>]`.
+
+```ts
+// ioredis
+const shared = redisCareState((script, keys, args) => redis.eval(script, keys.length, ...keys, ...args));
+// node-redis v4
+const shared = redisCareState((script, keys, args) => client.eval(script, { keys: [...keys], arguments: [...args] }));
+
+care: {
+  pace: { perSecond: 50, burst: 50, state: shared, replicas: 4 },
+  valve: { state: shared, syncMs: 1_000 },
+}
+```
+
+**When Redis is down (D-REDIS-DOWN).** A shared-state call waits at most `sharedStateWaitMs`
+(default 100). When it throws or does not answer in time, that binding switches to **local state**
+(one `shared-state.lost` event and one warn line): `pace` uses a local bucket of `soloPerSecond`
+(default `perSecond / replicas`, never unlimited) and the valve its per-pod window. The port is
+checked again at most once per `sharedStateCheckMs` (default 5000), lazily on a call; on success
+the binding switches back and emits `shared-state.back`. Each call is decided by exactly one
+source, local or shared.
+
+### Events, metrics and keys
+
+Events (`try.again`, `try.held`, `valve.shut|probing|flowing|forced-shut|keys-full`, `lanes.full`,
+`pace.over`, `patience.ran-out`, `plan-b.used|failed`, `quota.used-up`,
+`shared-state.lost|back`) are published on the pubsub channel `estela.care.events`
+(`events: { channel: 'name' | false, onEvent }`). They carry edge, binding, kind or reason,
+`tryNumber`, delay and trace ids, never a payload, header, URL or raw key. Valve events fire on
+changes only.
+
+| Metric (`CareMetricsPort`) | Type | Labels |
+|---|---|---|
+| `estela_care_calls_total` | counter | edge, binding, outcome (`success`, `failure`, `plan-b`, `turned-away`) |
+| `estela_care_call_seconds` | histogram | edge, binding, outcome |
+| `estela_care_tries_total` | counter | edge, binding, class |
+| `estela_care_extra_tries_total` | counter | edge, binding |
+| `estela_care_turned_away_total` | counter | edge, binding, reason (`TurnedAwayKind`) |
+| `estela_care_valves_shut` | gauge | edge, binding |
+| `estela_care_shared_state_lost` | gauge | edge, binding |
+| `estela_care_tries_left_invalid_total` | counter | edge |
+
+`valve.key` and `pace.key` split state per key (tenant, phone number, account). In a flow, put the
+key in a header with a `headers` step (or `carryHeaders` on the inbound endpoint) before the step
+whose care reads it, rather than reading the payload. Raw keys never reach logs, events, metrics,
+errors or state keys:
+
+- `keyHasher` (module option) builds the state-port key. It is **required** with a custom key and
+  shared state, and it **must be an HMAC** with a secret of at least 32 bytes, never a plain digest
+  (a phone number's SHA-256 is reversible by enumeration).
+- `keyLabel(key, ctx)` is what events show; omit it, or return a hashed label, when keys may be
+  personal data.
+- Both must return `^[A-Za-z0-9:_.-]{1,128}$`, else the call fails with `CareKeyError`.
+
+```ts
+const secret = process.env.ESTELA_KEY_SECRET!;   // >= 32 random bytes
+care: {
+  keyHasher: (key) => createHmac('sha256', secret).update(key).digest('hex'),
+  keyLabel: (key) => createHmac('sha256', secret).update(key).digest('hex').slice(0, 12),
+}
+```
+
+### Quota, `onQuota` and `CareControl`
+
+What a `quota` failure does to the valve is set by `valve.onQuota`, an `OnQuota` enum exported by
+`@estela/nest`:
+
+| `onQuota` | Shut for | Then |
+|---|---|---|
+| `OnQuota.ShutLikeFailure` (default) | `shutMs` | probes, like any other shut |
+| `OnQuota.ShutFor` | `quotaShutMs` (integer ms >= 1, required) | probes |
+| `OnQuota.ShutUntilResumed` | until `CareControl.resume` | no probes |
+
+```ts
+import { OnQuota } from '@estela/nest';
+
+valve: { onQuota: OnQuota.ShutFor, quotaShutMs: 60_000 }   // a provider's per-minute quota
+valve: { onQuota: OnQuota.ShutUntilResumed }               // a daily limit an operator lifts
+```
+
+`quotaShutMs` without `OnQuota.ShutFor`, `OnQuota.ShutFor` without `quotaShutMs`, and any value
+that is not an `OnQuota` string (`'shut-like-failure'`, `'shut-for'`, `'shut-until-resumed'`) fail
+boot with `CareConfigError`. `CareControl` is injectable under `forRoot({ care })`:
+
+```ts
+constructor(private readonly care: CareControl) {}
+
+this.care.valveState('payments.http');      // { state: 'shut', forcedBy: 'quota' } | undefined
+await this.care.resume('payments.http', key); // reopens it and clears the shared "shut" marks
+```
+
+`valveState` returns a `ValveStateView` (`state: 'flowing' | 'shut' | 'probing'`). Bindings are
+named as in the boot log: the outbound binding name, `activator:Class.method`, `<saga>:<step>`, and
+`flow:<flow>#<step id>[:<channel>]` for flow edges. The module's engine is also available under the
+DI token `CARE_ENGINE`.
+
+### Plan B and its mark
+
+`planB: { value: (error, ctx) => … }` or `planB: { channel }` (request/reply with the same message)
+answers when the call fails with a kind in `planB.on` (`PlanBTrigger`; default transient, busy and
+every `TurnedAwayKind`). A plan B answer is never stored as the completed result of an idempotency
+claim. The activator settles its claim without storing and replies with header `planB: true`; the
+inbound interceptor does the same, so a duplicate request with `onDuplicate: 'replay'` runs again
+instead of replaying plan B. `planB.cacheable: true` opts out. Never use plan B to hide the failure
+of a side effect.
+
+#### Leaving the message on a channel: `PlanBMode.Leave`
+
+`planB: { channel }` asks: it is request/reply, so the channel needs a consumer that answers.
+To park the message instead (a queue drained later, a dead-letter store), set
+`mode: PlanBMode.Leave`. Estela sends the message to the channel once, does not wait for an answer,
+and counts the call as handled by plan B: `plan-b.used` is emitted, the call ends with outcome
+`plan-b`, the result is never stored for an idempotency claim, and a reply carries `planB: true`.
+An optional `value` is what the caller gets after the message is left; without it the answer is
+`undefined` (an activator then answers nobody).
+
+```ts
+@ServiceActivator('wa.send', {
+  care: {
+    tries: { max: 3, requireIdempotencyKey: true },
+    planB: {
+      channel: 'wa.reply.parked',                   // e.g. a queue drained by a worker
+      mode: PlanBMode.Leave,
+      value: () => ({ status: 'parked' }),          // optional answer for the caller
+    },
+  },
+})
+```
+
+| | `PlanBMode.Ask` (default) | `PlanBMode.Leave` |
+|---|---|---|
+| Channel use | request/reply; its answer is the plan B answer | one send; no answer awaited |
+| `value` | not with `channel` | optional: the answer after the message is left |
+| `cacheable: true` | allowed | refused |
+| A failed send or no answer | `PlanBFailedError`, `plan-b.failed` | `PlanBFailedError`, `plan-b.failed` (a queue accepts with no consumer) |
+
+The left message has the payload, the trace (`traceId`, `correlationId`, `causationId` = the
+failed message id), the `idempotencyKey` and the message's own headers, so a drain can re-send it
+with the same key. It never has reply routing (`replyChannel`, the jump reply marker) or any other
+Estela-owned header, so its consumer cannot answer the caller.
+
+Consume the parking channel with a plain subscriber (`registry.get(name).subscribe(...)`), not
+with a `@ServiceActivator`. An activator claims the `idempotencyKey` the left message keeps, so
+when a drain re-sends the message, fails again and plan B leaves it a second time, the activator
+treats it as a duplicate and the message is dropped without a trace.
+
+Where it applies:
+
+| Edge | `PlanBMode.Leave` |
+|---|---|
+| Outbound REST | the request message; the unknown channel fails `bind()` (`CareConfigError`) |
+| Activator | the activator's message; an unknown channel fails when it subscribes (`CareConfigError`) |
+| Flow `handle`, awaited `jump` | the step's message; `value` becomes the payload or the jump reply |
+| Flow `to` | the same hop without reply routing (a `value` is refused there; `PlanBMode.Ask`, written or not, is the 0.9.0 re-send that keeps `replyChannel`) |
+| Saga outbound step | refused, like every plan B |
+
+Invalid combinations fail with `CareConfigError` when the care is resolved: `mode` without a
+`channel`, an unknown `mode`, `value` with `channel` under `PlanBMode.Ask`, and
+`cacheable: true` with `PlanBMode.Leave`. On flows, an unknown channel is
+`PLAN_B_CHANNEL_MISSING`. The graph summary says `plan-b leave`. A `PlanBMode.Ask` plan B and a
+plan B without `mode` behave exactly as before.
+
+### Inbound care: 429
+
+`@InboundRest`, `@InboundGrpc`, `@InboundGraphQL` and `InboundDefaults` accept `care` with `lanes`
+and `pace` only (anything else, or any inbound care on `@InboundRabbit`, fails boot). Lanes and
+turns are taken after guards and before pipes and the handler, so a turned-away request never takes
+an idempotency claim. It throws `InboundBusyError` (code `INBOUND_BUSY`, `reason: 'lanes-full' |
+'over-pace'`, `readyInMs`): HTTP **429** with `Retry-After` (seconds, rounded up) when known, and
+`grpcCode = 8` (`RESOURCE_EXHAUSTED`). The `pace.key(ctx)` of inbound care reads an
+`InboundCareContext`: `ctx.rawHeaders` comes from the optional `rawHeaders(context)` method of an
+`InboundTransportStrategy` (`{}` without it). Until the gRPC status mapper ships, map the status
+with an exception filter:
+
+```ts
+@Catch(InboundBusyError)
+export class BusyGrpcFilter implements RpcExceptionFilter<InboundBusyError> {
+  catch(error: InboundBusyError): Observable<never> {
+    return throwError(() => ({ code: error.grpcCode, message: 'RESOURCE_EXHAUSTED' }));
+  }
+}
+```
+
+### Saga outbound steps
+
+```ts
+saga<Ctx, EntityManager, Reply>('complete')
+  .transaction('claim', claimStep)
+  .outbound('charge', chargeCard, {
+    compensate: releaseClaim,
+    care: { tries: { max: 3, idempotent: true }, patience: { eachTryMs: 5_000 } },
+  })
+  .reply((ctx) => ctx.reply);
+
+new SagaRunner({ transactions, care: { profiles, defaults } });   // or a CareEngine
+```
+
+All the tries are one `outbound:<name>` hop, and `compensate` runs once, after the last try fails;
+then the last error is rethrown. `planB` is refused (`SagaDefinitionError`): it would hide the
+failure and skip the compensation. `tries.max > 1` needs `tries.idempotent: true`. A profile name
+resolves against `SagaRunnerOptions.care` on the first `run()`, before any transaction; a `planB`
+inherited from `defaults['saga-outbound']` is dropped with one warning. Extra tries take no `ctx`
+checkpoint: what a failed try wrote to `ctx` is visible to the next try and to the compensation.
+Valves persist across runs of the same runner. The unit-of-work `retry()` policy is unrelated and
+unchanged.
+
+### Named profiles and `defaults`
+
+Anywhere care is accepted you can pass a **reference** (`CareRef`):
+
+- a profile name: `care: 'http-std'`;
+- an inline `Care`: `care: { tries: { max: 2 } }`;
+- a profile with inline overrides, deep-merged once: `care: { use: 'http-std', tries: { max: 5 } }`;
+- `false`: nothing at this level and below.
+
+Profiles (`CareProfile`) live in `care.profiles` (names `^[a-z0-9][a-z0-9._-]{0,63}$`) and may
+`extends` another profile (single inheritance). `care.defaults` gives a default per edge
+(`outbound-rest`, `activator`, `saga-outbound`, `flow-handle`, `flow-jump`, `flow-send`, …;
+`inbound` is refused, use `InboundDefaults.care`). References are validated at boot (saga steps: on
+the first run). Flow, step, channel, profile and `defaults` references are resolved in one pass
+that collects every finding (unknown profile, invalid value, part not allowed) into one
+`CareConfigError` whose `findings` lists them all, for example
+`flow 'loan' step 'credit': care.use unknown profile 'jump-slo'` (code `UNKNOWN_PROFILE`).
+
+### 0.9.0 spellings: `timeoutMs` and `retry`
+
+`timeoutMs` and `retry` on outbound REST options stay, as the 0.9.0 spellings with their 0.9.0
+semantics; no deprecation warning is logged. This table is the only place where the textbook words
+appear.
+
+| 0.9.0 option | Same thing under `care` | Kept identical |
+|---|---|---|
+| `timeoutMs: N` | `patience: { eachTryMs: N }` | call > target > binding > module precedence; `0` = no limit; `OutboundTimeoutError` |
+| `retry: { maxAttempts, backoff, retryOn, methods }` | `tries: { max, spacing, methods }` + a boolean classifier | same gaps, **no spread**, field-by-field layering, 429 and every 5xx tried again |
+| (implicit) | `heedServerWait: false`, no tries left, no valve, lanes, pace or plan B | no `x-tries-left` read or sent |
+| `retry: false` | `tries: false` | turns a module default off |
+
+Under `care` the defaults differ: full spread, `Retry-After` heeded, the classification table above
+and tries left. Setting the same part in both spellings on one layer fails with `CareConfigError`
+code `LEGACY_AND_NEW_SAME_LAYER`; different parts or different layers are allowed.
+
+## Flow care
+
+A flow, a step, a target and a channel can carry care, with the same references as above (model:
+[`docs/ESTELA_FLOW_PARAMETERS.md`](./docs/ESTELA_FLOW_PARAMETERS.md), rules:
+[`docs/ESTELA_RESILIENCE_SPEC.md`](./docs/ESTELA_RESILIENCE_SPEC.md) section 2.13).
+
+| Level (highest wins) | Written in |
+|---|---|
+| L4 step | a step option, one `fanoutTo`/`jumpTo` target, `jump(channel, { care })`, `@ServiceActivator`, an outbound binding |
+| L3 flow | `IntegrationFlow.from(source, { care: { handle?, jump?, send? } })` |
+| L2 channel | `ChannelSpec.care` of the **destination** channel (sends, jumps) or of the activator's own channel |
+| L1 module | `care.defaults[edge]`, `outbound.rest.defaults` |
+| L0 built-in | no part: one direct try |
+
+**Merge rule.** Each part (`patience`, `tries`, `valve`, …) is taken **whole** from the highest
+level that sets it; levels are not merged field by field. A `{ use, …inline }` reference is
+deep-merged once, inside its own level. `false` at a level drops everything below it. Incoming
+tries left and the remaining `totalMs` only narrow a resolved value.
+
+| DSL method | Edge | Allowed |
+|---|---|---|
+| `handle(fn, opts?)` | `flow-handle` | all; `planB` `value` or `channel` |
+| `jump(channel, opts?)`, `jumpTo(dests, opts?)` | `flow-jump` | all, per target; `planB` only on awaited targets |
+| `to(channel, opts?)` | `flow-send` | all but `planB`, except `planB: { channel }` (a plain send of the same hop) and `planB: { channel, mode: PlanBMode.Leave }` (the hop without reply routing) |
+| `publish`, `fanoutTo`, `route` | `flow-send` | all but `planB`, per target |
+| `filter`, `transform`, `headers`, `reply`, `wireTap` | none | refused at build (`wireTap` never: `WIRETAP_CARE`) |
+
+```ts
+IntegrationFlow.from('orders.place', { care: { send: 'send-std', jump: { patience: { eachTryMs: 3_000 } } } })
+  .handle(enrich, { id: 'enrich', care: { patience: { eachTryMs: 500 } } })
+  .jumpTo([{ channel: 'inventory.reserve', care: { tries: { max: 2 } } }])
+  .to('orders.persist', { care: { planB: { channel: 'orders.persist.parked' } } });
+
+channels: [{ name: 'inventory.reserve', type: 'direct', care: 'activator-std' }]
+```
+
+- A step tries again only under an idempotency key: the message's `idempotencyKey`, a step key, or
+  `tries.idempotent: true` (shown as `repeatableBy: 'declared'` in the graph). Otherwise the step
+  makes one try and emits `try.held`; boot warns `TRIES_WITHOUT_KEY`.
+- Channel care whose activator also tries again logs `TRIES_STACKED` at boot; tries left bound the
+  total at run time. Never try again toward a `pubsub` destination unless every subscriber is
+  idempotent: an extra try delivers to all of them again.
+- `jump` and jump targets keep their 0.9.0 wait: a target `timeoutMs` is the 0.9.0 spelling of
+  `patience.eachTryMs` (setting both on one target fails boot), and without either the wait is
+  10 s. Each try waits on its own ephemeral reply channel, unregistered when the try ends, so a
+  late reply from an earlier try is dropped. A jump with extra tries toward a keyed activator needs
+  an `eachTryMs` longer than the activator's work.
+- When the module has care, a jump whose reply carries `planB: true`, or a step that plan B
+  answered, marks the flow, and the flow's claim is settled without storing the result. The jump
+  writes `headers.jumpPlanB[channel] = true` next to `jumpReplies[channel]`.
+- Without any care configuration (no `forRoot({ care })` and no `care` on any channel, flow, step,
+  activator, inbound endpoint or outbound binding) flows, activators and inbound endpoints behave
+  exactly as in 0.9.0: no message scope is opened, a `wireTap` copy keeps every care header
+  (`triesLeft` included; it never keeps reply routing, see the Flow DSL bug fix note), and a reply
+  header `planB: true` neither marks a flow nor releases an idempotency claim.
+- Flow steps get an `id` (default `<kind>#<index>`); steps with care show `id`, `care` and
+  `repeatableBy` in the graph, and the module lists `careProfiles`.
+
 ## Observability
 
 ```bash
@@ -719,6 +1289,15 @@ inbound grpc: WorkflowLifecycleService/Start -> wf.start (request-reply)
 inbound graphql: mutation placeOrder -> orders.place
 outbound rest: payments.http -> POST https://pay.example/charges
 outbound rest: partner.call -> dynamic
+```
+
+An outbound binding or inbound endpoint with care gets a summary suffix in its boot line, and the
+same summary is the `care` field of its graph ref; activators show it in their graph label
+(`InventoryActivator.reserve [patience 2s · lanes]`), and flow steps and channels with care carry it
+as `care`. The summary lists part names, waits and tries only:
+
+```
+outbound rest: payments.http -> POST https://pay.example/charges [tries x3 · valve]
 ```
 
 Only transport, route or pattern, channel and the request-reply flag are printed. When route
@@ -769,6 +1348,11 @@ bindFlow(PlaceOrderFlow, registry, { idempotency: new IdempotencyService({ store
 await registry.send('orders.place', { qty: 2, sku: 'A' });
 const reply = await waitFor(registry, 'reply.http-1', 2_000);
 ```
+
+Care helpers: `manualCareClock()` (deterministic clock, `advance(ms)`), `MemoryCareState` (shared
+state with fault injection: `down()`, `slow(ms)`, `hang()`, `failNext(n)`),
+`collectCareEvents(moduleRef)`, and `bindFlow(flow, registry, { care })` to resolve flow care without
+Nest.
 
 Saga helpers: `MemoryLockPort` (in-process, NOT cross-process), `MemoryTransitionPort`, and
 `testUnitOfWork()` to call a transaction step directly. The published type declarations stay

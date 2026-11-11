@@ -516,8 +516,20 @@ query string (`error.url` conserva la completa).
 Advertencias: las estrategias resuelven solo providers singleton; `{ useExisting }` y la configuración
 se validan en el arranque para los bindings declarados y en la primera llamada para opciones ad-hoc
 (guárdalas en una constante para reutilizar el plan); un response mapper que lanza no pasa por
-`mapError`; el timeout aplica a cada intento, no a toda la secuencia de reintentos; el backoff por
-defecto no respeta `Retry-After` (usa una función de backoff).
+`mapError`; el timeout aplica a cada intento, no a toda la secuencia de reintentos (un
+`care.patience.totalMs` acota la llamada entera); para `Retry-After`, `valve`, `lanes`, `pace` y
+`planB` ver [Care](#care).
+
+## Care
+
+`care` define con cuánto cuidado Estela llama a lo que puede fallar: `patience` (cuánto espera),
+`tries` (otro intento tras un fallo), `valve` (corta el tráfico a una dependencia que sigue
+fallando), `lanes` (llamadas a la vez), `pace` (llamadas por segundo) y `planB` (qué responde si la
+llamada falla igual), más intentos restantes en la ruta (`x-tries-left`), estado compartido en
+Redis, `care` inbound con 429 y `care` en flows, pasos de saga y canales. La referencia autoritativa
+es la sección [Care](./README.md#care) del README en inglés (y [Flow care](./README.md#flow-care)).
+En el outbound REST, `timeoutMs` y `retry` son la forma 0.9.0 de `care.patience.eachTryMs` y
+`care.tries`, con la semántica de 0.9.0.
 
 ## Observabilidad
 

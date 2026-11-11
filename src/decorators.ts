@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import type { CareRefOf } from './resilience/resilience.types';
 
 /** Metadatos de activators (spec sec.7.1). Unico punto que toca APIs de metadata. */
 export const ACTIVATOR_METADATA = 'integration:activator';
@@ -8,6 +9,8 @@ export type ActivatorKind = 'service-activator' | 'pubsub';
 export interface ActivatorOptions {
   group?: string;
   routingKey?: string;
+  /** Care around the method call (RS-36): a profile name, an inline `Care` or `{ use }`. */
+  care?: CareRefOf;
 }
 
 export interface ActivatorMetadata extends ActivatorOptions {
@@ -24,6 +27,7 @@ function defineActivator(
     const metadata: ActivatorMetadata = { channel, kind };
     if (options.group !== undefined) metadata.group = options.group;
     if (options.routingKey !== undefined) metadata.routingKey = options.routingKey;
+    if (options.care !== undefined) metadata.care = options.care;
     Reflect.defineMetadata(ACTIVATOR_METADATA, metadata, target, propertyKey);
     return descriptor;
   };

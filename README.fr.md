@@ -178,6 +178,17 @@ Un message envoyé à un canal lié (`forRoot({ outbound: { rest: { defaults, bi
 par défaut. `bindRestOut` ne change pas. Détails et exemple :
 [README (EN)](./README.md#outbound-rest-requestreply-with-your-own-contract).
 
+## Care
+
+`care` décrit avec quel soin Estela appelle ce qui peut échouer : `patience` (combien de temps
+attendre), `tries` (un nouvel essai après un échec), `valve` (coupe le trafic vers une dépendance qui
+échoue encore), `lanes` (appels simultanés), `pace` (appels par seconde) et `planB` (ce qui répond si
+l'appel échoue quand même), plus les essais restants sur le chemin (`x-tries-left`), l'état partagé
+dans Redis, le `care` inbound en 429 et le `care` sur les flows, les étapes de saga et les canaux :
+la référence qui fait foi est la section [Care](./README.md#care) du README anglais (et
+[Flow care](./README.md#flow-care)). En outbound REST, `timeoutMs` et `retry` sont l'écriture 0.9.0
+de `care.patience.eachTryMs` et `care.tries`, avec la sémantique de 0.9.0.
+
 ## Observabilité
 
 ```bash

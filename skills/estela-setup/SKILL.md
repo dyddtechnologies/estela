@@ -41,6 +41,46 @@ IntegrationModule.forRoot(
 4. The module is `global: true` — feature modules can inject `ChannelRegistry`, `TraceContext`, `ReplyGateway`, `ChannelGraph` without importing.
 5. Init order is fixed: channels → activators (discovered) → flows (`graph.recordFlow` + attach) → Rabbit explorer.
 
+## Wire care (`forRoot({ care })`)
+
+```ts
+IntegrationModule.forRoot({
+  channels,
+  care: {
+    profiles: {                                     // named profiles, referenced by name anywhere
+      'http-std': { patience: { eachTryMs: 2_000, totalMs: 8_000 },
+                    tries: { max: 3, requireIdempotencyKey: true },
+                    valve: { minCalls: 10, shutMs: 30_000 } },
+      'act-std':  { extends: 'http-std', tries: false, lanes: { count: 20 } },
+    },
+    defaults: { 'outbound-rest': 'http-std', activator: { lanes: { count: 50 } } },
+    metrics: promPort,                              // CareMetricsPort: counter / histogram / gauge
+    keyHasher: (k) => createHmac('sha256', secret).update(k).digest('hex'), // HMAC, secret >= 32 bytes
+    events: { channel: 'estela.care.events' },      // default; false turns it off
+    triesLeft: { initial: 2 },                      // optional value for requests that arrive without one
+  },
+  outbound: { rest: { bindings: [{ name: 'pay.http', url, care: 'http-std' }] } },
+});
+```
+
+- `forRoot({ care })` turns on tries left (`x-tries-left`), the events channel and the injectable
+  `CareControl` (`valveState`, `resume`). Without it, care still runs but no tries left are read or
+  sent.
+- References everywhere: a profile name, an inline `Care`, `{ use: 'name', ...overrides }`
+  (deep-merged once) or `false`. `defaults` keys are edges (`outbound-rest`, `activator`,
+  `saga-outbound`, `flow-handle`, `flow-jump`, `flow-send`); `inbound` is refused (use
+  `inbound.care`, which takes `lanes` and `pace` only).
+- Invalid options fail boot with `CareConfigError` (`code`, `path`, `findings`).
+- Shared state across replicas: `state: redisCareState(evalScript, { prefix })` on `pace` and
+  `valve`. ioredis: `(s, k, a) => redis.eval(s, k.length, ...k, ...a)`; node-redis:
+  `(s, k, a) => client.eval(s, { keys: [...k], arguments: [...a] })`. If Redis is down, each binding
+  switches to local state (`soloPerSecond`, default `perSecond / replicas`) after
+  `sharedStateWaitMs` (100) and checks again every `sharedStateCheckMs` (5000).
+- A custom `valve.key` / `pace.key` with shared state needs `keyHasher`; use `keyLabel` (hashed)
+  when keys may be personal data. Raw keys are never logged.
+- Sagas: `new SagaRunner({ transactions, care: { profiles, defaults } })` (or a `CareEngine`)
+  resolves profile names of `.outbound(..., { care })` steps.
+
 ## Wire sagas (TransactionPort, locks, CAS)
 
 ```ts

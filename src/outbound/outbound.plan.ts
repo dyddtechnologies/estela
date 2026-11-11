@@ -1,5 +1,8 @@
+import type { ChannelRegistry } from '../channel-registry';
 import { OutboundError, OutboundHttpError, redactUrl } from './outbound.errors';
+import { resolveOutboundCare, usesCare, type OutboundCarePlan } from './outbound.resilience';
 import { formSerializer, jsonSerializer, textSerializer } from './outbound.serializers';
+import type { CareEngine } from '../resilience/runtime';
 import {
   OUTBOUND_REST_METHODS,
   type OutboundBackoffFn,
@@ -32,6 +35,12 @@ const DEFAULT_BACKOFF = { initialMs: 200, factor: 2, maxMs: 10_000 } as const;
 export interface OutboundPlanDeps {
   defaults?: OutboundRestDefaults;
   resolver?: OutboundProviderResolver;
+  /** Care engine; required only by bindings that use `care`. */
+  care?: () => CareEngine;
+  /** Ad-hoc `request()` options: stateful care parts are refused (RS-33). */
+  adHoc?: boolean;
+  /** Channels; a plan B with `PlanBMode.Leave` leaves its message on one. */
+  registry?: ChannelRegistry | undefined;
 }
 
 export interface OutboundIdempotencyPlan {
@@ -70,6 +79,8 @@ export interface OutboundRestPlan {
   retry?: OutboundRetryPlan;
   mapError?: OutboundErrorMapperFn;
   fetchFn?: OutboundFetch;
+  /** Set when the binding or the module default uses `care`: the call runs on the executor. */
+  care?: OutboundCarePlan;
 }
 
 type AnyFn = (...args: never[]) => unknown;
@@ -328,7 +339,7 @@ export function resolveOutboundRestPlan(
   const identity = identify(binding);
   const merged: OutboundRestOptions = { ...defined(deps.defaults), ...defined(binding) };
   const method = normalizeOutboundMethod(merged.method ?? 'POST');
-  return {
+  const plan: OutboundRestPlan = {
     ...identity,
     description: describeTarget(binding, method),
     method,
@@ -341,4 +352,16 @@ export function resolveOutboundRestPlan(
     ...resolveFeatures(binding, deps),
     ...resolveHooks(binding, merged, deps.resolver),
   };
+  if (deps.care !== undefined && usesCare(binding, deps.defaults, deps.care())) {
+    plan.care = resolveOutboundCare(identity.name, {
+      binding,
+      defaults: deps.defaults,
+      runtime: deps.care(),
+      legacyTries: plan.retry,
+      idempotencyEnabled: plan.idempotency !== undefined,
+      adHoc: deps.adHoc === true,
+      registry: deps.registry,
+    });
+  }
+  return plan;
 }

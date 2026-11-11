@@ -239,6 +239,14 @@ export class InboundIdempotencyGate {
     }
   }
 
+  /** RS-27: a plan B answer is never stored; the key is released, else marked failed. */
+  async discard(claim: InboundClaim): Promise<void> {
+    if (claim.status !== 'acquired') return;
+    const { plan, at } = claim;
+    if (plan.store.release !== undefined) await plan.store.release(at.scope, at.key);
+    else await plan.store.fail(at.scope, at.key, new Error('plan B result not stored'));
+  }
+
   /** Applies the failure policy; any policy error degrades to `keep` and is swallowed. */
   async failed(claim: InboundClaim, error: unknown, ctx: InboundKeyContext): Promise<void> {
     if (claim.status !== 'acquired') return;

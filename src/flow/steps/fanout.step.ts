@@ -1,19 +1,23 @@
 import { nextHop } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome, FanoutDest } from '../flow-step';
-import { normalizeDests } from '../flow-step';
+import type { FlowDest, FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
+import { describeDest, normalizeDests } from '../flow-step';
+import { sendHop } from '../flow-resilience';
 import { reportFireAndForget } from './forget';
 
 /**
- * Copy con `nextHop(..., { reply: 'none' })` (plan sec.8.1). Grupo awaited en
- * paralelo (`Promise.all`); forget never tumba. El payload del padre NO se pisa.
+ * Copy with `nextHop(..., { reply: 'none' })` (plan sec.8.1). Awaited targets run in parallel
+ * (`Promise.all`); forget targets never fail the flow. The parent payload is NOT replaced.
  */
 export class FanoutStep implements FlowStep {
   readonly kind = 'fanout' as const;
 
-  constructor(private readonly dests: readonly FanoutDest[]) {}
+  constructor(
+    private readonly dests: readonly FlowDest[],
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
-    return { kind: this.kind, dests: normalizeDests(this.dests) };
+    return { kind: this.kind, dests: normalizeDests(this.dests).map(describeDest) };
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
@@ -24,7 +28,7 @@ export class FanoutStep implements FlowStep {
         { channel: target.channel, component: `fanout:${ctx.flowName}` },
         { reply: 'none' },
       );
-      const send = ctx.registry.sendMessage(target.channel, hop);
+      const send = sendHop(ctx, target.channel, hop);
       if (target.wait === false) reportFireAndForget(ctx, target.channel, send, ctx.msg);
       else awaited.push(send);
     }

@@ -16,9 +16,15 @@ import type { AmqpLikeChannel } from './adapters/amqp-like.channel';
 import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.interceptor';
 import type { InboundDefaults } from './inbound/inbound.types';
 import { InboundExplorer } from './inbound/inbound.explorer';
+import { carriedHeadersOf } from './inbound/inbound.carry';
 import { discoverInbounds } from './inbound/inbound.discovery';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
+import {
+  FlowParameterResolver,
+  type FlowResolution,
+  type TryingTarget,
+} from './flow/flow-parameter-resolver';
 import type { FlowDefinition } from './flow/integration-flow';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import type { IdempotencyStore } from './idempotency/idempotency-store';
@@ -27,7 +33,11 @@ import { ReplyGateway } from './gateway/reply-gateway';
 import { ChannelGraph } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
-import { subscribeActivator, type ActivatorDeps } from './activator/activator-wrapper';
+import {
+  activatorCare,
+  subscribeActivator,
+  type ActivatorDeps,
+} from './activator/activator-wrapper';
 import { HopLogger, type IntegrationLoggingOptions } from './trace/hop-logger';
 import { printEstelaBanner } from './trace/banner';
 import { OutboundRestGateway } from './outbound/outbound-rest.gateway';
@@ -37,8 +47,25 @@ import {
   type OutboundRestSpec,
 } from './outbound/outbound.decorators';
 import type { OutboundModuleOptions } from './outbound/outbound.types';
+import { CareControl } from './resilience/registry';
+import { describeCare } from './resilience/resilience.plan';
+import { inboundShedPlan } from './inbound/inbound.resilience';
+import type { CareLogger, CareModuleOptions } from './resilience/resilience.types';
+import { CareEngine } from './resilience/runtime';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
+/** DI token of the module's `CareEngine` (always present; enabled by forRoot({ care })). */
+export const CARE_ENGINE = 'INTEGRATION_CARE_ENGINE';
+
+function nestCareLogger(): CareLogger {
+  const logger = new Logger('EstelaCare');
+  return {
+    log: (message) => logger.log(message),
+    warn: (message) => logger.warn(message),
+    error: (message) => logger.error(message),
+    debug: (message) => logger.debug(message),
+  };
+}
 
 export interface IntegrationIdempotencyOptions {
   enabled?: boolean;
@@ -60,6 +87,11 @@ export interface IntegrationModuleOptions {
   inbound?: InboundDefaults;
   /** Outbound adapters: module-wide defaults and declared bindings (REST request/reply). */
   outbound?: OutboundModuleOptions;
+  /**
+   * Care (SPI-445): named profiles, tries left, events channel, metrics and key handling.
+   * Without it, bindings that use `care` still run, but no tries left are read or sent.
+   */
+  care?: CareModuleOptions;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
@@ -78,11 +110,13 @@ function inboundDepsProvider(): Provider {
       gateway: ReplyGateway,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
+      care: CareEngine,
     ): InboundInterceptorDeps => ({
       registry,
       trace,
       idempotency,
       replyGateway: gateway,
+      care,
       ...(opts.inbound !== undefined ? { defaults: opts.inbound } : {}),
       // Lazy and app-wide: consumer providers do not exist yet when this factory runs.
       resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
@@ -94,6 +128,7 @@ function inboundDepsProvider(): Provider {
       ReplyGateway,
       INTEGRATION_OPTIONS,
       ModuleRef,
+      CARE_ENGINE,
     ],
   };
 }
@@ -112,19 +147,49 @@ function outboundRestProvider(): Provider {
       trace: TraceContext,
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
+      care: CareEngine,
     ): OutboundRestGateway => {
       const defaults = opts.outbound?.rest?.defaults;
       const logger = hopLoggerOf(opts);
       return new OutboundRestGateway({
         registry,
         trace,
+        care,
         ...(defaults === undefined ? {} : { defaults }),
         ...(logger === undefined ? {} : { logger }),
         resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
       });
     },
-    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef],
+    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef, CARE_ENGINE],
   };
+}
+
+/** The care engine, its request/reply for plan B channels and, when enabled, `CareControl`. */
+function careProviders(options: IntegrationModuleOptions): Provider[] {
+  const providers: Provider[] = [
+    {
+      provide: CARE_ENGINE,
+      useFactory: (gateway: ReplyGateway): CareEngine => {
+        const runtime = new CareEngine(options.care ?? {}, {
+          enabled: options.care !== undefined,
+          logger: nestCareLogger(),
+        });
+        runtime.setRequestReply((channel, payload, headers) =>
+          gateway.sendAndReceive(channel, payload, headers),
+        );
+        return runtime;
+      },
+      inject: [ReplyGateway],
+    },
+  ];
+  if (options.care !== undefined) {
+    providers.push({
+      provide: CareControl,
+      useFactory: (runtime: CareEngine) => runtime.control,
+      inject: [CARE_ENGINE],
+    });
+  }
+  return providers;
 }
 
 @Module({})
@@ -182,6 +247,7 @@ export class IntegrationModule {
           new ReplyGateway({ registry, trace }),
         inject: [ChannelRegistry, TraceContext],
       },
+      ...careProviders(options),
       inboundDepsProvider(),
       outboundRestProvider(),
       {
@@ -219,6 +285,8 @@ export class IntegrationModule {
         INBOUND_DEPS,
         InboundExplorer,
         OutboundRestGateway,
+        CARE_ENGINE,
+        ...(options.care === undefined ? [] : [CareControl]),
       ],
     };
   }
@@ -239,9 +307,15 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     @Inject(INTEGRATION_OPTIONS)
     private readonly options: ResolvedIntegrationOptions,
     private readonly outbound: OutboundRestGateway,
+    @Inject(CARE_ENGINE)
+    private readonly care: CareEngine,
   ) {}
 
-  /** Orden strict (spec sec.11): channels -> activators -> flows -> explorer. */
+  /**
+   * Strict order (spec sec.11): channels -> flow parameters -> activators and outbounds ->
+   * flows -> explorer. The flow parameter resolver (RS-67) runs before step 2 because activators
+   * and outbound bindings take profile names, and it fails the boot before any subscription.
+   */
   async onModuleInit(): Promise<void> {
     printEstelaBanner({ enabled: this.options.logging?.banner });
 
@@ -256,37 +330,81 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     for (const spec of this.options.channels) {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
     }
+    this.care.declareChannels(this.options.channels);
+    if (this.care.enabled) this.registry.inheritTriesLeft();
+    this.openCareEvents();
 
-    // 2. activators (DiscoveryModule)
-    this.subscribeDiscoveredActivators();
+    // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
+    const resolution = new FlowParameterResolver(this.care, this.registry).resolve(
+      this.options.flows,
+    );
+
+    // 2. activators (DiscoveryModule) and outbound bindings
+    const tryingActivators = this.subscribeDiscoveredActivators();
     this.logDiscoveredInbounds();
-    this.bindOutbounds();
+    const tryingOutbounds = this.bindOutbounds();
+    this.warnStackedTries(resolution.tryingTargets, [...tryingActivators, ...tryingOutbounds]);
 
-    // 3. flows: graph.recordFlow + flow.bind + attach (spec sec.11 step 3)
-    for (const definition of this.options.flows) {
-      const built = definition.build().build();
-      this.graph.recordFlow(definition.name, built);
+    // 3. flows: graph.recordFlow + attach (spec sec.11 step 3)
+    this.attachFlows(resolution);
+
+    // 4. explorer (rabbit), last
+    await this.explorer.onModuleInit();
+  }
+
+  private attachFlows(resolution: FlowResolution): void {
+    for (const [channel, care] of resolution.channelCare) {
+      this.graph.recordChannelCare(channel, care);
+    }
+    this.graph.recordCareProfiles(Object.keys(this.care.options.profiles ?? {}));
+    for (const flow of resolution.flows) {
+      this.graph.recordFlow(flow.name, flow.built, flow.described);
       const executorDeps: FlowDeps = {
         registry: this.registry,
         trace: this.trace,
         errorChannel: this.options.errorChannel,
         idempotency: this.idempotency,
+        care: this.care,
+        stepCare: flow.stepCare,
       };
       if (this.options.idempotency?.ttlMs !== undefined) {
         executorDeps.idempotencyTtlMs = this.options.idempotency.ttlMs;
       }
       const flowLog = this.hopLogger();
       if (flowLog !== undefined) executorDeps.logger = flowLog;
-      const executor = new FlowExecutor(definition.name, built, executorDeps);
-      executor.attachTo(this.registry);
+      new FlowExecutor(flow.name, flow.built, executorDeps).attachTo(this.registry);
     }
-
-    // 4. explorer (rabbit) — ultimo
-    await this.explorer.onModuleInit();
   }
 
-  /** Shutdown: drain de queues (plan sec.8.6/sec.9.10). */
+  /**
+   * RS-56, RS-60: one TRIES_STACKED warning per flow target whose extra tries send into a
+   * channel whose activator or outbound binding also tries again. Tries left bound the product.
+   */
+  private warnStackedTries(
+    targets: readonly TryingTarget[],
+    endpoints: readonly { channel: string; subject: string }[],
+  ): void {
+    for (const target of targets) {
+      for (const endpoint of endpoints.filter((e) => e.channel === target.channel)) {
+        this.care.observer.logger.warn(
+          `TRIES_STACKED: ${target.subject} tries again into channel '${target.channel}', and ${endpoint.subject} tries again too; tries left bound the total`,
+        );
+      }
+    }
+  }
+
+  /** RS-40: pubsub events channel, published fire-and-forget. */
+  private openCareEvents(): void {
+    const channel = this.care.eventsChannel;
+    if (channel === undefined) return;
+    if (this.registry.tryGet(channel) === undefined)
+      this.registry.create({ name: channel, type: 'pubsub' });
+    this.care.setPublisher((event) => this.registry.send(channel, event));
+  }
+
+  /** Shutdown: background flow tries stop, then queues drain (plan sec.8.6/sec.9.10). */
   async onApplicationShutdown(): Promise<void> {
+    this.care.shutdown();
     for (const channel of this.registry.list()) {
       if (channel.kind === 'queue') await channel.close?.();
     }
@@ -312,22 +430,39 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
-  private subscribeDiscoveredActivators(): void {
+  /** Subscribes every activator; returns those whose care tries again (TRIES_STACKED input). */
+  private subscribeDiscoveredActivators(): { channel: string; subject: string }[] {
+    const trying: { channel: string; subject: string }[] = [];
     const found = this.annotatedMethods<ActivatorMetadata>(ACTIVATOR_METADATA);
     for (const { instance, methodName, metadata } of found) {
-      subscribeActivator({ instance, methodName, metadata }, this.activatorDeps());
-      this.graph.recordActivator(metadata.channel, `${instance.constructor.name}.${methodName}`);
+      const binding = { instance, methodName, metadata };
+      const deps = this.activatorDeps();
+      subscribeActivator(binding, deps);
+      const { summary, executor } = activatorCare(binding, deps);
+      if ((executor?.plan.tries?.max ?? 1) > 1) {
+        trying.push({
+          channel: metadata.channel,
+          subject: `activator ${instance.constructor.name}.${methodName}`,
+        });
+      }
+      const label = `${instance.constructor.name}.${methodName}`;
+      this.graph.recordActivator(
+        metadata.channel,
+        summary === undefined ? label : `${label} [${summary}]`,
+      );
       this.logger.log(
         `activator: ${instance.constructor.name}.${methodName} -> ${metadata.channel}`,
       );
     }
+    return trying;
   }
 
   /**
    * Declared outbound bindings (module options, then `@OutboundRest` methods): bound, logged
    * with one line each and recorded in the graph. A misconfigured binding fails the boot.
    */
-  private bindOutbounds(): void {
+  private bindOutbounds(): { channel: string; subject: string }[] {
+    const trying: { channel: string; subject: string }[] = [];
     for (const binding of this.options.outbound?.rest?.bindings ?? []) {
       this.outbound.bind(binding);
     }
@@ -337,10 +472,19 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
     for (const info of this.outbound.bindings()) {
       if (info.channel !== undefined) {
-        this.graph.recordOutbound(info.channel, { transport: 'rest', target: info.target });
+        const ref = { transport: 'rest' as const, target: info.target };
+        this.graph.recordOutbound(
+          info.channel,
+          info.care === undefined ? ref : { ...ref, care: info.care },
+        );
+      }
+      // The binding summary (RS-42) names `tries xN` only when more than one try is allowed.
+      if (info.channel !== undefined && /\btries x\d+/.test(info.care ?? '')) {
+        trying.push({ channel: info.channel, subject: `outbound rest '${info.name}'` });
       }
       this.logger.log(info.line);
     }
+    return trying;
   }
 
   /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */
@@ -348,18 +492,23 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     const skipped = (error: unknown): void => {
       this.logger.warn(`inbound discovery skipped: ${String(error)}`);
     };
+    let inbounds: ReturnType<typeof discoverInbounds> = [];
     try {
       const sources = [...this.discovery.getControllers(), ...this.discovery.getProviders()];
-      const inbounds = discoverInbounds(sources, {
+      inbounds = discoverInbounds(sources, {
         methodNames: (proto) => this.metadataScanner.getAllMethodNames(proto),
         onError: skipped,
       });
-      for (const inbound of inbounds) {
-        this.graph.recordInbound(inbound.spec);
-        this.logger.log(inbound.line);
-      }
     } catch (error) {
       skipped(error);
+    }
+    for (const inbound of inbounds) {
+      // RS-03, RS-37: invalid inbound care or carryHeaders fails the boot, outside the guard.
+      carriedHeadersOf(inbound.spec);
+      const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.care);
+      const summary = plan === undefined ? undefined : describeCare(plan);
+      this.graph.recordInbound(inbound.spec, summary);
+      this.logger.log(summary === undefined ? inbound.line : `${inbound.line} [${summary}]`);
     }
   }
 
@@ -376,6 +525,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       trace: this.trace,
       errorChannel: this.options.errorChannel,
       idempotency: this.idempotency,
+      care: this.care,
     };
     if (this.options.idempotency?.ttlMs !== undefined) {
       deps.idempotencyTtlMs = this.options.idempotency.ttlMs;

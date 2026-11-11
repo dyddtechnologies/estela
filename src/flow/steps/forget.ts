@@ -3,8 +3,8 @@ import { createMessage } from '../../message';
 import { serializeError, type FlowStepContext } from '../flow-step';
 
 /**
- * Forget (`wait:false`): never tumba el flow; el failure va a `error.channel`
- * con envelope `{ fireAndForget: true, channel }` (spec sec.6.2, plan sec.8.2).
+ * Forget (`wait:false`): never fails the flow; the failure goes to `error.channel`
+ * with the envelope `{ fireAndForget: true, channel }` (spec sec.6.2, plan sec.8.2).
  */
 export function reportFireAndForget(
   ctx: FlowStepContext,

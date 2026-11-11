@@ -1,13 +1,15 @@
 import { nextHop } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import { sendHop } from '../flow-resilience';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
-/** `nextHop` + routingKey; no corta; await del send (spec sec.6.2). */
+/** `nextHop` + routingKey; does not terminate; awaits the send (spec sec.6.2). */
 export class PublishStep implements FlowStep {
   readonly kind = 'publish' as const;
 
   constructor(
     private readonly channel: string,
     private readonly routingKey?: string,
+    readonly params?: StepParams,
   ) {}
 
   describe(): Record<string, unknown> {
@@ -21,7 +23,7 @@ export class PublishStep implements FlowStep {
       { reply: 'none' },
     );
     if (this.routingKey !== undefined) hop.headers.routingKey = this.routingKey;
-    await ctx.registry.sendMessage(this.channel, hop);
+    await sendHop(ctx, this.channel, hop);
     return { action: 'continue', msg: ctx.msg };
   }
 }

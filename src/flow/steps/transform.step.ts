@@ -1,5 +1,5 @@
 import { recordHop, type IntegrationMessage } from '../../message';
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
 
 function isMessageLike(value: unknown): value is IntegrationMessage {
   return (
@@ -11,11 +11,14 @@ function isMessageLike(value: unknown): value is IntegrationMessage {
   );
 }
 
-/** Si el return trae `{payload, headers}` replaces `msg`; si no, pisa payload + hop (spec sec.6.1). */
+/** A `{payload, headers}` result replaces `msg`; any other result replaces the payload and records a hop (spec sec.6.1). */
 export class TransformStep implements FlowStep {
   readonly kind = 'transform' as const;
 
-  constructor(private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown) {}
+  constructor(
+    private readonly fn: (payload: unknown, msg: IntegrationMessage) => unknown,
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind };

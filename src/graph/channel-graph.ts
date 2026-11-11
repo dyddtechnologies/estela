@@ -1,11 +1,16 @@
 import type { ChannelRegistry } from '../channel-registry';
 import type { BuiltFlow } from '../flow/integration-flow';
+import { carriedHeaderNames } from '../inbound/inbound.carry';
 import type { GraphqlOperation, InboundSpec, InboundTransport } from '../inbound/inbound.types';
 
 export interface GraphInboundRef {
   transport: InboundTransport;
   requestReply: boolean;
   operation?: GraphqlOperation;
+  /** Inbound care summary (RS-42); absent without care. */
+  care?: string;
+  /** Message header names the endpoint copies from transport headers (`carryHeaders`). */
+  carries?: string[];
 }
 
 /** Outbound transports a channel can be bound to. */
@@ -15,6 +20,8 @@ export interface GraphOutboundRef {
   transport: OutboundTransport;
   /** `POST https://host/path` or `dynamic`; never a query string or credentials. */
   target: string;
+  /** Care summary (RS-42); absent without care. */
+  care?: string;
 }
 
 export interface GraphNode {
@@ -25,6 +32,8 @@ export interface GraphNode {
   outbounds: GraphOutboundRef[];
   activators: string[];
   flowsFrom: string[];
+  /** Summary of the channel's `care` reference (RS-66); absent without one. */
+  care?: string;
 }
 
 export type GraphEdgeVia =
@@ -60,6 +69,8 @@ export interface GraphSnapshot {
   edges: GraphEdge[];
   flows: GraphFlowEntry[];
   mermaid: string;
+  /** Module-wide names (RS-66); present only when `care.profiles` is non-empty. */
+  module?: { careProfiles: string[] };
 }
 
 interface DestLike {
@@ -83,13 +94,18 @@ function destChannels(step: Record<string, unknown>): { channel: string; wait?: 
   return out;
 }
 
+/** ` [summary]` for Mermaid labels, empty without care. */
+function careSuffix(care: string | undefined): string {
+  return care === undefined ? '' : ` [${care}]`;
+}
+
 function sanitizeId(value: string): string {
   return value.replace(/\W/g, '_');
 }
 
 /**
- * Read-model de topologia (spec sec.12) — Memento del graph. Sin logica de
- * runtime: observadores (registry/flows/activators/inbounds) lo alimentan.
+ * Topology read model (spec sec.12), the Memento of the graph. No runtime logic:
+ * observers (registry, flows, activators, inbounds) feed it.
  */
 export class ChannelGraph {
   private readonly inbounds = new Map<string, GraphInboundRef[]>();
@@ -97,6 +113,18 @@ export class ChannelGraph {
   private readonly activators = new Map<string, string[]>();
   private readonly flows: GraphFlowEntry[] = [];
   private readonly flowEdges: GraphEdge[] = [];
+  private readonly channelCare = new Map<string, string>();
+  private careProfiles: string[] = [];
+
+  /** RS-66: summary of a channel declared with `care`. */
+  recordChannelCare(channel: string, care: string): void {
+    this.channelCare.set(channel, care);
+  }
+
+  /** RS-66: names of the module's care profiles (names only, never values). */
+  recordCareProfiles(names: readonly string[]): void {
+    this.careProfiles = [...names].sort((a, b) => a.localeCompare(b));
+  }
 
   recordActivator(channel: string, label: string): void {
     const labels = this.activators.get(channel) ?? [];
@@ -104,13 +132,16 @@ export class ChannelGraph {
     this.activators.set(channel, labels);
   }
 
-  recordInbound(spec: InboundSpec): void {
+  recordInbound(spec: InboundSpec, care?: string): void {
     const refs = this.inbounds.get(spec.channel) ?? [];
     const ref: GraphInboundRef = {
       transport: spec.transport,
       requestReply: spec.requestReply === true,
     };
     if (spec.operation !== undefined) ref.operation = spec.operation;
+    if (care !== undefined) ref.care = care;
+    const carries = carriedHeaderNames(spec);
+    if (carries !== undefined) ref.carries = carries;
     refs.push(ref);
     this.inbounds.set(spec.channel, refs);
   }
@@ -118,12 +149,18 @@ export class ChannelGraph {
   /** Records an outbound adapter bound to `channel` (declared bindings and `@OutboundRest`). */
   recordOutbound(channel: string, ref: GraphOutboundRef): void {
     const refs = this.outbounds.get(channel) ?? [];
-    refs.push({ transport: ref.transport, target: ref.target });
+    refs.push(
+      ref.care === undefined
+        ? { transport: ref.transport, target: ref.target }
+        : { transport: ref.transport, target: ref.target, care: ref.care },
+    );
     this.outbounds.set(channel, refs);
   }
 
-  recordFlow(name: string, built: BuiltFlow): void {
-    const steps = built.steps.map((step) => step.describe());
+  /** `described` replaces `describe()` of each step with its RS-66 annotations. */
+  recordFlow(name: string, built: BuiltFlow, described?: readonly Record<string, unknown>[]): void {
+    const steps =
+      described === undefined ? built.steps.map((step) => step.describe()) : [...described];
     this.flows.push({ name, source: built.source, steps });
     this.flows.sort((a, b) => a.name.localeCompare(b.name));
     for (const step of steps) {
@@ -156,7 +193,7 @@ export class ChannelGraph {
       if (isFanout) {
         bindings = (channel as { bindings?: readonly string[] }).bindings ?? [];
       }
-      nodes.push({
+      const node: GraphNode = {
         channel: channel.name,
         kind: channel.kind,
         bindings,
@@ -166,17 +203,22 @@ export class ChannelGraph {
         flowsFrom: this.flows
           .filter((flow) => flow.source === channel.name)
           .map((flow) => flow.name),
-      });
+      };
+      const care = this.channelCare.get(channel.name);
+      if (care !== undefined) node.care = care;
+      nodes.push(node);
       edges.push(...this.channelEdges(channel.name, bindings));
     }
     edges.push(...this.flowEdges);
     const mermaid = this.renderMermaid(nodes, edges);
-    return {
+    const snapshot: GraphSnapshot = {
       nodes,
       edges,
       flows: this.flows.map((flow) => ({ ...flow, steps: [...flow.steps] })),
       mermaid,
     };
+    if (this.careProfiles.length > 0) snapshot.module = { careProfiles: [...this.careProfiles] };
+    return snapshot;
   }
 
   /** Edges that hang off one channel: fanout bindings, inbounds, outbounds and activators. */
@@ -208,17 +250,19 @@ export class ChannelGraph {
     let inboundIndex = 0;
     let outboundIndex = 0;
     for (const node of nodes) {
-      lines.push(`  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}"]`);
+      lines.push(
+        `  ${sanitizeId(node.channel)}["${node.kind}: ${node.channel}${careSuffix(node.care)}"]`,
+      );
       for (const ref of node.inbounds) {
         inboundIndex += 1;
         lines.push(
-          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}"] --> ${sanitizeId(node.channel)}`,
+          `  in_${inboundIndex}_${sanitizeId(ref.transport)}["inbound ${ref.transport}${ref.requestReply ? ' (reply)' : ''}${careSuffix(ref.care)}"] --> ${sanitizeId(node.channel)}`,
         );
       }
       for (const ref of node.outbounds) {
         outboundIndex += 1;
         lines.push(
-          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}"]`,
+          `  ${sanitizeId(node.channel)} --> out_${outboundIndex}_${sanitizeId(ref.transport)}["outbound ${ref.transport}: ${ref.target.replace(/"/g, "'")}${careSuffix(ref.care)}"]`,
         );
       }
       for (const label of node.activators) {

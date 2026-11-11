@@ -1,35 +1,32 @@
-import type { FlowStep, FlowStepContext, StepOutcome } from '../flow-step';
+import type { FlowStep, FlowStepContext, StepOutcome, StepParams } from '../flow-step';
+import { answerCaller, callerOf } from './answer-caller';
 
 export interface ReplyOptions {
   /** `'current'` (default) | `'jumpMerge'` = `{ ...payload, jumpReplies }` (spec sec.6.3). */
   payload?: 'current' | 'jumpMerge';
 }
 
-/** Sends al `replyChannel` si existe; no corta por si solo (spec sec.6.3). */
+/** Sends to `replyChannel` when there is one; it does not terminate on its own (spec sec.6.3). */
 export class ReplyStep implements FlowStep {
   readonly kind = 'reply' as const;
 
-  constructor(private readonly options: ReplyOptions = {}) {}
+  constructor(
+    private readonly options: ReplyOptions = {},
+    readonly params?: StepParams,
+  ) {}
 
   describe(): Record<string, unknown> {
     return { kind: this.kind, payload: this.options.payload ?? 'current' };
   }
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
-    const replyChannel = ctx.msg.headers.replyChannel;
-    if (typeof replyChannel !== 'string' || replyChannel.length === 0) {
-      return { action: 'continue', msg: ctx.msg };
-    }
+    const replyChannel = callerOf(ctx);
+    if (replyChannel === undefined) return { action: 'continue', msg: ctx.msg };
     const payload =
       this.options.payload === 'jumpMerge'
         ? this.mergeJumps(ctx.msg.payload, ctx.msg.headers.jumpReplies ?? {})
         : ctx.msg.payload;
-    await ctx.registry.send(replyChannel, payload, {
-      correlationId: ctx.msg.headers.correlationId,
-      traceId: ctx.msg.headers.traceId,
-      causationId: ctx.msg.headers.id,
-      parentSpanId: ctx.msg.headers.spanId,
-    });
+    await answerCaller(ctx, replyChannel, payload);
     return { action: 'continue', msg: ctx.msg };
   }
 

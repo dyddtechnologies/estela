@@ -60,6 +60,31 @@ module.exports = {
       from: { path: '^src/' },
       to: { path: 'node_modules[\\/](pg|pg-[^\\/]+|@types[\\/]pg)[\\/]' },
     },
+    {
+      name: 'resilience-no-npm',
+      comment:
+        'Resilience spec RS-05: the engine under src/resilience imports no npm package; only node: core modules.',
+      severity: 'error',
+      from: { path: '^src/resilience/' },
+      to: {
+        dependencyTypes: [
+          'npm',
+          'npm-dev',
+          'npm-optional',
+          'npm-peer',
+          'npm-no-pkg',
+          'npm-unknown',
+        ],
+      },
+    },
+    {
+      name: 'resilience-is-leaf',
+      comment:
+        'Resilience spec sec.4 (amended): src/resilience never imports outbound, inbound, activator, saga or flow; they depend on it.',
+      severity: 'error',
+      from: { path: '^src/resilience/', pathNot: '\\.spec\\.ts$' },
+      to: { path: '^src/(outbound|inbound|activator|saga|flow)/' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

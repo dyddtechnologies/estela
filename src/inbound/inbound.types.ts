@@ -2,6 +2,7 @@ import type { ExecutionContext, Type } from '@nestjs/common';
 import type { IntegrationMessage } from '../message';
 import { ChannelError } from '../channel';
 import type { IdempotencyStore } from '../idempotency/idempotency-store';
+import type { InboundCare, CareRefOf } from '../resilience/resilience.types';
 
 /** Transportes inbound (spec sec.7.2 + extension GraphQL ADR-015). */
 export type InboundTransport = 'rest' | 'grpc' | 'rabbit' | 'graphql';
@@ -11,19 +12,28 @@ export type GraphqlOperation = 'query' | 'mutation' | 'subscription';
 export interface InboundSpec {
   channel: string;
   transport: InboundTransport;
-  /** default false — true requires ReplyGateway (Fase 8). */
+  /** Default false; true requires ReplyGateway (phase 8). */
   requestReply?: boolean;
   timeoutMs?: number;
-  /** default 'return' con fallback a body (spec sec.7.2). */
+  /** Default 'return', falling back to the body (spec sec.7.2). */
   payload?: 'return' | 'body';
-  /** default true en REST (swagger helpers, Parte B). */
+  /** Default true on REST (swagger helpers, part B). */
   swagger?: boolean;
-  /** Solo GraphQL (ADR-017). */
+  /** GraphQL only (ADR-017). */
   operation?: GraphqlOperation;
   /** Reply contract of this endpoint. Default: module default, else `'envelope'`. */
   reply?: InboundReplyOption;
   /** Idempotency rules of this endpoint; `false` turns the inbound claim off. */
   idempotency?: false | InboundIdempotencyOptions;
+  /** Inbound care (RS-37): `lanes` and `pace` only; refused on Rabbit. */
+  care?: CareRefOf<InboundCare>;
+  /**
+   * Opt-in allowlist of transport headers (HTTP headers, gRPC metadata) copied into message
+   * headers; nothing else is copied. A list keeps each name; a map renames
+   * (`{ 'x-organization-id': 'organizationId' }`). Transport names match case-insensitively;
+   * a missing header is skipped. Reserved message headers are refused; refused on Rabbit.
+   */
+  carryHeaders?: readonly string[] | Readonly<Record<string, string>>;
 }
 
 export const INBOUND_SPEC_METADATA = 'integration:inbound-spec';
@@ -32,7 +42,7 @@ export function readInboundSpec(handler: object): InboundSpec | undefined {
   return Reflect.getMetadata(INBOUND_SPEC_METADATA, handler) as InboundSpec | undefined;
 }
 
-// ---------- Shapes de respuesta (spec sec.7.2) ----------
+// ---------- Response shapes (spec sec.7.2) ----------
 
 export interface InboundAcceptedResponse {
   status: 'accepted';
@@ -275,4 +285,6 @@ export interface InboundIdempotencyOptions {
 export interface InboundDefaults {
   reply?: InboundReplyOption;
   idempotency?: false | InboundIdempotencyOptions;
+  /** Module-wide inbound care (RS-37); endpoints override it part by part. */
+  care?: CareRefOf<InboundCare>;
 }

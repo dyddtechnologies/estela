@@ -61,6 +61,34 @@ await unit.commit();                           // runs its afterCommit callbacks
 - Real-database behaviour (advisory locks, 40P01, CAS races) belongs in tests gated by an env var
   such as `ESTELA_PG_URL`, so CI stays database-free.
 
+## Care
+
+```ts
+import { manualCareClock, MemoryCareState, collectCareEvents, bindFlow }
+  from '@estela/nest/testing';
+import { CareEngine } from '@estela/nest';
+
+const clock = manualCareClock();                         // no real timers, no jest fake timers
+const shared = new MemoryCareState(() => clock.wall());
+const engine = new CareEngine({ clock, profiles }, { enabled: true }); // enabled = tries left on
+bindFlow(OrderFlow, registry, { care: engine });         // resolves flow care like module boot
+
+const sent = registry.send('orders.place', payload);     // a step with extra tries now waits on the clock
+await clock.advance(200);                                // fires the spacing timer, settles promises
+await sent;
+```
+
+- Module tests: `forRoot({ care: { clock } })` and `collectCareEvents(moduleRef).types()` to assert
+  `try.again`, `valve.shut`, `plan-b.used`, `try.held`, `shared-state.lost`, ...
+- Fault injection on shared state: `shared.down()` (every call throws), `shared.slow(ms)` (pair
+  with a short `sharedStateWaitMs`), `shared.hang()` (never answers), `shared.failNext(n)`,
+  `shared.up()`; assert the local `soloPerSecond` and exactly one `shared-state.lost` /
+  `shared-state.back`.
+- Make a failure transient with `Object.assign(new Error('x'), { transient: true })` (in-process
+  classifier); anything else is unknown and gets no extra try.
+- Assert tries by counting calls, `mapError` once, and one hop per call when `logging.hops` is on.
+- Real Redis (`redisCareState`) belongs in a test gated by `ESTELA_REDIS_URL`.
+
 ## Rules
 
 - Handlers subscribed to awaited channels must RETURN their promise — `void p` breaks producer waiting (spec §17.3).

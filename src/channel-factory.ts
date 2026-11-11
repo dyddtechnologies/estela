@@ -4,22 +4,28 @@ import { FanoutChannel } from './channels/fanout.channel';
 import { PubSubChannel } from './channels/pubsub.channel';
 import { QueueChannel } from './channels/queue.channel';
 import type { ChannelDeps } from './channels/channel-deps';
+import type { CareRef } from './resilience/resilience.types';
 
-/** Declaracion de channel en `forRoot` (spec sec.5). */
+/** Channel declaration in `forRoot` (spec sec.5). */
 export interface ChannelSpec {
   name: string;
   type: ChannelKind;
   capacity?: number;
   bindings?: readonly string[];
+  /**
+   * L2 care (RS-56): the default of flow send and jump steps whose destination is this channel
+   * and of activators on it. Never applied to inbound endpoints, `wireTap` or `handle`.
+   */
+  care?: CareRef;
 }
 
-/** Factory Method por kind (plan sec.6 OCP / ADR-010). */
+/** Factory Method per kind (plan sec.6 OCP / ADR-010). */
 export interface ChannelFactory {
   readonly kind: ChannelKind;
   create(spec: ChannelSpec, deps: ChannelDeps): MessageChannel;
 }
 
-/** Abstract Factory extensible por map: new kinds sin tocar el registry. */
+/** Abstract Factory extensible through a map: new kinds without touching the registry. */
 export class ChannelFactoryRegistry {
   private readonly factories = new Map<ChannelKind, ChannelFactory>();
 

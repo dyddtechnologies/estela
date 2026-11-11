@@ -177,6 +177,17 @@ erros tipados (`OutboundHttpError`, `OutboundNetworkError`, `OutboundTimeoutErro
 chave de idempotência estável (nunca gerada), retry desligado por padrão. `bindRestOut` não muda.
 Detalhes e exemplo: [README (EN)](./README.md#outbound-rest-requestreply-with-your-own-contract).
 
+## Care
+
+`care` define com quanto cuidado o Estela chama o que pode falhar: `patience` (quanto espera),
+`tries` (outra tentativa após uma falha), `valve` (corta o tráfego para uma dependência que segue
+falhando), `lanes` (chamadas ao mesmo tempo), `pace` (chamadas por segundo) e `planB` (o que
+responde se a chamada falhar mesmo assim), além das tentativas restantes no caminho
+(`x-tries-left`), estado compartilhado no Redis, `care` inbound com 429 e `care` em flows, passos de
+saga e canais: a referência autoritativa é a seção [Care](./README.md#care) do README em inglês (e
+[Flow care](./README.md#flow-care)). No outbound REST, `timeoutMs` e `retry` são a forma 0.9.0 de
+`care.patience.eachTryMs` e `care.tries`, com a semântica da 0.9.0.
+
 ## Observabilidade
 
 ```bash

@@ -58,6 +58,23 @@ export class InboundIdempotencyInFlightError extends InboundError {
   }
 }
 
+/**
+ * A request turned away by inbound care (RS-37): HTTP 429, and `grpcCode` 8
+ * (RESOURCE_EXHAUSTED) for the gRPC status mapper or an app exception filter.
+ */
+export class InboundBusyError extends HttpException {
+  readonly code = 'INBOUND_BUSY';
+  readonly grpcCode = 8;
+
+  constructor(
+    readonly channel: string,
+    readonly reason: 'lanes-full' | 'over-pace',
+    readonly readyInMs?: number,
+  ) {
+    super({ statusCode: 429, code: 'INBOUND_BUSY', reason }, 429);
+  }
+}
+
 /** Thrown when a stored failure that was not an HTTP exception is replayed. */
 export class InboundReplayedFailureError extends InboundError {
   constructor(
