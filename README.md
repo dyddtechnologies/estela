@@ -130,7 +130,7 @@ export class OrdersController {
 | `filter` | exits successfully (idempotency `{filtered:true}`); `whenDropped.reply` answers the caller at once |
 | `transform` / `handle` | replace the payload; `handle` never triggers a reply |
 | `headers(values \| fn)` | merges custom headers into the message (header enricher); payload and trace stay |
-| `wireTap` | fire-and-forget copy; swallows errors |
+| `wireTap` | fire-and-forget copy with no reply routing; swallows errors |
 | `fanoutTo` | awaited group in parallel; `wait:false` → forget → `error.channel` |
 | `jumpTo` / `jump` | own ephemeral channel · awaits reply + timeout · `jumpReplies[channel]` |
 | `publish` | `nextHop` + routingKey · does not cut the pipeline |
@@ -140,6 +140,16 @@ export class OrdersController {
 
 **`replyChannel` precedence** (runtime invariant): `wireTap/fanout/publish → none` ·
 `to/route → inherit` · `jump → its own ephemeral`. The parent always keeps the inbound reply.
+
+A `wireTap` copy keeps the id, the trace, the custom headers and `jumpReplies`, but never carries
+`replyChannel` or the jump reply marker `x-integration-jump-reply`: a tap consumer that returns a
+value (an audit activator, for example) cannot answer the caller or a jump.
+
+**Behaviour change since 0.9.0 (bug fix, SPI-448).** In 0.9.0 the `wireTap` copy kept the inbound
+`replyChannel`, so a tap consumer that returned a value answered the caller first and the flow's
+real reply was lost. The tap copy now drops every reply-routing header in all flows, with or without
+care. A tap consumer that relied on answering the caller must move that answer into the flow
+(`reply()` or `to(...)`).
 
 ### Headers in a flow
 
@@ -1151,7 +1161,8 @@ channels: [{ name: 'inventory.reserve', type: 'direct', care: 'activator-std' }]
   writes `headers.jumpPlanB[channel] = true` next to `jumpReplies[channel]`.
 - Without any care configuration (no `forRoot({ care })` and no `care` on any channel, flow, step,
   activator, inbound endpoint or outbound binding) flows, activators and inbound endpoints behave
-  exactly as in 0.9.0: no message scope is opened, a `wireTap` copy keeps every header, and a reply
+  exactly as in 0.9.0: no message scope is opened, a `wireTap` copy keeps every care header
+  (`triesLeft` included; it never keeps reply routing, see the Flow DSL bug fix note), and a reply
   header `planB: true` neither marks a flow nor releases an idempotency claim.
 - Flow steps get an `id` (default `<kind>#<index>`); steps with care show `id`, `care` and
   `repeatableBy` in the graph, and the module lists `careProfiles`.

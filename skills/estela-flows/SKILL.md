@@ -35,7 +35,7 @@ pipeline; `reply()` does not (put it before `to`, or last without `to`).
 - **Awaited** (direct send, fanout `wait:true`, jump wait/timeout, `publish`, `to`): report to
   `error.channel` AND fail the flow (propagates to the producer).
 - **Forget** (`wait:false`): never crashes the flow; envelope `{ fireAndForget:true, channel }` to `error.channel`.
-- **wireTap**: swallows everything.
+- **wireTap**: swallows everything; its copy carries no `replyChannel`, so a tap consumer never answers the caller.
 - **filter false**: success `{ filtered:true }`; silent by default, so a request/reply caller waits
   until its timeout. `filter(pred, { whenDropped: { reply: value | (payload, msg) => value } })`
   answers the caller's `replyChannel` at once (inbound request/reply, jump).
