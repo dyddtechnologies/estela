@@ -321,6 +321,12 @@ IntegrationModule.forRoot({
 - **Added headers:** values set by a `headers` step and transport headers an endpoint copies
   with `carryHeaders` follow the same `headers` rules on every trail output; the graph shows only
   their names.
+- **Graph:** `GET /integration/graph` names what reaches each place and nothing more: a `privacy`
+  list (the `secrets@1` baseline, then profile names, pack names with version and `'inline'` for
+  inline rules) on flow steps (with their `id`), `fanoutTo`/`jumpTo` dests, the flow entry's
+  `options`, channel nodes, inbound and outbound refs, and `module.privacyProfiles` when
+  `privacy.profiles` is set. A key appears only where a reference reaches; module rules alone add
+  none. Field paths, regexes, exemptions and every reason stay out of it.
 
 ### What durable records remember
 
@@ -440,8 +446,8 @@ The same customer always gets the same `fp:` token until `refreshFingerprintSecr
 secret. Without `fingerprintSecret` these explicit `Show.Fingerprint` rules fail boot
 (`FINGERPRINT_WITHOUT_SECRET`); built-in rules such as `personal.phone-e164` hide instead.
 
-> **Not in this build yet:** the graph `privacy` keys and the gRPC out trail writers that read
-> `bindGrpcOut`'s `privacy`. They are specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
+> **Not in this build yet:** the gRPC out trail writers that read `bindGrpcOut`'s `privacy`. They
+> are specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
 > section 18.
 
 ### Providers and regex safety
