@@ -137,6 +137,13 @@ describe('SPI-433 outbound bindings and call-level privacy (SD-56, SD-64)', () =
     expect(codes(adHoc)).toEqual(['UNKNOWN_PROFILE']);
     expect(sent).toEqual([]);
 
+    // The ad-hoc options' own reference is checked too, before anything is sent.
+    const adHocOwn = await gateway
+      .request({ url: 'https://crm.example/adhoc', fetchFn, privacy: 'nope' }, message)
+      .catch((error: unknown) => error);
+    expect(codes(adHocOwn)).toEqual(['UNKNOWN_PROFILE']);
+    expect(sent).toEqual([]);
+
     await gateway.request('crm', message, { privacy: 'personal' });
     await gateway.request('crm', message, { privacy: ['personal', 'card'] });
     await gateway.request('crm', message, { privacy: { use: 'card', fields: ['**.ssn'] } });

@@ -6,6 +6,7 @@ import { IntegrationModule, type IntegrationModuleOptions } from '../integration
 import { ChannelRegistry } from '../channel-registry';
 import type { ChannelSpec } from '../channel-factory';
 import type { IntegrationMessage } from '../message';
+import { PrivacyEngine } from '../sensitive/privacy-engine';
 import { DeliveryCopyError, PrivacyConfigError } from '../sensitive/privacy-errors';
 import { Pack, Reach, Show } from '../sensitive/privacy.types';
 import { captureTrail } from '../testing/capture-trail';
@@ -127,6 +128,33 @@ describe('delivery reach (SD-50, SD-51)', () => {
     expect(reach[0]).toContain('flow:partner#share');
     expect(reach[0]).toContain('partner must not receive SSN');
     expect(reach[0]).not.toContain('ssn');
+    await mod!.close();
+  });
+
+  it('delivery-reach on a to step hides only its own rules in the hop copy (SD-50)', async () => {
+    const channels: ChannelSpec[] = [
+      { name: 'in', type: 'direct' },
+      { name: 'out', type: 'pubsub', privacy: { fields: ['**.name'] } },
+    ];
+    const definition = flow(
+      'send',
+      IntegrationFlow.from('in', { privacy: { fields: ['**.phone'] } }).to('out', {
+        id: 'send',
+        privacy: delivery(['ssn']),
+      }),
+    );
+    let mod: TestingModule | undefined;
+    await warnsOf(async () => {
+      mod = await boot(channels, [definition], { privacy: { fields: ['**.email'] } });
+    });
+    const out = inbox(mod!, 'out');
+    const payload = { ssn: '123', email: 'ana@example.com', phone: '+50212345678', name: 'Ana' };
+    await mod!.get(ChannelRegistry).send('in', payload, { tenant: 'acme' });
+    await settle();
+    expect(out).toHaveLength(1);
+    expect(out[0]!.payload).toEqual({ ...payload, ssn: '[HIDDEN:field]' });
+    expect(out[0]!.headers.tenant).toBe('acme');
+    expect(payload.ssn).toBe('123');
     await mod!.close();
   });
 
@@ -440,6 +468,47 @@ describe('jump replies and delivered messages (SD-53, SD-54)', () => {
     const answered = caller[0]!.payload as { jumpReplies: Record<string, unknown> };
     expect(answered.jumpReplies['credit.check']).toBe(reply);
     expect(reply.pan).toBe(pan);
+    await mod.close();
+  });
+
+  it('a jump reply channel first met at run time is hidden with its own privacy (SD-53)', async () => {
+    const pan = '4111111111111111';
+    const channels: ChannelSpec[] = [
+      { name: 'in', type: 'direct' },
+      { name: 'quote', type: 'direct', privacy: { fields: ['**.pan'] } },
+      { name: 'audit', type: 'pubsub' },
+      { name: 'out', type: 'pubsub' },
+    ];
+    // This flow never jumps to `quote`: its reply arrives from an earlier flow's headers.
+    const definition = flow(
+      'later',
+      IntegrationFlow.from('in').wireTap('audit', { id: 'audit' }).to('out'),
+    );
+    const mod = await boot(channels, [definition], { privacy: { fields: ['**.customer'] } });
+    const audit = inbox(mod, 'audit');
+    const out = inbox(mod, 'out');
+    const capture = captureTrail();
+    capture.channel(mod.get(ChannelRegistry), 'audit');
+    const engine = mod.get(PrivacyEngine);
+    const added = jest.spyOn(engine, 'addScopes');
+    const reply = { pan, total: 10 };
+    for (let i = 0; i < 3; i++) {
+      await mod
+        .get(ChannelRegistry)
+        .send('in', { customer: 'CUSTOMER-0077' }, { jumpReplies: { quote: reply } });
+    }
+    await settle();
+    expect(audit).toHaveLength(3);
+    for (const copy of audit) {
+      const copied = copy.headers.jumpReplies as Record<string, Record<string, unknown>>;
+      expect(copied.quote).toEqual({ pan: '[HIDDEN:field]', total: 10 });
+    }
+    // One late scope for the channel, cached over the later sends.
+    expect(added).toHaveBeenCalledTimes(1);
+    expect(Object.keys(added.mock.calls[0]![0])).toEqual(['flow:later#audit:jumpReplies:quote']);
+    expect(out[0]!.headers.jumpReplies!.quote).toBe(reply);
+    expectNoLeak(capture, [pan, 'CUSTOMER-0077']);
+    added.mockRestore();
     await mod.close();
   });
 
