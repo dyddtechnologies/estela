@@ -20,6 +20,12 @@ import {
 import { FanoutStep } from './steps/fanout.step';
 import { FilterStep } from './steps/filter.step';
 import { HandleStep } from './steps/handle.step';
+import {
+  HeadersStep,
+  reservedNamesOf,
+  type HeaderValues,
+  type HeadersFn,
+} from './steps/headers.step';
 import { JumpStep } from './steps/jump.step';
 import { PublishStep } from './steps/publish.step';
 import { ReplyStep, type ReplyOptions } from './steps/reply.step';
@@ -47,6 +53,8 @@ export type RouteFn = (
   payload: unknown,
   msg: IntegrationMessage,
 ) => string | string[] | Promise<string | string[]>;
+
+export type { HeaderValues, HeadersFn };
 
 /** Options of `wireTap`; care is never accepted there (RS-58). */
 export type WireTapOptions = StepCommonOptions;
@@ -93,6 +101,30 @@ export class IntegrationFlow {
   transform(fn: MapFn, opts?: StepCommonOptions): this {
     this.refuseCare('transform', opts);
     return this.push(new TransformStep(fn, paramsOf(opts, undefined)));
+  }
+
+  /**
+   * Header enricher: merges `values` (or what `values(payload, msg)` returns) into the message
+   * headers. Reserved names (`RESERVED_HEADER_NAMES`) are refused: a fixed object fails
+   * `build()`, a function fails the run with `FlowHeadersError`. `undefined` values are skipped.
+   */
+  headers(values: HeaderValues | HeadersFn, opts?: StepCommonOptions): this {
+    this.refuseCare('headers', opts);
+    const params = paramsOf(opts, undefined);
+    if (typeof values === 'function') return this.push(new HeadersStep(values, params));
+    const fixed: HeaderValues = { ...values };
+    const id = opts?.id ?? `headers#${this.steps.length}`;
+    for (const name of reservedNamesOf(fixed)) {
+      this.findings.push(
+        flowFinding(
+          `step '${id}'`,
+          `headers.${name}`,
+          FLOW_SHAPE_CODES.reservedHeader,
+          'is a reserved header and cannot be set by a flow',
+        ),
+      );
+    }
+    return this.push(new HeadersStep(fixed, params));
   }
 
   handle(fn: MapFn, opts?: CareStepOptions): this {
@@ -190,7 +222,10 @@ export class IntegrationFlow {
   }
 
   /** RS-57, RS-58: a JavaScript caller can still pass `care` where the type refuses it. */
-  private refuseCare(kind: 'filter' | 'transform' | 'reply' | 'wireTap', opts: unknown): void {
+  private refuseCare(
+    kind: 'filter' | 'transform' | 'headers' | 'reply' | 'wireTap',
+    opts: unknown,
+  ): void {
     const value = (opts as { care?: unknown } | undefined)?.care;
     if (value === undefined) return;
     const id = (opts as { id?: string }).id ?? `${kind}#${this.steps.length}`;

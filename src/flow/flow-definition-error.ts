@@ -7,6 +7,7 @@ export const FLOW_SHAPE_CODES = {
   wiretapCare: 'WIRETAP_CARE',
   duplicateStepId: 'DUPLICATE_STEP_ID',
   carePartNotAllowed: 'CARE_PART_NOT_ALLOWED',
+  reservedHeader: 'RESERVED_HEADER',
 } as const;
 
 function summarize(findings: readonly FlowParameterFinding[]): string {

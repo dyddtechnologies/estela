@@ -11,6 +11,7 @@ import type { TraceContext } from '../trace/trace-context';
 export type FlowStepKind =
   | 'filter'
   | 'transform'
+  | 'headers'
   | 'handle'
   | 'wireTap'
   | 'fanout'
@@ -159,6 +160,21 @@ export class JumpTimeoutError extends Error {
   ) {
     super(`jump a '${channel}' excedió el timeout (${timeoutMs}ms)`);
     this.name = 'JumpTimeoutError';
+  }
+}
+
+/**
+ * A `headers` step function returned something that cannot be merged: not a plain object, or
+ * reserved names (`names`, sorted). The flow fails and reports to `error.channel`.
+ */
+export class FlowHeadersError extends Error {
+  constructor(
+    message: string,
+    /** Reserved names the function tried to set; empty when the result was not an object. */
+    readonly names: readonly string[] = [],
+  ) {
+    super(message);
+    this.name = 'FlowHeadersError';
   }
 }
 

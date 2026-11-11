@@ -77,6 +77,37 @@ export type ReplyHopOption = 'inherit' | 'none' | (string & {});
 /** Internal marker of the ephemeral jump hop (ADR-014); informational, not public. */
 export const JUMP_REPLY_HEADER = 'x-integration-jump-reply';
 
+/**
+ * Headers that Estela owns: trace, reply, idempotency, care and jump bookkeeping. A flow
+ * `headers` step and an inbound `carryHeaders` mapping never write them (`triesLeft` and
+ * `planB` are the care headers of `resilience/retry-budget`).
+ */
+export const RESERVED_HEADER_NAMES: readonly string[] = Object.freeze([
+  'id',
+  'timestamp',
+  'correlationId',
+  'causationId',
+  'traceId',
+  'spanId',
+  'parentSpanId',
+  'replyChannel',
+  'errorChannel',
+  'idempotencyKey',
+  'history',
+  'jumpReplies',
+  'jumpPlanB',
+  'triesLeft',
+  'planB',
+  JUMP_REPLY_HEADER,
+]);
+
+const RESERVED_HEADERS = new Set(RESERVED_HEADER_NAMES);
+
+/** True when `name` is one of `RESERVED_HEADER_NAMES` (exact, case-sensitive). */
+export function isReservedHeader(name: string): boolean {
+  return RESERVED_HEADERS.has(name);
+}
+
 export interface NextHopOptions {
   reply?: ReplyHopOption;
 }
