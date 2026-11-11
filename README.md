@@ -344,7 +344,25 @@ Once explicit privacy reaches a tap, `wireTap(ch)` sends a copy as the trail sho
 the reason is logged at boot as an `original-copy tap` line, and its absence fails boot
 (`COPY_REASON_MISSING`). Without privacy the tap shares the payload as in 0.9.0. Either way the
 copy carries no reply routing (`replyChannel`, the jump reply marker), so a tap consumer never
-answers the caller.
+answers the caller. In a hidden copy each `jumpReplies[<channel>]` value is hidden as a payload with
+the tap's rules plus that channel's and that jump's `privacy`; the keys stay, and later steps and
+`reply({ payload: 'jumpMerge' })` still get the real replies.
+
+### Delivery reach
+
+Privacy never changes what a handler, a destination or the caller receives, with one exception you
+write on a step: `privacy: { fields: ['ssn'], reach: Reach.Delivery, reachReason: 'partner must
+not receive SSN' }`. On `transform` and `handle` it hides the step's output; on `to`, `publish`,
+`fanoutTo`, `jumpTo` and `jump` (or one `fanoutTo`/`jumpTo` target) it hides the copy sent to that
+destination, while the flow's own message stays intact. It hides the payload and each
+`jumpReplies` value with that step's (and target's) own rules only, never module, channel or flow
+rules; other headers are untouched. Unchanged parts keep their reference (Buffers, Dates, class
+instances). When the copy cannot be faithful (a walk limit, a string longer than `maxScanBytes`
+that a pattern must scan, a cycle, a getter or a class instance on a changed path), the step fails
+with `DeliveryCopyError` (`DELIVERY_COPY_FAILED`, not retryable, never retried by care) and nothing
+is sent. Boot logs one `privacy delivery-reach` warn line with the step and the reason; a missing
+reason, or `Reach.Delivery` in `forRoot`, on a channel, an endpoint, a flow, `filter`, `headers`,
+`wireTap` or `route`, fails boot (`DELIVERY_REACH_LEVEL`).
 
 ### Example: PCI checkout
 
@@ -418,12 +436,9 @@ The same customer always gets the same `fp:` token until `refreshFingerprintSecr
 secret. Without `fingerprintSecret` these explicit `Show.Fingerprint` rules fail boot
 (`FINGERPRINT_WITHOUT_SECRET`); built-in rules such as `personal.phone-e164` hide instead.
 
-> **Not in this build yet:** flow and step levels (`IntegrationFlow.from(ch, { privacy })`, step and
-> fanout/jump target `privacy`), `reach: Reach.Delivery` (a hidden copy delivered to the next
-> service), `OutboundRestOptions.privacy` and the graph `privacy` keys. They are specified in
-> [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md) section 18. Until
-> then, use channel and endpoint levels; `reach: Reach.Delivery` written in `forRoot`, on a channel
-> or on an endpoint fails boot (`DELIVERY_REACH_LEVEL`).
+> **Not in this build yet:** `OutboundRestOptions.privacy` and the graph `privacy` keys. They are
+> specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
+> section 18.
 
 ### Providers and regex safety
 
