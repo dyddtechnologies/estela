@@ -46,10 +46,15 @@ export enum TapCopy {
 
 /** Trail writers a step asks for; the flow layer implements them with the privacy engine. */
 export interface StepTrailPort {
-  /** The `error` of a `wait: false` envelope (S4), from `serializeError`. */
-  envelopeBody(body: unknown): unknown;
+  /**
+   * The `error` of a `wait: false` envelope (S4), from `serializeError`, shown with the policy of
+   * the target at index `target` of the step's targets (SD-47).
+   */
+  envelopeBody(body: unknown, target: number): unknown;
   /** The message a wire tap sends (S10); undefined keeps the shared 0.9.0 copy. */
   tapCopy(msg: IntegrationMessage): IntegrationMessage | undefined;
+  /** A `route` send to `channel` failed: the flow error envelope then adds that channel (SD-55). */
+  routeFailed(error: unknown, channel: string): void;
 }
 
 /** One try as the care engine hands it to a step. */

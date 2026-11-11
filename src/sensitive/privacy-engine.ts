@@ -126,6 +126,16 @@ interface EngineParts {
   readonly secret: FingerprintSecret | undefined;
   readonly limits: WalkLimits;
   readonly logger: PrivacyLogger;
+  /** Findings of the module compile, held for the boot resolver (`forBoot`, SD-55). */
+  readonly pending: Pick<PrivacyCompileResult, 'findings' | 'problems'> | undefined;
+}
+
+/** Options of `addScopes`. */
+export interface AddScopesOptions {
+  /** The writer of these scopes has its own `SealKeyProvider`. */
+  sealKeys?: boolean;
+  /** Logger of these scopes' boot lines; the engine logger by default. */
+  logger?: PrivacyLogger;
 }
 
 /**
@@ -173,6 +183,21 @@ export class PrivacyEngine {
   }
 
   /**
+   * @internal Like `compile`, but a module with findings still yields an engine that holds them
+   * (`bootFindings`), so the boot resolver throws them together with the findings of every other
+   * subject (SD-55, 7.1). Such an engine logs no boot line and must not write before boot ends.
+   */
+  static async forBoot(
+    options: PrivacyOption,
+    scopes: PrivacyScopes = {},
+    logger: PrivacyLogger = noopLogger,
+  ): Promise<PrivacyEngine> {
+    const findings = new Findings();
+    const secret = await readSecret(options === false ? undefined : options, findings);
+    return PrivacyEngine.build(options, scopes, logger, secret, findings, true).engine!;
+  }
+
+  /**
    * @internal The baseline engine of a writer built without a module (section 2, D3): the pinned
    * `secrets@1` pack and `DEFAULT_HIDDEN_HEADERS`, no fingerprint secret, no boot lines.
    */
@@ -204,6 +229,7 @@ export class PrivacyEngine {
     logger: PrivacyLogger,
     secret: FingerprintSecret | undefined,
     findings: Findings,
+    deferred = false,
   ): PrivacyCompileResult {
     const module: ModuleLevel = {
       options: options === false ? undefined : options,
@@ -213,7 +239,8 @@ export class PrivacyEngine {
     if (module.options !== undefined) checkModule(module.options, env);
     const modulePlan = options === false ? undefined : resolveModule(module, env);
     const resolved = resolveScopes(scopes, module, env);
-    if (findings.count > 0) {
+    const failed = findings.count > 0;
+    if (failed && !deferred) {
       return { engine: undefined, findings: findings.list, problems: findings.problems };
     }
     const engine = new PrivacyEngine({
@@ -225,19 +252,20 @@ export class PrivacyEngine {
       secret,
       limits: limitsOf(module.options),
       logger,
+      pending: failed ? { findings: findings.list, problems: findings.problems } : undefined,
     });
-    engine.logBoot(['module', ...resolved.plans.keys()], env.exemptions, resolved.notes);
+    if (failed) return { engine, findings: findings.list, problems: findings.problems };
+    engine.logBoot(['module', ...resolved.logged], env.exemptions, resolved.notes);
     return { engine, findings: [], problems: [] };
   }
 
   /**
    * @internal Adds scopes found after the module compiled (activators, inbound endpoints, flows,
    * saga runners). Nothing is added when a scope has a finding; the caller throws them (SD-37).
-   * `sealKeys` says whether the writer of these scopes has its own `SealKeyProvider`.
    */
   addScopes(
     scopes: PrivacyScopes,
-    extra: { sealKeys?: boolean } = {},
+    extra: AddScopesOptions = {},
   ): Pick<PrivacyCompileResult, 'findings' | 'problems'> {
     const findings = new Findings();
     const base = compileEnv(this.parts.options, findings);
@@ -245,8 +273,13 @@ export class PrivacyEngine {
     const resolved = resolveScopes(scopes, this.parts.moduleLevel, env);
     if (findings.count > 0) return { findings: findings.list, problems: findings.problems };
     for (const [name, plan] of resolved.plans) this.parts.scopes.set(name, plan);
-    this.logBoot([...resolved.plans.keys()], env.exemptions, resolved.notes);
+    this.logBoot(resolved.logged, env.exemptions, resolved.notes, extra.logger);
     return { findings: [], problems: [] };
+  }
+
+  /** @internal The module compile findings `forBoot` held back; empty for a valid module. */
+  bootFindings(): Pick<PrivacyCompileResult, 'findings' | 'problems'> {
+    return this.parts.pending ?? { findings: [], problems: [] };
   }
 
   /** @internal True once a scope is known to the engine. */
@@ -435,25 +468,31 @@ export class PrivacyEngine {
     this.secretId = material.id;
   }
 
+  /** SD-37, SD-60: subject, profile and pack names, rule counts and reach; never a rule body. */
+  private summaryLine(name: string, plan: FrozenPlan): string {
+    const uses = plan.names.length === 0 ? '-' : plan.names.join(',');
+    const reach = plan.delivery === undefined ? '' : ' reach=delivery';
+    return (
+      `privacy scope '${name}': fields=${plan.fieldCount} patterns=${plan.patterns.length}` +
+      ` uses=${uses} remember=${plan.remember ?? '-'} fingerprint=${this.secretId ?? 'none'}` +
+      reach
+    );
+  }
+
   /** SD-37, SD-18, SD-29, SD-60: names, counts and reasons only. */
   private logBoot(
     names: readonly string[],
     exemptions: CompileEnv['exemptions'],
     notes: readonly string[],
+    logger: PrivacyLogger = this.parts.logger,
   ): void {
-    const { logger } = this.parts;
     if (this.parts.disabled) {
       if (names.includes('module')) logger.log('privacy: off (forRoot({ privacy: false }))');
       return;
     }
     for (const name of names) {
       const plan = name === 'module' ? this.parts.module : this.parts.scopes.get(name);
-      if (plan === undefined) continue;
-      const uses = plan.names.length === 0 ? '-' : plan.names.join(',');
-      logger.log(
-        `privacy scope '${name}': fields=${plan.fieldCount} patterns=${plan.patterns.length}` +
-          ` uses=${uses} remember=${plan.remember ?? '-'} fingerprint=${this.secretId ?? 'none'}`,
-      );
+      if (plan !== undefined) logger.log(this.summaryLine(name, plan));
     }
     for (const exemption of exemptions) {
       logger.warn(
@@ -469,15 +508,23 @@ function resolveScopes(
   scopes: PrivacyScopes,
   module: ModuleLevel,
   env: CompileEnv,
-): { plans: Map<string, FrozenPlan>; notes: string[] } {
+): { plans: Map<string, FrozenPlan>; notes: string[]; logged: string[] } {
   const plans = new Map<string, FrozenPlan>();
   const notes: string[] = [];
+  const logged: string[] = [];
   for (const [name, scope] of Object.entries(scopes)) {
     const resolved = resolveScope(name, scope, module, env);
     plans.set(name, resolved.plan);
     notes.push(...resolved.notes);
+    if (summarized(scope, resolved.plan)) logged.push(name);
   }
-  return { plans, notes };
+  return { plans, notes, logged };
+}
+
+/** SD-37, SD-60: which scopes get a boot summary line. */
+function summarized(scope: PrivacyScopes[string], plan: FrozenPlan): boolean {
+  if (scope.summary === 'none') return false;
+  return scope.summary !== 'explicit' || plan.explicit;
 }
 
 async function readSecret(

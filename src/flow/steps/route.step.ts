@@ -28,7 +28,12 @@ export class RouteStep implements FlowStep {
           { channel, component: `route:${ctx.flowName}` },
           { reply: 'inherit' },
         );
-        await sendHop(ctx, channel, hop);
+        try {
+          await sendHop(ctx, channel, hop);
+        } catch (error) {
+          ctx.trail?.routeFailed(error, channel);
+          throw error;
+        }
       }),
     );
     return { action: 'stop', reason: 'terminated' };

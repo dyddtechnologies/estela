@@ -11,6 +11,7 @@ import { CareConfigError, type FlowParameterFinding } from '../resilience/resili
 import { planBLeaveRunner } from '../resilience/fallback';
 import type { Care, CareRef } from '../resilience/resilience.types';
 import type { CareEngine } from '../resilience/runtime';
+import { PrivacyConfigError, type PrivacyFinding } from '../sensitive/privacy-errors';
 import { FlowDefinitionError } from './flow-definition-error';
 import type { FlowOptions, FlowStep, FlowTarget, StepCarePort } from './flow-step';
 import {
@@ -155,6 +156,44 @@ function relabel(error: CareConfigError, label: string, binding: string): FlowPa
   }));
 }
 
+/** The privacy pass of the boot resolver (SD-55): every privacy finding with its problem text. */
+export interface PrivacyPassResult {
+  readonly findings: readonly PrivacyFinding[];
+  /** One text per finding, in the same order: `<subject>: <path> <rule>`, never a value. */
+  readonly problems: readonly string[];
+}
+
+/** Resolves the privacy of the module, the flows and the other boot subjects (SD-55). */
+export type PrivacyPass = (flows: readonly ResolvedFlow[]) => PrivacyPassResult;
+
+/** A privacy finding in the shared finding shape (concern `'privacy'`, SD-55, SD-67). */
+function privacyFindingsOf(result: PrivacyPassResult): FlowParameterFinding[] {
+  return result.findings.map((finding, index) => ({
+    concern: 'privacy',
+    code: finding.code,
+    severity: finding.severity,
+    subject: finding.subject,
+    path: finding.path,
+    message: result.problems[index] ?? `${finding.subject}: ${finding.path}`,
+  }));
+}
+
+/**
+ * The one boot error (RS-67, SD-55): privacy findings alone throw a `PrivacyConfigError`; mixed
+ * with error findings of another concern they all go into one `FlowDefinitionError`.
+ */
+export function bootErrorOf(
+  findings: readonly FlowParameterFinding[],
+  privacy: PrivacyPassResult | undefined,
+): Error | undefined {
+  const privacyErrors = privacy?.findings.some((finding) => finding.severity === 'error') === true;
+  if (privacy === undefined || !privacyErrors) return definitionErrorOf(findings);
+  if (!findings.some((finding) => finding.severity === 'error')) {
+    return new PrivacyConfigError(privacy.problems, privacy.findings);
+  }
+  return new FlowDefinitionError([...findings, ...privacyFindingsOf(privacy)]);
+}
+
 /** One error for every finding, of the class of their concern (RS-67). */
 export function definitionErrorOf(findings: readonly FlowParameterFinding[]): Error | undefined {
   const errors = findings.filter((finding) => finding.severity === 'error');
@@ -173,11 +212,10 @@ export function definitionErrorOf(findings: readonly FlowParameterFinding[]): Er
 }
 
 /**
- * Boot resolver of the flow parameter model (RS-67), care concern. The privacy references the
- * DSL captures (`FlowOptions.privacy`, `StepParams.privacy`, target `privacy`, SD-67) have no
- * pass here yet (SD-55). It builds every flow once, resolves every reference of every subject
- * over L4 > L3 > L2 > L1 (RS-51), collects every finding and then throws one error or logs each
- * warning once.
+ * Boot resolver of the flow parameter model (RS-67). It builds every flow once, resolves every
+ * care reference of every subject over L4 > L3 > L2 > L1 (RS-51), runs the privacy pass the module
+ * hands it (SD-55, SD-67), collects every finding and then throws one error or logs each warning
+ * once.
  */
 export class FlowParameterResolver {
   private readonly findings: FlowParameterFinding[] = [];
@@ -189,14 +227,14 @@ export class FlowParameterResolver {
     private readonly registry: ChannelRegistry,
   ) {}
 
-  resolve(definitions: readonly FlowDefinition[]): FlowResolution {
+  resolve(definitions: readonly FlowDefinition[], privacyPass?: PrivacyPass): FlowResolution {
     const channelCare = this.resolveChannels();
     const flows: ResolvedFlow[] = [];
     for (const definition of definitions) {
       const built = this.build(definition);
       if (built !== undefined) flows.push(this.resolveFlow(definition.name, built));
     }
-    const error = definitionErrorOf(this.findings);
+    const error = bootErrorOf(this.findings, privacyPass?.(flows));
     if (error !== undefined) throw error;
     this.logWarnings(this.findings);
     return {

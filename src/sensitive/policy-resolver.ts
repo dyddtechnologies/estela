@@ -53,6 +53,11 @@ export interface PrivacyScope {
   readonly durable?: boolean;
   /** Request/reply inbound with `onDuplicate: 'replay'` (SD-30). */
   readonly replays?: boolean;
+  /**
+   * Boot summary of the scope (SD-37, SD-60): absent logs it always, `'explicit'` only when an
+   * explicit privacy reaches it, `'none'` never (an internal scope, its notes included).
+   */
+  readonly summary?: 'explicit' | 'none';
 }
 
 /** The per-scope references the module collects at boot, keyed by scope name. */
@@ -847,7 +852,7 @@ export function resolveScope(
       "Remember.OutcomeOnly cannot replay a request/reply endpoint (onDuplicate: 'replay')",
     );
   }
-  if (delivery !== undefined)
+  if (delivery !== undefined && scope.summary !== 'none')
     notes.push(`privacy delivery-reach ${name}: ${delivery.reachReason ?? ''}`);
   return { plan, notes };
 }

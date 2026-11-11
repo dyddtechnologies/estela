@@ -38,7 +38,7 @@ export class JumpStep implements FlowStep {
     const jumpReplies: Record<string, unknown> = { ...(ctx.msg.headers.jumpReplies ?? {}) };
     const jumpPlanB: Record<string, boolean> = {};
     const awaited: Promise<void>[] = [];
-    for (const target of normalizeDests(this.dests)) {
+    for (const [index, target] of normalizeDests(this.dests).entries()) {
       const care = ctx.care?.target(target.channel);
       const run =
         care === undefined
@@ -49,7 +49,8 @@ export class JumpStep implements FlowStep {
               jumpReplies,
             )
           : runWithCare(ctx, care, target.channel, jumpReplies, jumpPlanB);
-      if (target.wait === false) reportFireAndForget(ctx, target.channel, run, ctx.msg);
+      if (target.wait === false)
+        reportFireAndForget(ctx, { channel: target.channel, index }, run, ctx.msg);
       else {
         awaited.push(run.then(() => undefined));
       }

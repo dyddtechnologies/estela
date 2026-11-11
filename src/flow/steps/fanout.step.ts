@@ -22,14 +22,15 @@ export class FanoutStep implements FlowStep {
 
   async execute(ctx: FlowStepContext): Promise<StepOutcome> {
     const awaited: Promise<void>[] = [];
-    for (const target of normalizeDests(this.dests)) {
+    for (const [index, target] of normalizeDests(this.dests).entries()) {
       const hop = nextHop(
         ctx.msg,
         { channel: target.channel, component: `fanout:${ctx.flowName}` },
         { reply: 'none' },
       );
       const send = sendHop(ctx, target.channel, hop);
-      if (target.wait === false) reportFireAndForget(ctx, target.channel, send, ctx.msg);
+      if (target.wait === false)
+        reportFireAndForget(ctx, { channel: target.channel, index }, send, ctx.msg);
       else awaited.push(send);
     }
     await Promise.all(awaited);

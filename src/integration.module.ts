@@ -23,6 +23,8 @@ import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
 import {
   FlowParameterResolver,
   type FlowResolution,
+  type PrivacyPassResult,
+  type ResolvedFlow,
   type TryingTarget,
 } from './flow/flow-parameter-resolver';
 import type { FlowDefinition } from './flow/integration-flow';
@@ -54,14 +56,13 @@ import type { CareLogger, CareModuleOptions } from './resilience/resilience.type
 import { CareEngine } from './resilience/runtime';
 import type { CareEvent } from './resilience/resilience.types';
 import { PrivacyEngine, TrailOutput } from './sensitive/privacy-engine';
-import { PrivacyConfigError, type PrivacyFinding } from './sensitive/privacy-errors';
+import type { PrivacyFinding } from './sensitive/privacy-errors';
 import type { PrivacyModuleOptions } from './sensitive/privacy.types';
-import type { PrivacyScope } from './sensitive/policy-resolver';
+import type { PrivacyLevel, PrivacyScope } from './sensitive/policy-resolver';
 import { envelopeBody, errorChannelText, textForLog } from './trace/trail';
 import { flowPrivacyScopes, resolveFlowPrivacy, type FlowPrivacy } from './flow/flow-privacy';
 import {
   activatorPrivacyScope,
-  addPrivacyScopes,
   channelLevels,
   channelScopes,
   inboundPrivacyGuard,
@@ -166,7 +167,8 @@ function privacyProvider(): Provider {
     useFactory: (opts: ResolvedIntegrationOptions): Promise<PrivacyEngine> => {
       const configured =
         opts.privacy !== undefined || opts.channels.some((spec) => spec.privacy !== undefined);
-      return PrivacyEngine.compile(
+      // Findings are held for the boot resolver, which throws them with every other one (SD-55).
+      return PrivacyEngine.forBoot(
         opts.privacy,
         channelScopes(opts.channels),
         configured ? nestPrivacyLogger() : undefined,
@@ -399,14 +401,18 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     if (this.care.enabled) this.registry.inheritTriesLeft();
     this.openCareEvents();
 
-    // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
+    // 1b. flow parameters: every flow is built once and every care and privacy reference of
+    // flows, activators and inbound endpoints is resolved before any subscription (RS-67, SD-55)
+    const inbounds = this.discoverInbounds();
+    let flowPrivacy = new Map<string, FlowPrivacy>();
     const resolution = new FlowParameterResolver(this.care, this.registry).resolve(
       this.options.flows,
+      (flows) => {
+        const pass = this.resolvePrivacy(flows, inbounds);
+        flowPrivacy = pass.perFlow;
+        return pass;
+      },
     );
-
-    // 1c. privacy scopes of activators, inbound endpoints and flows, before any subscription
-    const inbounds = this.discoverInbounds();
-    const flowPrivacy = this.resolvePrivacy(resolution, inbounds);
 
     // 2. activators (DiscoveryModule) and outbound bindings
     const tryingActivators = this.subscribeDiscoveredActivators();
@@ -422,14 +428,19 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   }
 
   /**
-   * SD-37, SD-55: every privacy scope found at boot compiles before any subscription, and every
-   * finding is thrown together. Returns the trail writers of each flow.
+   * SD-37, SD-55: the privacy pass of the boot resolver. Every privacy scope found at boot
+   * compiles before any subscription; the findings of the module compile, the scopes and the taps
+   * are returned together. Returns the trail writers of each flow too.
    */
   private resolvePrivacy(
-    resolution: FlowResolution,
+    flows: readonly ResolvedFlow[],
     inbounds: readonly DiscoveredInbound[],
-  ): Map<string, FlowPrivacy> {
+  ): PrivacyPassResult & { perFlow: Map<string, FlowPrivacy> } {
     const channels = this.options.channels;
+    const held = this.privacy.bootFindings();
+    const findings: PrivacyFinding[] = [...held.findings];
+    const problems: string[] = [...held.problems];
+    const perFlow = new Map<string, FlowPrivacy>();
     const scopes: Record<string, PrivacyScope> = {};
     for (const { instance, methodName, metadata } of this.annotatedMethods<ActivatorMetadata>(
       ACTIVATOR_METADATA,
@@ -441,26 +452,34 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       const scope = inboundPrivacyScope(channels, inbound.spec, this.options.inbound);
       scopes[`inbound:${inbound.spec.channel}`] = scope;
     }
-    for (const flow of resolution.flows) {
-      Object.assign(
-        scopes,
-        flowPrivacyScopes(flow.name, flow.built, (name) => channelLevels(channels, name)),
-      );
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(channels, name);
+    const flowScopes: Record<string, PrivacyScope> = {};
+    for (const flow of flows) {
+      Object.assign(flowScopes, flowPrivacyScopes(flow.name, flow.built, levelsOf));
     }
-    addPrivacyScopes(this.privacy, scopes);
-    const perFlow = new Map<string, FlowPrivacy>();
-    const findings: PrivacyFinding[] = [];
-    const problems: string[] = [];
     const log = nestPrivacyLogger();
-    for (const flow of resolution.flows) {
-      const resolved = resolveFlowPrivacy(this.privacy, flow.name, flow.built);
+    // Flow and step scopes print their boot lines only under explicit privacy (SD-60).
+    for (const added of [
+      this.privacy.addScopes(scopes),
+      this.privacy.addScopes(flowScopes, { logger: log }),
+    ]) {
+      findings.push(...added.findings);
+      problems.push(...added.problems);
+    }
+    if (findings.length > 0) return { findings, problems, perFlow };
+    const env = {
+      levelsOf,
+      isRegistered: (name: string) => this.registry.tryGet(name) !== undefined,
+      logger: log,
+    };
+    for (const flow of flows) {
+      const resolved = resolveFlowPrivacy(this.privacy, flow.name, flow.built, env);
       findings.push(...resolved.findings);
       problems.push(...resolved.problems);
       for (const note of resolved.notes) log.warn(note);
       if (resolved.privacy !== undefined) perFlow.set(flow.name, resolved.privacy);
     }
-    if (findings.length > 0) throw new PrivacyConfigError(problems, findings);
-    return perFlow;
+    return { findings, problems, perFlow };
   }
 
   private attachFlows(resolution: FlowResolution, privacy: Map<string, FlowPrivacy>): void {
