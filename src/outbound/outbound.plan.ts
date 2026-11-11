@@ -1,3 +1,4 @@
+import type { ChannelRegistry } from '../channel-registry';
 import { OutboundError, OutboundHttpError, redactUrl } from './outbound.errors';
 import { resolveOutboundCare, usesCare, type OutboundCarePlan } from './outbound.resilience';
 import { formSerializer, jsonSerializer, textSerializer } from './outbound.serializers';
@@ -38,6 +39,8 @@ export interface OutboundPlanDeps {
   care?: () => CareEngine;
   /** Ad-hoc `request()` options: stateful care parts are refused (RS-33). */
   adHoc?: boolean;
+  /** Channels; a plan B with `PlanBMode.Leave` leaves its message on one. */
+  registry?: ChannelRegistry | undefined;
 }
 
 export interface OutboundIdempotencyPlan {
@@ -357,6 +360,7 @@ export function resolveOutboundRestPlan(
       legacyTries: plan.retry,
       idempotencyEnabled: plan.idempotency !== undefined,
       adHoc: deps.adHoc === true,
+      registry: deps.registry,
     });
   }
   return plan;

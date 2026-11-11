@@ -157,13 +157,32 @@ export interface Pace {
   replicas?: number;
 }
 
+/** How plan B uses its `channel`. */
+export enum PlanBMode {
+  /** Request/reply on the channel: its answer is the plan B answer. Default. */
+  Ask = 'ask',
+  /**
+   * Leave the message on the channel and go on, without waiting for an answer: the call counts
+   * as handled by plan B, and `value`, when set, is what the caller gets.
+   */
+  Leave = 'leave',
+}
+
 /** What answers when the call still fails. */
 export interface PlanB<R = unknown> {
   enabled?: boolean;
-  /** Exactly one of value | channel. */
+  /**
+   * Exactly one of value | channel, except with `mode: PlanBMode.Leave`, where `value` is the
+   * answer given after the message is left on the channel.
+   */
   value?: (error: unknown, ctx: CareContext) => R | Promise<R>;
   /** Request/reply on this channel with the same message; flow send steps re-send it instead. */
   channel?: string;
+  /**
+   * How `channel` is used; default `PlanBMode.Ask` (a `to` step: its 0.9.0 re-send). Only with
+   * `channel`. `PlanBMode.Leave` refuses `cacheable: true`.
+   */
+  mode?: PlanBMode;
   /** Default: transient, busy and every TurnedAwayKind. */
   on?: readonly PlanBTrigger[];
   /** Default false: a plan B answer is never stored as the idempotent result (RS-27). */

@@ -1,4 +1,6 @@
+import type { ChannelRegistry } from '../channel-registry';
 import { defaultRestClassifier } from '../resilience/classifiers';
+import { planBLeaveRunner, type ChannelSendFn } from '../resilience/fallback';
 import type { CareEdgeAdapter, CareExecutor } from '../resilience/executor';
 import { CareConfigError } from '../resilience/resilience.errors';
 import {
@@ -59,6 +61,8 @@ export interface OutboundCareInput {
   legacyTries: LegacyTriesSource | undefined;
   idempotencyEnabled: boolean;
   adHoc: boolean;
+  /** Where a plan B with `PlanBMode.Leave` leaves its message. */
+  registry?: ChannelRegistry | undefined;
 }
 
 export function dataOf(ctx: CareContext): RestAttemptData {
@@ -232,6 +236,12 @@ function assertBinding(name: string, plan: CarePlan, input: OutboundCareInput): 
   }
 }
 
+function sendOn(registry: ChannelRegistry | undefined): ChannelSendFn | undefined {
+  return registry === undefined
+    ? undefined
+    : (channel, payload, headers) => registry.send(channel, payload, headers);
+}
+
 /** Resolves the care plan and executor of an outbound REST binding (RS-33..RS-35). */
 export function resolveOutboundCare(name: string, input: OutboundCareInput): OutboundCarePlan {
   const own = layerOf(name, input.binding, input);
@@ -251,6 +261,7 @@ export function resolveOutboundCare(name: string, input: OutboundCareInput): Out
     restAdapter(methodsOf(layers, input.legacyTries)),
     {
       planBChannel: input.runtime.channelPlanB(),
+      planBLeave: planBLeaveRunner(sendOn(input.registry)),
     },
   );
   const resolved: OutboundCarePlan = {

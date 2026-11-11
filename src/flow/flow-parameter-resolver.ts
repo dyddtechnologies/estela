@@ -8,7 +8,8 @@ import {
   type CarePlan,
 } from '../resilience/resilience.plan';
 import { CareConfigError, type FlowParameterFinding } from '../resilience/resilience.errors';
-import type { Care, CareRef } from '../resilience/resilience.types';
+import { planBLeaveRunner } from '../resilience/fallback';
+import { PlanBMode, type Care, type CareRef } from '../resilience/resilience.types';
 import type { CareEngine } from '../resilience/runtime';
 import { FlowDefinitionError } from './flow-definition-error';
 import type { FlowOptions, FlowStep, FlowTarget, StepCarePort } from './flow-step';
@@ -20,6 +21,8 @@ import {
   type FlowEdgeKind,
 } from './flow-resilience';
 import { stepIdOf, type BuiltFlow, type FlowDefinition } from './integration-flow';
+import { withoutReplyRouting } from './steps/reply-routing';
+import type { IntegrationMessage } from '../message';
 
 type Family = keyof NonNullable<FlowOptions['care']>;
 type Level = 'L4' | 'L3' | 'L2' | 'L1';
@@ -106,10 +109,11 @@ function annotationOf(plan: CarePlan): CareAnnotation {
   return { care: describeCare(plan) ?? 'configured', repeatableBy: repeatableByOf(plan) };
 }
 
+/** A `to` step takes a plan B channel with no value; `PlanBMode.Ask` has no answer to take there. */
 function isChannelPlanB(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
-  const planB = value as { channel?: unknown; value?: unknown };
-  return planB.channel !== undefined && planB.value === undefined;
+  const planB = value as { channel?: unknown; value?: unknown; mode?: unknown };
+  return planB.channel !== undefined && planB.value === undefined && planB.mode !== PlanBMode.Ask;
 }
 
 /** RS-59 (section 5.5 rows): may this part value sit on this subject's edge? */
@@ -547,20 +551,27 @@ export class FlowParameterResolver {
 
   private careOf(spec: SubjectSpec, plan: CarePlan): TargetCare {
     const registry = this.registry;
-    const planBChannel =
-      spec.edge === 'flow-send'
-        ? // RS-59: `to` re-sends the same hop (reply inherited) as a plain send.
-          async (channel: string, ctx: { data?: unknown }): Promise<unknown> => {
-            const hop = (ctx.data as { hop: Parameters<ChannelRegistry['sendMessage']>[1] }).hop;
-            await registry.sendMessage(channel, hop);
-            return undefined;
-          }
-        : this.runtime.channelPlanB();
+    const send = spec.edge === 'flow-send';
+    const planBChannel = send
+      ? // RS-59: `to` re-sends the same hop (reply inherited) as a plain send.
+        async (channel: string, ctx: { data?: unknown }): Promise<unknown> => {
+          await registry.sendMessage(channel, hopOf(ctx));
+          return undefined;
+        }
+      : this.runtime.channelPlanB();
+    const planBLeave = send
+      ? // D39: `PlanBMode.Leave` on `to` sends the same hop without its reply routing.
+        async (channel: string, ctx: { data?: unknown }): Promise<unknown> => {
+          await registry.sendMessage(channel, withoutReplyRouting(hopOf(ctx)));
+          return undefined;
+        }
+      : planBLeaveRunner((channel, payload, headers) => registry.send(channel, payload, headers));
     const executor = this.runtime.executor(
       plan,
       flowAdapter(spec.edge, spec.binding, spec.channel),
       {
         planBChannel,
+        planBLeave,
         ...(spec.forget ? { shutdown: this.runtime.shutdownSignal } : {}),
       },
     );
@@ -581,6 +592,11 @@ export class FlowParameterResolver {
       this.runtime.observer.logger.warn(`${finding.code}: ${finding.message}`);
     }
   }
+}
+
+/** The hop a `to` step sends, carried as the care call data (`sendHop`). */
+function hopOf(ctx: { data?: unknown }): IntegrationMessage {
+  return (ctx.data as { hop: IntegrationMessage }).hop;
 }
 
 interface StepContext {

@@ -182,7 +182,7 @@ export class CareEngine {
   executor<T>(
     plan: CarePlan,
     adapter: CareEdgeAdapter,
-    extra: Pick<CareDeps, 'planBChannel' | 'defaultKey' | 'shutdown'> = {},
+    extra: Pick<CareDeps, 'planBChannel' | 'planBLeave' | 'defaultKey' | 'shutdown'> = {},
   ): CareExecutor<T> {
     const executor = new CareExecutor<T>(plan, adapter, { ...this.deps(), ...extra });
     this.control.track(executor);

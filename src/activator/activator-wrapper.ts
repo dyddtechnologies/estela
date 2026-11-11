@@ -8,7 +8,10 @@ import type { TraceContext } from '../trace/trace-context';
 import type { HopLogger } from '../trace/hop-logger';
 import { defaultInProcessClassifier } from '../resilience/classifiers';
 import type { CareEdgeAdapter, CareExecutor } from '../resilience/executor';
-import { describeCare } from '../resilience/resilience.plan';
+import { planBLeaveRunner } from '../resilience/fallback';
+import { describeCare, type CarePlan } from '../resilience/resilience.plan';
+import { CareConfigError } from '../resilience/resilience.errors';
+import { PlanBMode } from '../resilience/resilience.types';
 import {
   CareScope,
   parseTriesLeft,
@@ -64,12 +67,16 @@ export function activatorCare(binding: ActivatorBinding, deps: ActivatorDeps): A
   resolved.set(runtime ?? NO_RUNTIME, perRuntime);
   const cached = perRuntime.get(binding.metadata);
   if (cached !== undefined) return cached;
-  const result = runtime === undefined ? {} : resolveActivator(binding, runtime);
+  const result = runtime === undefined ? {} : resolveActivator(binding, runtime, deps.registry);
   perRuntime.set(binding.metadata, result);
   return result;
 }
 
-function resolveActivator(binding: ActivatorBinding, runtime: CareEngine): ActivatorCare {
+function resolveActivator(
+  binding: ActivatorBinding,
+  runtime: CareEngine,
+  registry: ChannelRegistry,
+): ActivatorCare {
   const layers = [
     binding.metadata.care,
     runtime.channelCareRef(binding.metadata.channel),
@@ -84,12 +91,24 @@ function resolveActivator(binding: ActivatorBinding, runtime: CareEngine): Activ
       `${scope}: care.tries.max > 1 without idempotent: true; only messages with an idempotencyKey get extra tries`,
     );
   }
+  assertLeaveChannel(scope, plan, registry);
   result.executor = runtime.executor(plan, activatorAdapter(scope), {
     planBChannel: runtime.channelPlanB(),
+    planBLeave: planBLeaveRunner((channel, payload, headers) =>
+      registry.send(channel, payload, headers),
+    ),
   });
   const summary = describeCare(plan);
   if (summary !== undefined) result.summary = summary;
   return result;
+}
+
+/** D39: a plan B that leaves its message on a channel needs that channel when it subscribes. */
+function assertLeaveChannel(scope: string, plan: CarePlan, registry: ChannelRegistry): void {
+  const planB = plan.planB;
+  if (planB?.mode !== PlanBMode.Leave || planB.channel === undefined) return;
+  if (registry.tryGet(planB.channel) !== undefined) return;
+  throw new CareConfigError(scope, 'planB.channel', `names an unknown channel '${planB.channel}'`);
 }
 
 function activatorScope(binding: ActivatorBinding): string {

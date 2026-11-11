@@ -87,6 +87,8 @@ export interface CareDeps {
   keyHasher?: (key: string) => string;
   /** Runs a `planB.channel` for this edge (request/reply, or a re-send on send steps). */
   planBChannel?: (channel: string, ctx: CareContext) => Promise<unknown>;
+  /** Leaves the message on a `planB.channel` with `mode: PlanBMode.Leave`; no answer awaited. */
+  planBLeave?: (channel: string, ctx: CareContext) => Promise<unknown>;
   /** Static default key (control lookups); default the binding name. */
   defaultKey?: string;
   /**
@@ -635,7 +637,8 @@ export class CareExecutor<T = unknown> {
     }
     const pctx: CareContext = { ...ctx, tryNumber: state.tries };
     try {
-      const value = (await runPlanB(planB, error, pctx, this.deps.planBChannel, state.tries)) as T;
+      const runners = { ask: this.deps.planBChannel, leave: this.deps.planBLeave };
+      const value = (await runPlanB(planB, error, pctx, runners, state.tries)) as T;
       this.emit({ type: 'plan-b.used', ...classOrReason(trigger) }, pctx);
       if (!planB.cacheable) CareScope.markPlanB();
       this.finish('plan-b', started);

@@ -6,7 +6,7 @@ import {
   type JitterMode,
 } from './backoff';
 import { CareConfigError } from './resilience.errors';
-import { OnQuota } from './resilience.types';
+import { OnQuota, PlanBMode } from './resilience.types';
 import type {
   Care,
   CareClassifierFn,
@@ -94,6 +94,8 @@ export interface PacePlan {
 export interface PlanBPlan {
   value?: (error: unknown, ctx: CareContext) => unknown;
   channel?: string;
+  /** Set when `channel` is: how plan B uses it. */
+  mode?: PlanBMode;
   on: ReadonlySet<PlanBTrigger>;
   cacheable: boolean;
 }
@@ -219,7 +221,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 const COUPLED_FIELDS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
   valve: { onQuota: ['quotaShutMs'] },
   'valve.lookBack': { lastCalls: ['lastMs'], lastMs: ['lastCalls'] },
-  planB: { value: ['channel'], channel: ['value'] },
+  planB: { value: ['channel', 'mode'], channel: ['value', 'mode'] },
 };
 
 /** Deep merge used once inside a reference (`use`, `extends`): arrays, functions and `false` replace. */
@@ -630,25 +632,51 @@ function resolvePace(c: Checker, layered: Layered): PacePlan | undefined {
   return { ...plan, ...keyAndState(c, 'pace', options) };
 }
 
+const PLAN_B_MODES: readonly string[] = Object.values(PlanBMode);
+
 function resolvePlanB(c: Checker, layered: Layered): PlanBPlan | undefined {
   if (!layered.explicit || !layered.enabled) return undefined;
   const options = layered.options as PlanB;
-  const hasValue = options.value !== undefined;
-  const hasChannel = options.channel !== undefined;
-  if (hasValue === hasChannel) c.fail('planB', 'must set exactly one of value or channel');
+  const mode = planBMode(c, options);
+  checkPlanBShape(c, options, mode === PlanBMode.Leave);
   const plan: PlanBPlan = {
     on: c.classes('planB.on', options.on ?? DEFAULT_PLAN_B_ON, TRIGGERS),
     cacheable: options.cacheable === true,
   };
   const value = c.fn<PlanBPlan['value']>('planB.value', options.value);
   if (value !== undefined) plan.value = value;
-  if (hasChannel) {
+  if (options.channel !== undefined) {
     if (typeof options.channel !== 'string' || options.channel.length === 0) {
       c.fail('planB.channel', 'must be a non-empty channel name');
     }
     plan.channel = options.channel;
+    plan.mode = mode ?? PlanBMode.Ask;
   }
   return plan;
+}
+
+/** Exactly one of value or channel; both only when the message is left (D39). */
+function checkPlanBShape(c: Checker, options: PlanB, leave: boolean): void {
+  const hasValue = options.value !== undefined;
+  const hasChannel = options.channel !== undefined;
+  if (!hasValue && !hasChannel) c.fail('planB', 'must set exactly one of value or channel');
+  if (hasValue && hasChannel && !leave) {
+    c.fail('planB', 'must set exactly one of value or channel, or both with mode PlanBMode.Leave');
+  }
+  if (leave && options.cacheable === true) {
+    c.fail('planB.cacheable', 'is not allowed with mode PlanBMode.Leave');
+  }
+}
+
+/** The `planB.mode` as written: a known value, and only next to a channel. */
+function planBMode(c: Checker, options: PlanB): PlanBMode | undefined {
+  const mode = options.mode;
+  if (mode === undefined) return undefined;
+  if (!PLAN_B_MODES.includes(mode)) {
+    c.fail('planB.mode', 'must be PlanBMode.Ask or PlanBMode.Leave');
+  }
+  if (options.channel === undefined) c.fail('planB.mode', 'needs a channel');
+  return mode;
 }
 
 function resolveClassify(c: Checker, layers: readonly Care[]): readonly CareClassifierFn[] {
@@ -736,6 +764,7 @@ export function describeCare(plan: CarePlan): string | undefined {
   if (plan.valve !== undefined) parts.push('valve');
   if (plan.lanes !== undefined) parts.push('lanes');
   if (plan.pace !== undefined) parts.push('pace');
-  if (plan.planB !== undefined) parts.push('plan-b');
+  if (plan.planB !== undefined)
+    parts.push(plan.planB.mode === PlanBMode.Leave ? 'plan-b leave' : 'plan-b');
   return parts.length === 0 ? undefined : parts.join(' · ');
 }
