@@ -169,6 +169,19 @@ describe('flow filter whenDropped reply (SPI-448 gap filter-reply)', () => {
     expect(w.errors[0]).toMatchObject({ flow: 'f' });
   });
 
+  it('a predicate that throws fails the flow: the caller gets the error, never the drop reply', async () => {
+    const w = world();
+    const reply = jest.fn(() => ({ status: 'ignored' }));
+    const flow = IntegrationFlow.from('in').filter(() => Promise.reject(new Error('pred boom')), {
+      whenDropped: { reply },
+    });
+    bindFlow(definition('f', flow), w.registry);
+
+    await expect(w.gateway.sendAndReceive('in', {}, {}, 1_000)).rejects.toThrow('pred boom');
+    expect(reply).not.toHaveBeenCalled();
+    expect(w.errors).toHaveLength(1);
+  });
+
   it('a filter in a jump target flow answers the jump at once', async () => {
     const w = world();
     const out = w.inbox('out');

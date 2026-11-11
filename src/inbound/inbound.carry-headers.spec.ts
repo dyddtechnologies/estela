@@ -123,6 +123,10 @@ describe('inbound carryHeaders (SPI-448 gap headers)', () => {
     };
     await run(w, restContext(spec, { 'x-tenant-id': ['acme', 'other'] }));
     expect(w.received[0]?.headers.tenantId).toBe('acme');
+
+    const mixed: InboundSpec = { channel: 'in', transport: 'rest', carryHeaders: ['x-region'] };
+    await run(w, restContext(mixed, { 'X-Region': 'gt' }));
+    expect(w.received[1]?.headers['x-region']).toBe('gt');
   });
 
   it('refuses a reserved target name, an empty name and two names onto one target', async () => {

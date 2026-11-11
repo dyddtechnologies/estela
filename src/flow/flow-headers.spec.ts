@@ -141,6 +141,23 @@ describe('flow step headers (SPI-448 gap headers)', () => {
     expect(w.errors[0]?.flow).toBe('f');
   });
 
+  it('a function that throws fails the flow with its own error and reports once to error.channel', async () => {
+    for (const fn of [
+      () => Promise.reject(new Error('hdr boom')),
+      () => {
+        throw new Error('hdr boom');
+      },
+    ]) {
+      const w = world();
+      const out = w.inbox('out');
+      bindFlow(definition('f', IntegrationFlow.from('in').headers(fn).to('out')), w.registry);
+
+      await expect(w.registry.send('in', 'x')).rejects.toThrow('hdr boom');
+      expect(out).toHaveLength(0);
+      expect(w.errors).toHaveLength(1);
+    }
+  });
+
   it('fails the flow when a function returns something that is not a plain object', async () => {
     const w = world();
     w.inbox('out');
