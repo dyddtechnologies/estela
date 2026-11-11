@@ -37,7 +37,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm run test
-      - name: Built dist keeps decorator metadata and class identity
+      - name: Built dist keeps decorator metadata and error class identity
         run: npm run test:dist
       - run: npm run bounds
 
