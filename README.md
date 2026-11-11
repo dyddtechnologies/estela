@@ -305,6 +305,9 @@ IntegrationModule.forRoot({
   `@InboundRest({ privacy })` (and the other inbound decorators), `@ServiceActivator(ch, { privacy })`
   and `SagaRunnerOptions.privacy`. A flow's trail follows its source channel and the channels it
   sends to.
+- **Added headers:** values set by a `headers` step and transport headers an endpoint copies
+  with `carryHeaders` follow the same `headers` rules on every trail output; the graph shows only
+  their names.
 
 ### What durable records remember
 
@@ -330,7 +333,9 @@ Once explicit privacy reaches a tap, `wireTap(ch)` sends a copy as the trail sho
 (`copy: TapCopy.AsShown`). A tap that must keep the raw payload says so:
 `wireTap('fraud.raw', { copy: TapCopy.Original, copyReason: 'fraud model needs the full card' })`;
 the reason is logged at boot as an `original-copy tap` line, and its absence fails boot
-(`COPY_REASON_MISSING`). Without privacy the tap shares the payload as in 0.9.0.
+(`COPY_REASON_MISSING`). Without privacy the tap shares the payload as in 0.9.0. Either way the
+copy carries no reply routing (`replyChannel`, the jump reply marker), so a tap consumer never
+answers the caller.
 
 ### Example: PCI checkout
 
