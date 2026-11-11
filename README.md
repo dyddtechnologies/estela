@@ -303,7 +303,11 @@ IntegrationModule.forRoot({
   references one.
 - **Levels:** module (`forRoot`), `inbound.privacy` (every endpoint), `ChannelSpec.privacy`, then
   `@InboundRest({ privacy })` (and the other inbound decorators), `@ServiceActivator(ch, { privacy })`
-  and `SagaRunnerOptions.privacy`. In flows: `IntegrationFlow.from(source, { privacy })`, a step's
+  and `SagaRunnerOptions.privacy`. Outbound: `outbound.rest.defaults.privacy`, then a binding's or
+  `@OutboundRest`'s `privacy` (scope `outbound:<name>`, unioned with its bound channel), and a
+  call's `request(target, message, { privacy })`, checked on the first call that carries it:
+  an unknown name or `false` rejects with `PrivacyConfigError` before the request is sent.
+  `bindGrpcOut(..., { privacy })` takes the reference already; nothing reads it yet. In flows: `IntegrationFlow.from(source, { privacy })`, a step's
   `{ privacy }` and a `fanoutTo`/`jumpTo` target's `privacy`.
 - **Flows:** a step's trail (`flow:<flow>#<step id>`) unions the module, the source channel, the
   flow and the step; a send step adds its destination channels and target levels, a wire tap its
@@ -436,8 +440,8 @@ The same customer always gets the same `fp:` token until `refreshFingerprintSecr
 secret. Without `fingerprintSecret` these explicit `Show.Fingerprint` rules fail boot
 (`FINGERPRINT_WITHOUT_SECRET`); built-in rules such as `personal.phone-e164` hide instead.
 
-> **Not in this build yet:** `OutboundRestOptions.privacy` and the graph `privacy` keys. They are
-> specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
+> **Not in this build yet:** the graph `privacy` keys and the gRPC out trail writers that read
+> `bindGrpcOut`'s `privacy`. They are specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
 > section 18.
 
 ### Providers and regex safety
