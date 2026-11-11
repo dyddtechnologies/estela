@@ -1549,6 +1549,15 @@ describe('redactUrl', () => {
     expect(redactUrl('https://host.example/a#frag')).toBe('https://host.example/a');
     expect(redactUrl('https://host.example/a')).toBe('https://host.example/a');
   });
+
+  it('drops a password that holds a raw @ whole, up to the last @ of the authority', () => {
+    expect(redactUrl('https://svc:Lg@Pw-Secret-6630@ledger.example/v2/entries?k=1')).toBe(
+      'https://ledger.example/v2/entries',
+    );
+    expect(redactUrl('https://ledger.example/v2/users/a@b')).toBe(
+      'https://ledger.example/v2/users/a@b',
+    );
+  });
 });
 
 describe('@OutboundRest', () => {
