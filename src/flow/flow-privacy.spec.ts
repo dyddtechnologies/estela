@@ -133,6 +133,80 @@ describe('S10 wire-tap copies (SD-28, SD-52)', () => {
   });
 });
 
+describe('S10 wire-tap copies fail closed when hiding fails (SD-23, SD-28)', () => {
+  const KEY = 'CANARYKEY999';
+  const ACCT = 'ACCT99912345';
+
+  function keyedTapFlow(): FlowDefinition {
+    return {
+      name: 'tap',
+      build: () =>
+        IntegrationFlow.from('pay.in')
+          .headers({ 'x-api-key': KEY }, { id: 'key' })
+          .wireTap('audit', { id: 'audit', copy: TapCopy.AsShown })
+          .to('sink'),
+    };
+  }
+
+  it('a tap copy whose hiding fails keeps only trace headers, never the raw ones', async () => {
+    const mod = await boot([keyedTapFlow()], { privacy: { headers: ['x-api-key'] } });
+    const capture = captureTrail();
+    capture.channel(mod.get(ChannelRegistry), 'audit');
+    const audit = collect(mod, 'audit');
+    const main = collect(mod, 'sink');
+    const hostile = new Proxy(
+      { a: 1 },
+      {
+        ownKeys() {
+          throw new Error('no keys');
+        },
+      },
+    );
+    const input = createMessage(hostile, { authorization: `Bearer ${TOKEN}` });
+    await mod.get(ChannelRegistry).sendMessage('pay.in', input);
+    await settle();
+    expect(audit[0]?.payload).toBe('[HIDE_FAILED]');
+    expect(audit[0]?.headers).not.toHaveProperty('authorization');
+    expect(audit[0]?.headers).not.toHaveProperty('x-api-key');
+    expect(audit[0]?.headers.id).toBe(input.headers.id);
+    expect(audit[0]?.headers.traceId).toBe(input.headers.traceId);
+    expect(audit[0]?.headers.correlationId).toBe(input.headers.correlationId);
+    expect(audit[0]?.headers.history.length).toBeGreaterThan(0);
+    expect(main[0]?.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    expect(main[0]?.headers['x-api-key']).toBe(KEY);
+    expectNoLeak(capture, [TOKEN, KEY]);
+    await mod.close();
+  });
+
+  it('a tap copy whose confirm callback throws keeps no raw header', async () => {
+    const mod = await boot([tapFlow()], {
+      privacy: {
+        patterns: [
+          {
+            name: 'acct',
+            regex: /ACCT\d+/,
+            confirm: () => {
+              throw new Error('confirm failed');
+            },
+          },
+        ],
+      },
+    });
+    const capture = captureTrail();
+    capture.channel(mod.get(ChannelRegistry), 'audit');
+    const main = collect(mod, 'sink');
+    const input = createMessage(
+      { note: 'ACCT123' },
+      { authorization: `Bearer ${TOKEN}`, 'x-acct': ACCT },
+    );
+    await mod.get(ChannelRegistry).sendMessage('pay.in', input);
+    await settle();
+    expect(main[0]?.headers['x-acct']).toBe(ACCT);
+    expectNoLeak(capture, [TOKEN, ACCT]);
+    await mod.close();
+  });
+});
+
 describe('S10 wire-tap copies compose with the reply routing strip (SD-52, D38)', () => {
   it('a hidden tap copy has no reply routing and the main path keeps it', async () => {
     const mod = await boot([tapFlow({ copy: TapCopy.AsShown })]);

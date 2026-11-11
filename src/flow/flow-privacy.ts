@@ -3,7 +3,7 @@ import type { PrivacyLevel, PrivacyScope, PrivacyScopes } from '../sensitive/pol
 import type { PrivacyEngine, PrivacyLogger } from '../sensitive/privacy-engine';
 import { TrailOutput } from '../sensitive/privacy-engine';
 import { PRIVACY_FINDING_CODES, type PrivacyFinding } from '../sensitive/privacy-errors';
-import { Reach, type PrivacyRef } from '../sensitive/privacy.types';
+import { PROTECTED_TRACE_FIELDS, Reach, type PrivacyRef } from '../sensitive/privacy.types';
 import { envelopeBody, envelopeError, storedError } from '../trace/trail';
 import {
   TapCopy,
@@ -520,9 +520,16 @@ function shownCopy(
   const history = [...msg.headers.history];
   const replies =
     jumpReplies === undefined ? {} : { jumpReplies: shownReplies(engine, jumpReplies, replyScope) };
-  if (typeof shown !== 'object') {
-    return { payload: shown, headers: { ...own, ...replies, history } };
+  // SD-23: when hiding fails, the copy keeps only the trace fields, never a raw header.
+  const headers = typeof shown === 'object' ? shown.headers : undefined;
+  const payload = typeof shown === 'object' ? shown.payload : shown;
+  return { payload, headers: { ...(headers ?? traceOnly(own)), ...replies, history } };
+}
+
+function traceOnly(headers: MessageHeaders): MessageHeaders {
+  const kept: Record<string, unknown> = {};
+  for (const field of PROTECTED_TRACE_FIELDS) {
+    if (headers[field] !== undefined) kept[field] = headers[field];
   }
-  const headers = { ...(shown.headers ?? own) };
-  return { payload: shown.payload, headers: { ...headers, ...replies, history } };
+  return kept as MessageHeaders;
 }
