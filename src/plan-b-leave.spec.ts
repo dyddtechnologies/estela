@@ -481,7 +481,7 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
       expect(w.events.filter((e) => e.type === 'plan-b.used')).toHaveLength(2);
     });
 
-    it('to: refuses Ask and a Leave value; both have no answer to take on a send step', () => {
+    it('to: an explicit Ask is the default re-send; a Leave value is refused', () => {
       const w = world();
       w.registry.create({ name: 'a', type: 'direct' });
       const findings = (care: Care) => {
@@ -494,9 +494,10 @@ describe('planB mode Leave (SPI-448 gap planb-park)', () => {
         }
         return [];
       };
-      expect(findings({ planB: { channel: 'wa.reply.parked', mode: PlanBMode.Ask } })).toEqual([
-        ['CARE_PART_NOT_ALLOWED', expect.stringContaining('care.planB')],
-      ]);
+      expect(findings({ planB: { channel: 'wa.reply.parked', mode: PlanBMode.Ask } })).toEqual(
+        findings({ planB: { channel: 'wa.reply.parked' } }),
+      );
+      expect(findings({ planB: { channel: 'wa.reply.parked', mode: PlanBMode.Ask } })).toEqual([]);
       expect(
         findings({
           planB: { channel: 'wa.reply.parked', mode: PlanBMode.Leave, value: () => 1 },

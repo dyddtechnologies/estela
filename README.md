@@ -1093,7 +1093,7 @@ Estela-owned header, so its consumer cannot answer the caller. Where it applies:
 | Outbound REST | the request message; the unknown channel fails `bind()` (`CareConfigError`) |
 | Activator | the activator's message; an unknown channel fails when it subscribes (`CareConfigError`) |
 | Flow `handle`, awaited `jump` | the step's message; `value` becomes the payload or the jump reply |
-| Flow `to` | the same hop without reply routing (`value` and `PlanBMode.Ask` are refused there) |
+| Flow `to` | the same hop without reply routing (a `value` is refused there; `PlanBMode.Ask`, written or not, is the 0.9.0 re-send that keeps `replyChannel`) |
 | Saga outbound step | refused, like every plan B |
 
 Invalid combinations fail with `CareConfigError` when the care is resolved: `mode` without a

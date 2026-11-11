@@ -9,7 +9,7 @@ import {
 } from '../resilience/resilience.plan';
 import { CareConfigError, type FlowParameterFinding } from '../resilience/resilience.errors';
 import { planBLeaveRunner } from '../resilience/fallback';
-import { PlanBMode, type Care, type CareRef } from '../resilience/resilience.types';
+import type { Care, CareRef } from '../resilience/resilience.types';
 import type { CareEngine } from '../resilience/runtime';
 import { FlowDefinitionError } from './flow-definition-error';
 import type { FlowOptions, FlowStep, FlowTarget, StepCarePort } from './flow-step';
@@ -109,11 +109,14 @@ function annotationOf(plan: CarePlan): CareAnnotation {
   return { care: describeCare(plan) ?? 'configured', repeatableBy: repeatableByOf(plan) };
 }
 
-/** A `to` step takes a plan B channel with no value; `PlanBMode.Ask` has no answer to take there. */
+/**
+ * A `to` step takes a plan B channel with no value: `PlanBMode.Ask` (the default, written or not) is
+ * its 0.9.0 re-send, and a Leave value has no answer to take on a send step.
+ */
 function isChannelPlanB(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
-  const planB = value as { channel?: unknown; value?: unknown; mode?: unknown };
-  return planB.channel !== undefined && planB.value === undefined && planB.mode !== PlanBMode.Ask;
+  const planB = value as { channel?: unknown; value?: unknown };
+  return planB.channel !== undefined && planB.value === undefined;
 }
 
 /** RS-59 (section 5.5 rows): may this part value sit on this subject's edge? */
