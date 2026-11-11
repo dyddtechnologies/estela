@@ -85,10 +85,92 @@ export function defaultGrpcClassifier(code: number, pushback?: string): Classifi
   return { class: 'unknown' };
 }
 
+const GRPC_DEADLINE_EXCEEDED = 4;
+const GRPC_RESOURCE_EXHAUSTED = 8;
+const GRPC_UNAVAILABLE = 14;
+const GRPC_CODE_NAMES: Readonly<Record<string, number>> = {
+  DEADLINE_EXCEEDED: GRPC_DEADLINE_EXCEEDED,
+  RESOURCE_EXHAUSTED: GRPC_RESOURCE_EXHAUSTED,
+  UNAVAILABLE: GRPC_UNAVAILABLE,
+};
+const QUOTA_DETAIL = /quota/i;
+const QUOTA_FAILURE_TYPE = 'google.rpc.QuotaFailure';
+
+interface GrpcErrorShape {
+  code?: unknown;
+  status?: unknown;
+  details?: unknown;
+  message?: unknown;
+  metadata?: unknown;
+}
+
+function grpcCodeIn(value: unknown): number | undefined {
+  if (typeof value === 'string') return GRPC_CODE_NAMES[value];
+  return Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 16
+    ? (value as number)
+    : undefined;
+}
+
+/**
+ * The gRPC status code of an error read structurally (no `@grpc/grpc-js` import): a numeric `code`
+ * (grpc-js `ServiceError`, nice-grpc, connect) or `status`, or the name of a code this classifier
+ * maps. A `DOMException` is never read: its legacy numeric `code` overlaps the gRPC range.
+ */
+function grpcCodeOf(error: object): number | undefined {
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException) return undefined;
+  const shape = error as GrpcErrorShape;
+  return grpcCodeIn(shape.code) ?? grpcCodeIn(shape.status);
+}
+
+/** Every value of a metadata key: grpc-js `Metadata.get`, or a plain record of values. */
+function metadataValues(metadata: unknown, key: string): string[] {
+  if (typeof metadata !== 'object' || metadata === null) return [];
+  try {
+    const getter = (metadata as { get?: unknown }).get;
+    const raw: unknown =
+      typeof getter === 'function'
+        ? (getter as (k: string) => unknown).call(metadata, key)
+        : (metadata as Record<string, unknown>)[key];
+    const values: unknown[] = Array.isArray(raw) ? raw : [raw];
+    return values.flatMap((value) => {
+      if (typeof value === 'string') return [value];
+      return value instanceof Uint8Array ? [new TextDecoder().decode(value)] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** A quota detail: the status text names a quota, or a `google.rpc.QuotaFailure` detail is attached. */
+function hasQuotaDetail(shape: GrpcErrorShape): boolean {
+  const texts = [shape.details, shape.message].filter((t): t is string => typeof t === 'string');
+  if (texts.some((text) => QUOTA_DETAIL.test(text))) return true;
+  return metadataValues(shape.metadata, 'grpc-status-details-bin').some((value) =>
+    value.includes(QUOTA_FAILURE_TYPE),
+  );
+}
+
+/**
+ * SPI-448 gap grpc-transient: a gRPC error thrown in process. UNAVAILABLE and DEADLINE_EXCEEDED are
+ * transient (an extra try still needs the idempotency gate, RS-36 and RS-60); RESOURCE_EXHAUSTED is
+ * busy, with `grpc-retry-pushback-ms` as by RS-15, unless it carries a quota detail: then it is
+ * unknown, so only the app's classifier can call it quota. Other codes are left to the caller.
+ */
+function classifyGrpcError(error: object): Classification | undefined {
+  const code = grpcCodeOf(error);
+  if (code === GRPC_UNAVAILABLE || code === GRPC_DEADLINE_EXCEEDED) return { class: 'transient' };
+  if (code !== GRPC_RESOURCE_EXHAUSTED) return undefined;
+  const shape = error as GrpcErrorShape;
+  if (hasQuotaDetail(shape)) return { class: 'unknown' };
+  const pushback = metadataValues(shape.metadata, 'grpc-retry-pushback-ms')[0];
+  return defaultGrpcClassifier(code, pushback);
+}
+
 /**
  * RS-17a. Structural classifier of activators, saga outbound steps and flow edges: a REST-like
  * error by the REST table, boolean `transient` flags on the error (RS-17a), inner turned-away
- * calls, anything else unknown.
+ * calls, a gRPC UNAVAILABLE, DEADLINE_EXCEEDED or RESOURCE_EXHAUSTED status (SPI-448), anything
+ * else unknown. Never returns 'quota'.
  */
 export function defaultInProcessClassifier(error: unknown): Classification {
   if (restShape(error) !== undefined) return defaultRestClassifier(error);
@@ -99,12 +181,21 @@ export function defaultInProcessClassifier(error: unknown): Classification {
   if (error instanceof ValveShutError || error instanceof OutOfTimeError) {
     return { class: 'rejected' };
   }
+  return classifyFlags(error) ?? classifyGrpcIfObject(error) ?? { class: 'unknown' };
+}
+
+/** RS-17a flags set by the app on the error: they win over a transport status. */
+function classifyFlags(error: unknown): Classification | undefined {
   const flags = error as { retryable?: unknown; transient?: unknown } | null | undefined;
   if (flags?.transient === true) return { class: 'transient' };
   const retryable = flags?.retryable;
   if (retryable === true) return { class: 'transient' };
   if (retryable === false) return { class: 'rejected' };
-  return { class: 'unknown' };
+  return undefined;
+}
+
+function classifyGrpcIfObject(error: unknown): Classification | undefined {
+  return typeof error === 'object' && error !== null ? classifyGrpcError(error) : undefined;
 }
 
 /** 0.9.0 spelling (section 1): a boolean classifier mapped to transient | rejected. */
