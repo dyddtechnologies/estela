@@ -12,14 +12,14 @@ export type GraphqlOperation = 'query' | 'mutation' | 'subscription';
 export interface InboundSpec {
   channel: string;
   transport: InboundTransport;
-  /** default false — true requires ReplyGateway (Fase 8). */
+  /** Default false; true requires ReplyGateway (phase 8). */
   requestReply?: boolean;
   timeoutMs?: number;
-  /** default 'return' con fallback a body (spec sec.7.2). */
+  /** Default 'return', falling back to the body (spec sec.7.2). */
   payload?: 'return' | 'body';
-  /** default true en REST (swagger helpers, Parte B). */
+  /** Default true on REST (swagger helpers, part B). */
   swagger?: boolean;
-  /** Solo GraphQL (ADR-017). */
+  /** GraphQL only (ADR-017). */
   operation?: GraphqlOperation;
   /** Reply contract of this endpoint. Default: module default, else `'envelope'`. */
   reply?: InboundReplyOption;
@@ -35,7 +35,7 @@ export function readInboundSpec(handler: object): InboundSpec | undefined {
   return Reflect.getMetadata(INBOUND_SPEC_METADATA, handler) as InboundSpec | undefined;
 }
 
-// ---------- Shapes de respuesta (spec sec.7.2) ----------
+// ---------- Response shapes (spec sec.7.2) ----------
 
 export interface InboundAcceptedResponse {
   status: 'accepted';

@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
 /**
- * Domain puro del message (spec sec.4).
- * Rules del plan sec.9.1: los helpers Never mutan el message de input —
- * always devuelven copias (Prototype, GoF).
+ * Pure message domain (spec sec.4).
+ * Rules of plan sec.9.1: helpers never mutate the input message;
+ * they always return copies (Prototype, GoF).
  */
 
-/** Un hop traversed por el message (spec sec.4). */
+/** One hop the message went through (spec sec.4). */
 export interface HistoryHop {
   channel: string;
   component?: string;
@@ -14,7 +14,7 @@ export interface HistoryHop {
   at: number;
 }
 
-/** Descriptor de hop; `at` se genera si falta. */
+/** Hop descriptor; `at` is generated when missing. */
 export interface HistoryHopInput {
   channel: string;
   component?: string;
@@ -46,7 +46,7 @@ export interface IntegrationMessage<T = unknown> {
   headers: MessageHeaders;
 }
 
-/** Init parcial para `createMessage`; keys desconocidas pasan como headers custom. */
+/** Partial init for `createMessage`; unknown keys pass through as custom headers. */
 export interface MessageHeadersInit {
   id?: string;
   timestamp?: number;
@@ -67,26 +67,26 @@ export interface MessageHeadersInit {
 }
 
 /**
- * Precedencia del `replyChannel` del hop (plan sec.8.1 — obligatoria):
- * - `'inherit'`: copy el del padre (to/route — el activator destino puede cerrar el inbound).
- * - `'none'`: sin reply (wireTap/fanout/publish — never cierra el inbound).
- * - `string`: channel efimero propio (jump -> `reply.<uuid>`).
+ * `replyChannel` precedence of the hop (plan sec.8.1, mandatory):
+ * - `'inherit'`: copy the parent's (to/route: the target activator may close the inbound).
+ * - `'none'`: no reply (wireTap/fanout/publish: never closes the inbound).
+ * - `string`: its own ephemeral channel (jump -> `reply.<uuid>`).
  */
 export type ReplyHopOption = 'inherit' | 'none' | (string & {});
 
-/** Marcador internal del hop efimero de jump (ADR-014) — informativo, no publico. */
+/** Internal marker of the ephemeral jump hop (ADR-014); informational, not public. */
 export const JUMP_REPLY_HEADER = 'x-integration-jump-reply';
 
 export interface NextHopOptions {
   reply?: ReplyHopOption;
 }
 
-/** ID unico; `crypto.randomUUID` con fallback simple para entornos degradados. */
+/** Unique id; `crypto.randomUUID` with a simple fallback for degraded environments. */
 export function newId(): string {
   try {
     return randomUUID();
   } catch {
-    // eslint-disable-next-line sonarjs/pseudo-random -- fallback solo si no hay crypto
+    // eslint-disable-next-line sonarjs/pseudo-random -- fallback only when crypto is missing
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   }
 }
@@ -103,9 +103,9 @@ function makeHop(hop: HistoryHopInput): HistoryHop {
 }
 
 /**
- * Genera `id`, `traceId` (fallback = id), `spanId`, `correlationId` (fallback = id)
- * e `history: []` (spec sec.4). Headers provistos tienen precedencia; las keys
- * desconocidas se copian como headers custom.
+ * Generates `id`, `traceId` (fallback = id), `spanId`, `correlationId` (fallback = id)
+ * and `history: []` (spec sec.4). Given headers take precedence; unknown keys are
+ * copied as custom headers.
  */
 export function createMessage<T>(payload: T, init?: MessageHeadersInit): IntegrationMessage<T> {
   const h: MessageHeadersInit = init ?? {};
@@ -140,7 +140,7 @@ export function copyMessage<T>(msg: IntegrationMessage<T>): IntegrationMessage<T
   return { payload: msg.payload, headers: { ...msg.headers, history: [...msg.headers.history] } };
 }
 
-/** Anexa un hop conservando la id (uso del dispatcher al pasar por un channel). */
+/** Appends a hop and keeps the id (used by the dispatcher when passing a channel). */
 export function recordHop<T>(
   msg: IntegrationMessage<T>,
   hop: HistoryHopInput,
@@ -152,10 +152,10 @@ export function recordHop<T>(
 }
 
 /**
- * New hop del pipeline: keeps `traceId`, `correlationId`, `idempotencyKey`,
- * `jumpReplies` (y extras); new `id`/`spanId`; `causationId = prev.id`;
- * `parentSpanId = prev.spanId`; append a history (spec sec.4).
- * El `replyChannel` se decide por `options.reply` (plan sec.8.1).
+ * New pipeline hop: keeps `traceId`, `correlationId`, `idempotencyKey`,
+ * `jumpReplies` (and extras); new `id`/`spanId`; `causationId = prev.id`;
+ * `parentSpanId = prev.spanId`; appends to history (spec sec.4).
+ * `options.reply` decides the `replyChannel` (plan sec.8.1).
  */
 export function nextHop<T>(
   msg: IntegrationMessage<T>,

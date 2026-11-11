@@ -46,7 +46,7 @@ import {
   type InboundSpec,
 } from './inbound.types';
 
-/** Port request/reply — implementado por ReplyGateway en Fase 8. */
+/** Request/reply port, implemented by ReplyGateway (phase 8). */
 export interface RequestReplyPort {
   sendAndReceive(
     channel: string,
@@ -84,14 +84,14 @@ function hasMessageReply(port: RequestReplyPort): port is RequestReplyPort & Mes
   return typeof (port as Partial<MessageReplyPort>).sendAndReceiveMessage === 'function';
 }
 
-/** Token DI del bundle de deps — resuelve en cualquier modulo (global). */
+/** DI token of the deps bundle; resolves in any module (global). */
 export const INBOUND_DEPS = 'INTEGRATION_INBOUND_DEPS';
 
 /**
- * NestInterceptor (spec sec.7.2): executes el handler (pipes/guards intactos),
- * extrae payload + headers crudos, mapea tracing y despacha:
- * requestReply -> ReplyGateway (`{status:'ok'}`) | si no -> channel (`{status:'accepted'}`)
- * | replay de idempotency -> `{status:'duplicate'}`.
+ * NestInterceptor (spec sec.7.2): runs the handler (pipes and guards intact),
+ * extracts the payload and raw headers, maps tracing and dispatches:
+ * requestReply -> ReplyGateway (`{status:'ok'}`) | otherwise -> channel (`{status:'accepted'}`)
+ * | idempotency replay -> `{status:'duplicate'}`.
  *
  * Since 0.6.0 the reply shape and the idempotency rules are a per-endpoint plan
  * (`InboundSpec.reply` / `InboundSpec.idempotency` over the module defaults); with nothing
