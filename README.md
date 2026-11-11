@@ -823,7 +823,7 @@ A `Care` holds any of these parts, plus a care-wide `classify` hook:
 | `valve` | Shuts traffic to a dependency that keeps failing, then lets probes through. | `failPercent`, `minCalls`, `lookBack`, `shutMs`, `probes`, `countOn`, `onQuota`, `quotaShutMs`, `key`, `state` |
 | `lanes` | How many calls run at the same time. | `count`, `waitlist`, `waitlistMs` |
 | `pace` | How many calls start per second. | `perSecond`, `burst`, `waitMs`, `key`, `state`, `soloPerSecond`, `replicas` |
-| `planB` | What answers when the call still fails. | `value` or `channel`, `on`, `cacheable` |
+| `planB` | What answers when the call still fails. | `value` or `channel`, `mode` (`PlanBMode.Ask` \| `PlanBMode.Leave`), `on`, `cacheable` |
 
 A `Care` with no part runs the call once, directly, with no timer. The engine composes the parts
 in one fixed order, outermost first, for every edge:
@@ -1030,6 +1030,55 @@ inbound interceptor does the same, so a duplicate request with `onDuplicate: 're
 instead of replaying plan B. `planB.cacheable: true` opts out. Never use plan B to hide the failure
 of a side effect.
 
+#### Leaving the message on a channel: `PlanBMode.Leave`
+
+`planB: { channel }` asks: it is request/reply, so the channel needs a consumer that answers.
+To park the message instead (a queue drained later, a dead-letter store), set
+`mode: PlanBMode.Leave`. Estela sends the message to the channel once, does not wait for an answer,
+and counts the call as handled by plan B: `plan-b.used` is emitted, the call ends with outcome
+`plan-b`, the result is never stored for an idempotency claim, and a reply carries `planB: true`.
+An optional `value` is what the caller gets after the message is left; without it the answer is
+`undefined` (an activator then answers nobody).
+
+```ts
+@ServiceActivator('wa.send', {
+  care: {
+    tries: { max: 3, requireIdempotencyKey: true },
+    planB: {
+      channel: 'wa.reply.parked',                   // e.g. a queue drained by a worker
+      mode: PlanBMode.Leave,
+      value: () => ({ status: 'parked' }),          // optional answer for the caller
+    },
+  },
+})
+```
+
+| | `PlanBMode.Ask` (default) | `PlanBMode.Leave` |
+|---|---|---|
+| Channel use | request/reply; its answer is the plan B answer | one send; no answer awaited |
+| `value` | not with `channel` | optional: the answer after the message is left |
+| `cacheable: true` | allowed | refused |
+| A failed send or no answer | `PlanBFailedError`, `plan-b.failed` | `PlanBFailedError`, `plan-b.failed` (a queue accepts with no consumer) |
+
+The left message has the payload, the trace (`traceId`, `correlationId`, `causationId` = the
+failed message id), the `idempotencyKey` and the message's own headers, so a drain can re-send it
+with the same key. It never has reply routing (`replyChannel`, the jump reply marker) or any other
+Estela-owned header, so its consumer cannot answer the caller. Where it applies:
+
+| Edge | `PlanBMode.Leave` |
+|---|---|
+| Outbound REST | the request message; the unknown channel fails `bind()` (`CareConfigError`) |
+| Activator | the activator's message; an unknown channel fails when it subscribes (`CareConfigError`) |
+| Flow `handle`, awaited `jump` | the step's message; `value` becomes the payload or the jump reply |
+| Flow `to` | the same hop without reply routing (`value` and `PlanBMode.Ask` are refused there) |
+| Saga outbound step | refused, like every plan B |
+
+Invalid combinations fail with `CareConfigError` when the care is resolved: `mode` without a
+`channel`, an unknown `mode`, `value` with `channel` under `PlanBMode.Ask`, and
+`cacheable: true` with `PlanBMode.Leave`. On flows, an unknown channel is
+`PLAN_B_CHANNEL_MISSING`. The graph summary says `plan-b leave`. A `PlanBMode.Ask` plan B and a
+plan B without `mode` behave exactly as before.
+
 ### Inbound care: 429
 
 `@InboundRest`, `@InboundGrpc`, `@InboundGraphQL` and `InboundDefaults` accept `care` with `lanes`
@@ -1132,7 +1181,7 @@ tries left and the remaining `totalMs` only narrow a resolved value.
 |---|---|---|
 | `handle(fn, opts?)` | `flow-handle` | all; `planB` `value` or `channel` |
 | `jump(channel, opts?)`, `jumpTo(dests, opts?)` | `flow-jump` | all, per target; `planB` only on awaited targets |
-| `to(channel, opts?)` | `flow-send` | all but `planB`, except `planB: { channel }` (a plain send of the same hop) |
+| `to(channel, opts?)` | `flow-send` | all but `planB`, except `planB: { channel }` (a plain send of the same hop) and `planB: { channel, mode: PlanBMode.Leave }` (the hop without reply routing) |
 | `publish`, `fanoutTo`, `route` | `flow-send` | all but `planB`, per target |
 | `filter`, `transform`, `headers`, `reply`, `wireTap` | none | refused at build (`wireTap` never: `WIRETAP_CARE`) |
 

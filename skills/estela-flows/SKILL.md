@@ -98,7 +98,8 @@ sets it, never merged field by field; `{ use, ...over }` is deep-merged once ins
 `false` cuts every level below. Tries left and `patience.totalMs` only narrow.
 
 Per edge: `handle` → all parts, `planB` `value` or `channel`; `jump`/`jumpTo` → all, `planB` only
-on awaited targets; `to` → all but `planB`, except `planB: { channel }` (plain send);
+on awaited targets; `to` → all but `planB`, except `planB: { channel }` (plain send) and
+`planB: { channel, mode: PlanBMode.Leave }` (the hop without reply routing, so a parking consumer never answers);
 `publish`/`fanoutTo`/`route` → all but `planB`. A part not allowed at L4 fails boot
 (`CARE_PART_NOT_ALLOWED`); inherited from L1..L3 it is dropped with one warning (`CARE_PART_DROPPED`).
 
