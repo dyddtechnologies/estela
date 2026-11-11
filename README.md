@@ -303,8 +303,17 @@ IntegrationModule.forRoot({
   references one.
 - **Levels:** module (`forRoot`), `inbound.privacy` (every endpoint), `ChannelSpec.privacy`, then
   `@InboundRest({ privacy })` (and the other inbound decorators), `@ServiceActivator(ch, { privacy })`
-  and `SagaRunnerOptions.privacy`. A flow's trail follows its source channel and the channels it
-  sends to.
+  and `SagaRunnerOptions.privacy`. In flows: `IntegrationFlow.from(source, { privacy })`, a step's
+  `{ privacy }` and a `fanoutTo`/`jumpTo` target's `privacy`.
+- **Flows:** a step's trail (`flow:<flow>#<step id>`) unions the module, the source channel, the
+  flow and the step; a send step adds its destination channels and target levels, a wire tap its
+  tap channel. When a step fails, the flow's error envelope and failure record use that step's
+  levels (a `route` adds the channel that failed). A `wait: false` envelope uses its own target
+  only, so a sibling target's rules never apply to it. `remember` and `Reach.Delivery` are refused
+  at flow level, and boot prints one `privacy scope 'flow:…'` line per flow and step that explicit
+  privacy reaches (names and counts, never a rule). When care and privacy findings mix at boot, one
+  `FlowDefinitionError` carries them all (`concern: 'privacy'` or `'care'`); privacy findings alone
+  throw `PrivacyConfigError`.
 - **Added headers:** values set by a `headers` step and transport headers an endpoint copies
   with `carryHeaders` follow the same `headers` rules on every trail output; the graph shows only
   their names.
