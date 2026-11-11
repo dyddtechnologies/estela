@@ -103,7 +103,7 @@ export const RESERVED_HEADER_NAMES: readonly string[] = Object.freeze([
 
 const RESERVED_HEADERS = new Set(RESERVED_HEADER_NAMES);
 
-/** True when `name` is one of `RESERVED_HEADER_NAMES` (exact, case-sensitive). */
+/** True when `name` is one of `RESERVED_HEADER_NAMES` (exact match, letter case included). */
 export function isReservedHeader(name: string): boolean {
   return RESERVED_HEADERS.has(name);
 }

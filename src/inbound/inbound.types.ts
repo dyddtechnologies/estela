@@ -29,7 +29,7 @@ export interface InboundSpec {
   /** Inbound care (RS-37): `lanes` and `pace` only; refused on Rabbit. */
   care?: CareRefOf<InboundCare>;
   /**
-   * Opt-in allowlist of transport headers (HTTP headers, gRPC metadata) copied into message
+   * Opt-in list of the transport headers (HTTP headers, gRPC metadata) copied into message
    * headers; nothing else is copied. A list keeps each name; a map renames
    * (`{ 'x-organization-id': 'organizationId' }`). Transport names match case-insensitively;
    * a missing header is skipped. Reserved message headers are refused; refused on Rabbit.
