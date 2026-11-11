@@ -1086,7 +1086,14 @@ An optional `value` is what the caller gets after the message is left; without i
 The left message has the payload, the trace (`traceId`, `correlationId`, `causationId` = the
 failed message id), the `idempotencyKey` and the message's own headers, so a drain can re-send it
 with the same key. It never has reply routing (`replyChannel`, the jump reply marker) or any other
-Estela-owned header, so its consumer cannot answer the caller. Where it applies:
+Estela-owned header, so its consumer cannot answer the caller.
+
+Consume the parking channel with a plain subscriber (`registry.get(name).subscribe(...)`), not
+with a `@ServiceActivator`. An activator claims the `idempotencyKey` the left message keeps, so
+when a drain re-sends the message, fails again and plan B leaves it a second time, the activator
+treats it as a duplicate and the message is dropped without a trace.
+
+Where it applies:
 
 | Edge | `PlanBMode.Leave` |
 |---|---|
