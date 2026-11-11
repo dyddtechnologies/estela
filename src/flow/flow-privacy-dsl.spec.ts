@@ -153,6 +153,9 @@ const channels = [
   { name: 'audit', type: 'pubsub' as const },
   { name: 'refuse', type: 'direct' as const },
   { name: 'sink', type: 'pubsub' as const },
+  { name: 'in', type: 'direct' as const },
+  ...['a', 'd', 'e', 'f', 'g'].map((name) => ({ name, type: 'pubsub' as const })),
+  ...['b', 'c'].map((name) => ({ name, type: 'direct' as const })),
 ];
 
 async function boot(flows: FlowDefinition[]): Promise<TestingModule> {
@@ -248,6 +251,29 @@ describe('flow DSL compatibility (SD-65)', () => {
     expect(errorForTrail).not.toHaveBeenCalled();
     forTrail.mockRestore();
     errorForTrail.mockRestore();
+    await mod.close();
+  });
+
+  it('SD-65 every DSL step without options runs no privacy work per message', async () => {
+    const mod = await boot([{ name: 'bare', build: () => everyStepBare() }]);
+    const registry = mod.get(ChannelRegistry);
+    for (const name of ['b', 'c']) {
+      registry
+        .get(name)
+        .subscribe((msg) => registry.send(String(msg.headers.replyChannel), { from: name }));
+    }
+    const delivered = ['audit', 'a', 'd', 'e', 'f'].map((name) => collect(mod, name));
+    const spies = (['forTrail', 'errorForTrail', 'textForTrail', 'forDelivery'] as const).map(
+      (method) => jest.spyOn(PrivacyEngine.prototype, method),
+    );
+    const payload = { amount: 1 };
+    await registry.send('in', payload);
+    await settle();
+    for (const spy of spies) {
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    }
+    for (const seen of delivered) expect(seen[0]?.payload).toBe(payload);
     await mod.close();
   });
 });

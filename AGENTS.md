@@ -7,8 +7,8 @@
   **MUST pass before you finish any task.**
 - The e2e HTTP tests (`test/orders.e2e.spec.ts`, `test/outbound-rest.e2e.spec.ts`,
   `test/resilience.e2e.spec.ts`, `test/privacy-leak.e2e.spec.ts`,
-  `test/privacy-references.e2e.spec.ts`) bind loopback sockets: run them
-  with network permissions.
+  `test/privacy-references.e2e.spec.ts`, `test/privacy-compat.e2e.spec.ts`) bind loopback
+  sockets: run them with network permissions.
 - The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
   set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
   Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
