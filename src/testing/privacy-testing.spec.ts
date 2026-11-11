@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { ChannelRegistry } from '../channel-registry';
 import { createMessage } from '../message';
 import { TraceContext } from '../trace/trace-context';
@@ -7,7 +6,7 @@ import { TrailOutput } from '../sensitive/privacy-engine';
 import { captureTrail, expectNoLeak, LeakForm, leakForms } from './index';
 
 const SECRET = 'sk_live_4f9a8b7c6d5e';
-const prefix = createHash('sha256').update(SECRET).digest('hex').slice(0, 12);
+const LABEL = `secrets[0] (${SECRET.length} chars)`;
 
 function failure(fn: () => void): string {
   try {
@@ -34,7 +33,7 @@ describe('privacy testing helpers (4.9)', () => {
     const message = failure(() => expectNoLeak(shifted, [SECRET]));
     expect(message).toContain("trail output 'log'");
     expect(message).toContain('form base64@1');
-    expect(message).toContain(`sha256:${prefix}`);
+    expect(message).toContain(`${LABEL} leaked`);
     const clean = captureTrail();
     clean.logger.log({ token: '[HIDDEN:secrets.keys]' });
     expect(() => expectNoLeak(clean, [SECRET])).not.toThrow();
@@ -46,7 +45,14 @@ describe('privacy testing helpers (4.9)', () => {
     capture.logger.error(SECRET);
     const message = failure(() => expectNoLeak(capture, [SECRET]));
     for (const needle of leakForms(SECRET).values()) expect(message).not.toContain(needle);
-    expect(failure(() => expectNoLeak(captureTrail(), ['abc12']))).not.toContain('abc12');
+    const short = failure(() => expectNoLeak(captureTrail(), [SECRET, 'abc12']));
+    expect(short).not.toContain('abc12');
+    expect(short).toContain('secrets[1] (5 chars)');
+    const second = captureTrail();
+    second.logger.log(`other ${SECRET}`);
+    expect(failure(() => expectNoLeak(second, ['canary-not-written', SECRET]))).toContain(
+      `secrets[1] (${SECRET.length} chars) leaked`,
+    );
     expect(failure(() => expectNoLeak(captureTrail({ keepOriginals: true }), [SECRET]))).toContain(
       'keepOriginals',
     );
@@ -81,6 +87,6 @@ describe('privacy testing helpers (4.9)', () => {
       [TrailOutput.WireTap, 'channel audit'],
     ]);
     expect(capture.writes[1]?.text).toContain('boom');
-    expect(() => expectNoLeak(capture, [SECRET])).toThrow(`sha256:${prefix}`);
+    expect(() => expectNoLeak(capture, [SECRET])).toThrow(`${LABEL} leaked`);
   });
 });

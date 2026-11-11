@@ -14,7 +14,6 @@ import {
 } from '@nestjs/common';
 import { ExecutionContextHost } from '@nestjs/core/helpers/execution-context-host';
 import { Test } from '@nestjs/testing';
-import { createHash } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { lastValueFrom, of } from 'rxjs';
@@ -248,18 +247,20 @@ async function startUpstream(): Promise<Upstream> {
 
 // ---------- Leak assertions ----------
 
-const sha = (value: string): string =>
-  createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 12);
-
-/** Fails when a canary, in any `LeakForm`, is in `text`; never prints the canary. */
+/**
+ * Fails when a canary, in any `LeakForm`, is in `text`. The canary is named by its index in
+ * `canaries` and its length, never by the value or anything derived from it, matching `expectNoLeak`.
+ */
 function expectClean(label: string, text: string, canaries: readonly string[] = CANARIES): void {
-  for (const canary of canaries) {
+  canaries.forEach((canary, index) => {
     for (const [form, needle] of leakForms(canary)) {
       if (needle.length >= 4 && text.includes(needle)) {
-        throw new Error(`canary sha256:${sha(canary)} leaked to ${label} in form ${form}`);
+        throw new Error(
+          `canaries[${index}] (${canary.length} chars) leaked to ${label} in form ${form}`,
+        );
       }
     }
-  }
+  });
 }
 
 /** The writes recorded after `mark`, as a capture `expectNoLeak` accepts. */

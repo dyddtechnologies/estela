@@ -1644,8 +1644,9 @@ Nest.
 Privacy helpers: `captureTrail()` records every trail write (`capture.logger` for Nest,
 `capture.store(store)`, `capture.ledger(ledger)`, `capture.channel(registry, 'error.channel')`), and
 `expectNoLeak(capture, secrets)` fails when a secret appears in any `LeakForm` (as is, base64 and
-base64url at three offsets, URI, form and JSON encodings) without printing it (the error names a
-SHA-256 prefix). `captureTrail({ keepOriginals: true })` is refused by `expectNoLeak`.
+base64url at three offsets, URI, form and JSON encodings) without printing it (the error names the
+secret by its index in `secrets` and its length, e.g. `secrets[2] (24 chars)`, never a value or a
+hash of it). `captureTrail({ keepOriginals: true })` is refused by `expectNoLeak`.
 
 ```ts
 import { captureTrail, expectNoLeak } from '@estela/nest/testing';

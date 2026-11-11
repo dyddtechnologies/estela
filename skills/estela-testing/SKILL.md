@@ -108,7 +108,8 @@ expectNoLeak(capture, [jwt, apiKey, phone, email, card, idempotencyKey]);
 ```
 
 - `expectNoLeak` checks every `LeakForm` (as is, base64/base64url at offsets 0..2, URI, form, JSON)
-  and names only a SHA-256 prefix, never the secret. Use canaries, never real secrets.
+  and names only the secret's index and length (`secrets[1] (20 chars)`), never the secret or a
+  hash of it. Use canaries, never real secrets.
 - Assert both sides: the trail holds `[HIDDEN:<rule>]` / `fp:` tokens, while the delivered message
   and the caller's reply hold the real values (`expect(charged).toEqual([order])`).
 - An inbound handler's own throw reaches Nest's `ExceptionsHandler`, an app surface: install a

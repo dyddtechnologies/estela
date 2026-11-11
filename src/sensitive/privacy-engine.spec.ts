@@ -1,4 +1,4 @@
-/* eslint-disable sonarjs/super-linear-regex, sonarjs/slow-regex, security/detect-unsafe-regex -- unsafe patterns are fixtures for the analysis */
+/* eslint-disable sonarjs/super-linear-regex, security/detect-unsafe-regex -- unsafe patterns are fixtures for the analysis */
 import { KeyCase, Pack, Reach, Show, type PrivacyModuleOptions } from './privacy.types';
 import { PrivacyEngine, TrailOutput, urlForTrail, type PrivacyLogger } from './privacy-engine';
 import {
@@ -387,12 +387,15 @@ describe('PrivacyEngine: marking and patterns', () => {
       patterns: [{ name: 'test.look', regex: /(?<=x)y/ }],
     });
     expect(error.message).toContain("rule 'test.look' is refused by regex engine 'fake-re2'");
-    const engine = await PrivacyEngine.compile({
-      regexEngine: fake,
-      patterns: [{ name: 'test.nested', regex: /(a+)+b/ }],
-    });
-    expect(compiled).toContain('(a+)+b/g');
-    expect(engine.textForTrail('aab', LOG)).toBe('[HIDDEN:test.nested]');
+    // Nested unbounded quantifiers with no rejecting suffix: the native analyzer refuses the rule,
+    // so reaching the engine proves the port bypasses that analysis, yet the literal can never
+    // backtrack exponentially when the fake runs it natively (a trailing literal would).
+    const nested = { name: 'test.nested', regex: /(a+)+/ };
+    const native = await configError({ patterns: [nested] });
+    expect(native.message).toContain("rule 'test.nested' is unsafe: nested unbounded quantifiers");
+    const engine = await PrivacyEngine.compile({ regexEngine: fake, patterns: [nested] });
+    expect(compiled).toContain('(a+)+/g');
+    expect(engine.textForTrail('aab', LOG)).toBe('[HIDDEN:test.nested]b');
   });
 
   it('SD-24 confirm leaves rejected matches as they are', async () => {
