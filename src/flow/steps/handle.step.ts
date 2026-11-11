@@ -22,8 +22,9 @@ export class HandleStep implements FlowStep {
       care === undefined
         ? await this.fn(ctx.msg.payload, ctx.msg)
         : (await care.run(ctx.msg, () => this.call(ctx))).value;
-    if (out === undefined) return { action: 'continue', msg: ctx.msg };
-    return { action: 'continue', msg: { payload: out, headers: ctx.msg.headers } };
+    const msg = out === undefined ? ctx.msg : { payload: out, headers: ctx.msg.headers };
+    // SD-50: hidden after care ran, so a DeliveryCopyError is never retried (SD-51).
+    return { action: 'continue', msg: ctx.trail?.deliver(msg) ?? msg };
   }
 
   private call(ctx: FlowStepContext): Promise<unknown> {

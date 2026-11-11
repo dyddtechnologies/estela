@@ -4,10 +4,20 @@ import type { MessageHeadersInit } from '../message';
 import {
   decideFailureAction,
   InboundIdempotencyInFlightError,
+  outcomeOnlyFailure,
   readStoredFailure,
   wrapStoredFailure,
   type InboundFailurePolicy,
 } from './inbound.failure';
+import type { PrivacyEngine } from '../sensitive/privacy-engine';
+import { Remember } from '../sensitive/privacy.types';
+import {
+  OUTCOME_ONLY_RECORD_KEY,
+  SEALED_RECORD_KEY,
+  type RecordCodec,
+  type RecordSealer,
+} from '../sensitive/sealed-record';
+import { storedError } from '../trace/trail';
 import {
   InboundError,
   type InboundClientKeyFn,
@@ -57,6 +67,15 @@ export interface InboundIdempotencyPlan {
   onInFlight: 'duplicate' | 'reject' | InboundInFlightErrorFactory;
   failure: InboundFailurePolicy;
   codec: InboundFailureCodec;
+  /** What records keep (SPI-433, 7.3, 8.2); absent = records as in 0.9.0. */
+  records?: InboundRecords;
+}
+
+/** The record codec of an endpoint, its engine and its privacy scope (`inbound:<channel>`). */
+export interface InboundRecords {
+  engine: PrivacyEngine;
+  scope: string;
+  codec: RecordCodec;
 }
 
 export interface InboundStorageKey {
@@ -66,7 +85,13 @@ export interface InboundStorageKey {
 
 export type InboundClaim =
   | { status: 'skipped' }
-  | { status: 'acquired'; plan: InboundIdempotencyPlan; at: InboundStorageKey }
+  | {
+      status: 'acquired';
+      plan: InboundIdempotencyPlan;
+      at: InboundStorageKey;
+      /** Encoder fetched before the claim (SD-32); absent = records as in 0.9.0. */
+      sealer?: RecordSealer;
+    }
   | { status: 'repeat'; repeat: InboundRepeat };
 
 /** How a repeated key is answered (see the repeat matrix in the README). */
@@ -203,6 +228,46 @@ function resolveRepeat(
   throw plan.onInFlight(ctx);
 }
 
+/** The error a `fail` record keeps (7.3): hidden unless the endpoint remembers everything. */
+function failRecord(plan: InboundIdempotencyPlan, error: unknown): unknown {
+  const records = plan.records;
+  if (records === undefined) return error;
+  return storedError(records.engine, error, { scope: records.scope }, records.codec.remember);
+}
+
+/** `onFailure: 'store'` (8.2): serialized, then outcome-only, hidden or sealed per `remember`. */
+function storedFailureRecord(
+  claim: Extract<InboundClaim, { status: 'acquired' }>,
+  error: unknown,
+): Record<string, unknown> {
+  const { plan, at, sealer } = claim;
+  const serialized = plan.codec.serialize(error);
+  if (plan.records?.codec.remember === Remember.OutcomeOnly) {
+    return wrapStoredFailure(outcomeOnlyFailure(serialized));
+  }
+  const record = wrapStoredFailure(serialized);
+  return sealer === undefined ? record : sealer.encode(at.scope, at.key, record);
+}
+
+/** A completed record as the endpoint wrote it; `Remember.OutcomeOnly` answers no result. */
+async function decodeRecord(
+  plan: InboundIdempotencyPlan,
+  at: InboundStorageKey,
+  record: IdempotencyRecord | undefined,
+): Promise<IdempotencyRecord | undefined> {
+  const result = record?.result;
+  if (record === undefined || result === undefined) return record;
+  if (result[SEALED_RECORD_KEY] === undefined && result[OUTCOME_ONLY_RECORD_KEY] === undefined) {
+    return record;
+  }
+  const codec = plan.records?.codec;
+  const decoded = codec === undefined ? undefined : await codec.decode(at.scope, at.key, result);
+  if (decoded === undefined || ('outcomeOnly' in decoded && decoded.outcomeOnly === true)) {
+    return { ...record, result: {} };
+  }
+  return { ...record, result: decoded };
+}
+
 /**
  * Claim lifecycle of one inbound request: `claim` before the dispatch, then `succeed` or
  * `failed`. Stateless apart from the once-per-scope warning.
@@ -220,21 +285,28 @@ export class InboundIdempotencyGate {
     if (plan === undefined) return { status: 'skipped' };
     const at = await resolveStorageKey(plan, ctx);
     if (at === undefined) return { status: 'skipped' };
+    // SD-32: the seal key is fetched before the claim; a provider failure claims nothing.
+    const sealer = await plan.records?.codec.prepare();
     if (await plan.store.begin(at.scope, at.key, plan.ttlMs)) {
-      return { status: 'acquired', plan, at };
+      return sealer === undefined
+        ? { status: 'acquired', plan, at }
+        : { status: 'acquired', plan, at, sealer };
     }
-    const record = await plan.store.get(at.scope, at.key);
+    const record = await decodeRecord(plan, at, await plan.store.get(at.scope, at.key));
     return { status: 'repeat', repeat: resolveRepeat(plan, record, ctx, at.scope) };
   }
 
   /** The work is committed: a failing `complete` keeps the key blocked, never releases it. */
   async succeed(claim: InboundClaim, record: Record<string, unknown>): Promise<void> {
     if (claim.status !== 'acquired') return;
-    const { plan, at } = claim;
+    const { plan, at, sealer } = claim;
+    // `{ accepted, id }` holds generated ids only and is stored as it is (7.3).
+    const encode = sealer !== undefined && record.accepted !== true;
     try {
-      await plan.store.complete(at.scope, at.key, record);
+      const stored = encode ? sealer.encode(at.scope, at.key, record) : record;
+      await plan.store.complete(at.scope, at.key, stored);
     } catch (error) {
-      await plan.store.fail(at.scope, at.key, error).catch(() => undefined);
+      await plan.store.fail(at.scope, at.key, failRecord(plan, error)).catch(() => undefined);
       throw error;
     }
   }
@@ -252,24 +324,23 @@ export class InboundIdempotencyGate {
     if (claim.status !== 'acquired') return;
     const { plan, at } = claim;
     try {
-      if (await this.settle(plan, at, error, ctx)) return;
+      if (await this.settle(claim, error, ctx)) return;
     } catch {
       // Policy errors must not mask the business error.
     }
-    await plan.store.fail(at.scope, at.key, error).catch(() => undefined);
+    await plan.store.fail(at.scope, at.key, failRecord(plan, error)).catch(() => undefined);
   }
 
   /** True when the key was released or the failure stored; false means `keep`. */
   private async settle(
-    plan: InboundIdempotencyPlan,
-    at: InboundStorageKey,
+    claim: Extract<InboundClaim, { status: 'acquired' }>,
     error: unknown,
     ctx: InboundKeyContext,
   ): Promise<boolean> {
+    const { plan, at } = claim;
     const action = await decideFailureAction(plan.failure, error, ctx);
     if (action === 'store') {
-      const record = wrapStoredFailure(plan.codec.serialize(error));
-      await plan.store.complete(at.scope, at.key, record);
+      await plan.store.complete(at.scope, at.key, storedFailureRecord(claim, error));
       return true;
     }
     if (action !== 'release') return false;

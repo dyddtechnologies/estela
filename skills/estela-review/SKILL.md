@@ -50,6 +50,18 @@ Reject the PR if ANY of these fail:
 - [ ] A jump with extra tries toward a keyed activator whose `eachTryMs` is not longer than the
       activator's work.
 - [ ] Channel care and the activator on that channel both trying again (`TRIES_STACKED` at boot).
+- [ ] A payload or upstream error written to an app log without `privacy.forLog(...)`, or an
+      exception filter that logs the raw error instead of `privacy.errorForTrail(...)`.
+- [ ] A replayable endpoint (`onDuplicate: 'replay'`, keyed activator, idempotent saga) with no
+      deliberate `remember`; `Remember.AsShown` used as a replay default; `Remember.Everything`
+      without a real `rememberReason`.
+- [ ] Idempotency keys, valve or pace keys built from personal data (phone, email, document ids)
+      instead of opaque ids.
+- [ ] A `TapCopy.Original` tap, an `exempt` entry or a `Show.Ends` on a customer value without a
+      reason that would survive an audit; `Show.Fingerprint` for customer numbers is the default.
+- [ ] A trail writer that mutates the delivered message, or a new trail writer with no
+      `expectNoLeak` test.
+- [ ] A change to what a built-in pack rule matches without a corpus test and a pack version bump.
 - [ ] Missing tests for the touched invariant (error semantics + precedence always have tests).
 
 Approve checklist: `npm run verify` green · invariants intact · graph/`describe()` updated

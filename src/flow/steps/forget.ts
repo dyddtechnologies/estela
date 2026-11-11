@@ -8,13 +8,16 @@ import { serializeError, type FlowStepContext } from '../flow-step';
  */
 export function reportFireAndForget(
   ctx: FlowStepContext,
-  channel: string,
+  target: { channel: string; index: number },
   promise: Promise<void>,
   msg: IntegrationMessage,
 ): void {
+  const { channel, index } = target;
   void promise.catch((error: unknown) => {
+    const body = serializeError(error);
+    const shown = ctx.trail === undefined ? body : ctx.trail.envelopeBody(body, index);
     const envelope = createMessage(
-      { fireAndForget: true, channel, error: serializeError(error), flow: ctx.flowName },
+      { fireAndForget: true, channel, error: shown, flow: ctx.flowName },
       {
         traceId: msg.headers.traceId,
         correlationId: msg.headers.correlationId,

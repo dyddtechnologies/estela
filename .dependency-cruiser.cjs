@@ -85,6 +85,31 @@ module.exports = {
       from: { path: '^src/resilience/', pathNot: '\\.spec\\.ts$' },
       to: { path: '^src/(outbound|inbound|activator|saga|flow)/' },
     },
+    {
+      name: 'sensitive-no-npm',
+      comment:
+        'Privacy spec SD-40: src/sensitive imports no npm package (node: core modules only) and only ' +
+        'its sibling files, so the privacy engine stays a leaf every edge can depend on.',
+      severity: 'error',
+      from: { path: '^src/sensitive/' },
+      to: {
+        dependencyTypes: [
+          'npm',
+          'npm-dev',
+          'npm-optional',
+          'npm-peer',
+          'npm-no-pkg',
+          'npm-unknown',
+        ],
+      },
+    },
+    {
+      name: 'sensitive-is-leaf',
+      comment: 'Privacy spec sec.5: src/sensitive imports only its own files and node: modules.',
+      severity: 'error',
+      from: { path: '^src/sensitive/' },
+      to: { path: '^src/', pathNot: '^src/sensitive/' },
+    },
   ],
   options: {
     doNotFollow: { path: 'node_modules' },

@@ -5,6 +5,7 @@ import { PubSubChannel } from './channels/pubsub.channel';
 import { QueueChannel } from './channels/queue.channel';
 import type { ChannelDeps } from './channels/channel-deps';
 import type { CareRef } from './resilience/resilience.types';
+import type { PrivacyRef } from './sensitive/privacy.types';
 
 /** Channel declaration in `forRoot` (spec sec.5). */
 export interface ChannelSpec {
@@ -17,6 +18,11 @@ export interface ChannelSpec {
    * and of activators on it. Never applied to inbound endpoints, `wireTap` or `handle`.
    */
   care?: CareRef;
+  /**
+   * L2 privacy (SPI-433): rules for what Estela writes about this channel's messages (logs,
+   * envelopes, records, tap copies). Never changes a delivered message.
+   */
+  privacy?: PrivacyRef;
 }
 
 /** Factory Method per kind (plan sec.6 OCP / ADR-010). */

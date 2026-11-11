@@ -187,6 +187,7 @@ describe('flow step headers (SPI-448 gap headers)', () => {
         'replyChannel',
         'errorChannel',
         'idempotencyKey',
+        'leftFromKey',
         'history',
         'jumpReplies',
         'jumpPlanB',

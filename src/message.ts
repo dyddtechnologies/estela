@@ -36,6 +36,11 @@ export interface MessageHeaders {
   contentType?: string;
   source?: string;
   idempotencyKey?: string;
+  /**
+   * On a message left by plan B (D42): the idempotency key of the message it was left from. The
+   * left message's own `idempotencyKey` is derived from it, one per leave.
+   */
+  leftFromKey?: string;
   history: HistoryHop[];
   jumpReplies?: Record<string, unknown>;
   [key: string]: unknown;
@@ -77,10 +82,13 @@ export type ReplyHopOption = 'inherit' | 'none' | (string & {});
 /** Internal marker of the ephemeral jump hop (ADR-014); informational, not public. */
 export const JUMP_REPLY_HEADER = 'x-integration-jump-reply';
 
+/** D42: the header of a left message that keeps the key of the message it was left from. */
+export const LEFT_FROM_KEY_HEADER = 'leftFromKey';
+
 /**
- * Headers that Estela owns: trace, reply, idempotency, care and jump bookkeeping. A flow
- * `headers` step and an inbound `carryHeaders` mapping never write them (`triesLeft` and
- * `planB` are the care headers of `resilience/retry-budget`).
+ * Headers that Estela owns: trace, reply, idempotency (`leftFromKey` included), care and jump
+ * bookkeeping. A flow `headers` step and an inbound `carryHeaders` mapping never write them
+ * (`triesLeft` and `planB` are the care headers of `resilience/retry-budget`).
  */
 export const RESERVED_HEADER_NAMES: readonly string[] = Object.freeze([
   'id',
@@ -93,6 +101,7 @@ export const RESERVED_HEADER_NAMES: readonly string[] = Object.freeze([
   'replyChannel',
   'errorChannel',
   'idempotencyKey',
+  LEFT_FROM_KEY_HEADER,
   'history',
   'jumpReplies',
   'jumpPlanB',
@@ -103,7 +112,7 @@ export const RESERVED_HEADER_NAMES: readonly string[] = Object.freeze([
 
 const RESERVED_HEADERS = new Set(RESERVED_HEADER_NAMES);
 
-/** True when `name` is one of `RESERVED_HEADER_NAMES` (exact, case-sensitive). */
+/** True when `name` is one of `RESERVED_HEADER_NAMES` (exact match, letter case included). */
 export function isReservedHeader(name: string): boolean {
   return RESERVED_HEADERS.has(name);
 }

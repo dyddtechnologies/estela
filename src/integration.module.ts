@@ -17,12 +17,14 @@ import { INBOUND_DEPS, type InboundInterceptorDeps } from './inbound/inbound.int
 import type { InboundDefaults } from './inbound/inbound.types';
 import { InboundExplorer } from './inbound/inbound.explorer';
 import { carriedHeadersOf } from './inbound/inbound.carry';
-import { discoverInbounds } from './inbound/inbound.discovery';
+import { discoverInbounds, type DiscoveredInbound } from './inbound/inbound.discovery';
 import { serializeError } from './flow/flow-step';
 import { FlowExecutor, type FlowDeps } from './flow/flow-executor';
 import {
   FlowParameterResolver,
   type FlowResolution,
+  type PrivacyPassResult,
+  type ResolvedFlow,
   type TryingTarget,
 } from './flow/flow-parameter-resolver';
 import type { FlowDefinition } from './flow/integration-flow';
@@ -30,7 +32,7 @@ import { IdempotencyService } from './idempotency/idempotency.service';
 import type { IdempotencyStore } from './idempotency/idempotency-store';
 import { createMessage } from './message';
 import { ReplyGateway } from './gateway/reply-gateway';
-import { ChannelGraph } from './graph/channel-graph';
+import { ChannelGraph, type GraphOutboundRef } from './graph/channel-graph';
 import { ChannelGraphController } from './graph/channel-graph.controller';
 import { TraceContext } from './trace/trace-context';
 import {
@@ -46,12 +48,39 @@ import {
   outboundRestBindingOf,
   type OutboundRestSpec,
 } from './outbound/outbound.decorators';
-import type { OutboundModuleOptions } from './outbound/outbound.types';
+import type { OutboundModuleOptions, OutboundRestBindingInfo } from './outbound/outbound.types';
 import { CareControl } from './resilience/registry';
 import { describeCare } from './resilience/resilience.plan';
 import { inboundShedPlan } from './inbound/inbound.resilience';
 import type { CareLogger, CareModuleOptions } from './resilience/resilience.types';
 import { CareEngine } from './resilience/runtime';
+import type { CareEvent } from './resilience/resilience.types';
+import { PrivacyEngine, TrailOutput } from './sensitive/privacy-engine';
+import type { PrivacyFinding } from './sensitive/privacy-errors';
+import type { PrivacyModuleOptions } from './sensitive/privacy.types';
+import type { PrivacyLevel, PrivacyScope } from './sensitive/policy-resolver';
+import { envelopeBody, errorChannelText, textForLog } from './trace/trail';
+import {
+  bindingRefsOf,
+  outboundPrivacyScope,
+  outboundScopeName,
+} from './outbound/outbound.privacy';
+import {
+  flowGraphPrivacy,
+  flowPrivacyScopes,
+  resolveFlowPrivacy,
+  type FlowPrivacy,
+} from './flow/flow-privacy';
+import {
+  activatorPrivacyScope,
+  careEventTrail,
+  channelLevels,
+  channelScopes,
+  inboundChannelScopes,
+  inboundPrivacyGuard,
+  inboundPrivacyScope,
+  nestPrivacyLogger,
+} from './integration.privacy';
 
 export const INTEGRATION_OPTIONS = 'INTEGRATION_OPTIONS';
 /** DI token of the module's `CareEngine` (always present; enabled by forRoot({ care })). */
@@ -92,6 +121,12 @@ export interface IntegrationModuleOptions {
    * Without it, bindings that use `care` still run, but no tries left are read or sent.
    */
   care?: CareModuleOptions;
+  /**
+   * Privacy (SPI-433): what Estela writes about messages to the trail (logs, records, envelopes,
+   * tap copies). Without it log lines apply the baseline (`secrets@1` and the hidden headers) and
+   * records are as in 0.9.0; `false` turns privacy off (0.9.0 log text, three fixes kept).
+   */
+  privacy?: PrivacyModuleOptions | false;
 }
 
 export interface ResolvedIntegrationOptions extends IntegrationModuleOptions {
@@ -111,12 +146,15 @@ function inboundDepsProvider(): Provider {
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
       care: CareEngine,
+      privacy: PrivacyEngine,
     ): InboundInterceptorDeps => ({
       registry,
       trace,
       idempotency,
       replyGateway: gateway,
       care,
+      privacy,
+      ensurePrivacy: inboundPrivacyGuard(privacy, opts.channels, opts.inbound),
       ...(opts.inbound !== undefined ? { defaults: opts.inbound } : {}),
       // Lazy and app-wide: consumer providers do not exist yet when this factory runs.
       resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
@@ -129,13 +167,43 @@ function inboundDepsProvider(): Provider {
       INTEGRATION_OPTIONS,
       ModuleRef,
       CARE_ENGINE,
+      PrivacyEngine,
     ],
   };
 }
 
-function hopLoggerOf(options: IntegrationModuleOptions): HopLogger | undefined {
+/** The engine of `forRoot({ privacy })`; boot lines only when privacy is configured. */
+function privacyProvider(): Provider {
+  return {
+    provide: PrivacyEngine,
+    useFactory: (opts: ResolvedIntegrationOptions): Promise<PrivacyEngine> => {
+      const configured =
+        opts.privacy !== undefined || opts.channels.some((spec) => spec.privacy !== undefined);
+      // Findings are held for the boot resolver, which throws them with every other one (SD-55).
+      return PrivacyEngine.forBoot(
+        opts.privacy,
+        channelScopes(opts.channels),
+        configured ? nestPrivacyLogger() : undefined,
+      );
+    },
+    inject: [INTEGRATION_OPTIONS],
+  };
+}
+
+/** A declared REST binding as the graph shows it: target, care summary and privacy names. */
+function graphOutboundRef(info: OutboundRestBindingInfo): GraphOutboundRef {
+  const ref: GraphOutboundRef = { transport: 'rest', target: info.target };
+  if (info.care !== undefined) ref.care = info.care;
+  if (info.privacy !== undefined) ref.privacy = info.privacy;
+  return ref;
+}
+
+function hopLoggerOf(
+  options: IntegrationModuleOptions,
+  privacy: PrivacyEngine,
+): HopLogger | undefined {
   if (options.logging?.hops !== true) return undefined;
-  return new HopLogger(options.logging.level ?? 'log');
+  return new HopLogger(options.logging.level ?? 'log', privacy);
 }
 
 /** Outbound REST port: module defaults, DI-resolved strategies and the module hop logging. */
@@ -148,19 +216,28 @@ function outboundRestProvider(): Provider {
       opts: ResolvedIntegrationOptions,
       moduleRef: ModuleRef,
       care: CareEngine,
+      privacy: PrivacyEngine,
     ): OutboundRestGateway => {
       const defaults = opts.outbound?.rest?.defaults;
-      const logger = hopLoggerOf(opts);
+      const logger = hopLoggerOf(opts, privacy);
       return new OutboundRestGateway({
         registry,
         trace,
         care,
+        privacy: { engine: privacy, channelLevels: (name) => channelLevels(opts.channels, name) },
         ...(defaults === undefined ? {} : { defaults }),
         ...(logger === undefined ? {} : { logger }),
         resolver: { resolve: (token) => moduleRef.get(token, { strict: false }) },
       });
     },
-    inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, ModuleRef, CARE_ENGINE],
+    inject: [
+      ChannelRegistry,
+      TraceContext,
+      INTEGRATION_OPTIONS,
+      ModuleRef,
+      CARE_ENGINE,
+      PrivacyEngine,
+    ],
   };
 }
 
@@ -209,6 +286,7 @@ export class IntegrationModule {
       TraceContext,
       ChannelGraph,
       { provide: INTEGRATION_OPTIONS, useValue: resolved },
+      privacyProvider(),
       {
         provide: IdempotencyService,
         useFactory: (opts: ResolvedIntegrationOptions) =>
@@ -217,15 +295,22 @@ export class IntegrationModule {
       },
       {
         provide: ChannelRegistry,
-        useFactory: (trace: TraceContext, opts: ResolvedIntegrationOptions): ChannelRegistry => {
+        useFactory: (
+          trace: TraceContext,
+          opts: ResolvedIntegrationOptions,
+          privacy: PrivacyEngine,
+        ): ChannelRegistry => {
           // The error hook only runs on a channel send, long after `registry` is assigned.
           const registry: ChannelRegistry = new ChannelRegistry(
             {
               trace,
               onWarn: (message) => logger.warn(message),
               onError: (error, msg) => {
+                const channel = msg.headers.history.at(-1)?.channel;
+                const where = channel === undefined ? {} : { channel };
+                const shown = envelopeBody(privacy, serializeError(error), where);
                 const envelope = createMessage(
-                  { error: serializeError(error), causedBy: msg.headers.id },
+                  { error: shown, causedBy: msg.headers.id },
                   {
                     traceId: msg.headers.traceId,
                     correlationId: msg.headers.correlationId,
@@ -239,7 +324,7 @@ export class IntegrationModule {
           );
           return registry;
         },
-        inject: [TraceContext, INTEGRATION_OPTIONS],
+        inject: [TraceContext, INTEGRATION_OPTIONS, PrivacyEngine],
       },
       {
         provide: ReplyGateway,
@@ -256,6 +341,7 @@ export class IntegrationModule {
           registry: ChannelRegistry,
           trace: TraceContext,
           opts: ResolvedIntegrationOptions,
+          privacy: PrivacyEngine,
         ) =>
           new InboundExplorer({
             registry,
@@ -263,9 +349,9 @@ export class IntegrationModule {
             ...(opts.rabbitChannel !== undefined ? { amqp: opts.rabbitChannel } : {}),
             ...(opts.rabbitMappings !== undefined ? { mappings: opts.rabbitMappings } : {}),
             log: (message) => logger.warn(message),
-            onError: (error) => logger.error(String(error)),
+            onError: (error) => logger.error(textForLog(privacy, String(error))),
           }),
-        inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS],
+        inject: [ChannelRegistry, TraceContext, INTEGRATION_OPTIONS, PrivacyEngine],
       },
       IntegrationRuntime,
     ];
@@ -286,6 +372,7 @@ export class IntegrationModule {
         InboundExplorer,
         OutboundRestGateway,
         CARE_ENGINE,
+        PrivacyEngine,
         ...(options.care === undefined ? [] : [CareControl]),
       ],
     };
@@ -309,6 +396,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     private readonly outbound: OutboundRestGateway,
     @Inject(CARE_ENGINE)
     private readonly care: CareEngine,
+    private readonly privacy: PrivacyEngine,
   ) {}
 
   /**
@@ -325,7 +413,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
     const errorChannel = this.registry.get(this.options.errorChannel);
     errorChannel.subscribe?.call(errorChannel, (msg) => {
-      this.logger.error(`error.channel: ${JSON.stringify(msg.payload)}`);
+      this.logger.error(`error.channel: ${errorChannelText(this.privacy, msg.payload)}`);
     });
     for (const spec of this.options.channels) {
       if (this.registry.tryGet(spec.name) === undefined) this.registry.create(spec);
@@ -334,31 +422,115 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     if (this.care.enabled) this.registry.inheritTriesLeft();
     this.openCareEvents();
 
-    // 1b. flow parameters: every flow is built once and every reference resolved (RS-67)
+    // 1b. flow parameters: every flow is built once and every care and privacy reference of
+    // flows, activators and inbound endpoints is resolved before any subscription (RS-67, SD-55)
+    const inbounds = this.discoverInbounds();
+    let flowPrivacy = new Map<string, FlowPrivacy>();
     const resolution = new FlowParameterResolver(this.care, this.registry).resolve(
       this.options.flows,
+      (flows) => {
+        const pass = this.resolvePrivacy(flows, inbounds);
+        flowPrivacy = pass.perFlow;
+        return pass;
+      },
     );
 
     // 2. activators (DiscoveryModule) and outbound bindings
     const tryingActivators = this.subscribeDiscoveredActivators();
-    this.logDiscoveredInbounds();
+    this.logDiscoveredInbounds(inbounds);
     const tryingOutbounds = this.bindOutbounds();
     this.warnStackedTries(resolution.tryingTargets, [...tryingActivators, ...tryingOutbounds]);
 
     // 3. flows: graph.recordFlow + attach (spec sec.11 step 3)
-    this.attachFlows(resolution);
+    this.attachFlows(resolution, flowPrivacy);
 
     // 4. explorer (rabbit), last
     await this.explorer.onModuleInit();
   }
 
-  private attachFlows(resolution: FlowResolution): void {
+  /**
+   * SD-37, SD-55: the privacy pass of the boot resolver. Every privacy scope found at boot
+   * compiles before any subscription; the findings of the module compile, the scopes and the taps
+   * are returned together. Returns the trail writers of each flow too.
+   */
+  private resolvePrivacy(
+    flows: readonly ResolvedFlow[],
+    inbounds: readonly DiscoveredInbound[],
+  ): PrivacyPassResult & { perFlow: Map<string, FlowPrivacy> } {
+    const channels = this.options.channels;
+    const held = this.privacy.bootFindings();
+    const findings: PrivacyFinding[] = [...held.findings];
+    const problems: string[] = [...held.problems];
+    const perFlow = new Map<string, FlowPrivacy>();
+    const scopes: Record<string, PrivacyScope> = {};
+    for (const { instance, methodName, metadata } of this.annotatedMethods<ActivatorMetadata>(
+      ACTIVATOR_METADATA,
+    )) {
+      const name = `${instance.constructor.name}.${methodName}`;
+      scopes[`activator:${name}`] = activatorPrivacyScope(channels, name, metadata);
+    }
+    const inbound = inboundChannelScopes(channels, inbounds, this.options.inbound);
+    Object.assign(scopes, inbound.scopes);
+    findings.push(...inbound.findings);
+    problems.push(...inbound.problems);
+    Object.assign(scopes, this.outboundPrivacyScopes());
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(channels, name);
+    const flowScopes: Record<string, PrivacyScope> = {};
+    for (const flow of flows) {
+      Object.assign(flowScopes, flowPrivacyScopes(flow.name, flow.built, levelsOf));
+    }
+    const log = nestPrivacyLogger();
+    // Flow and step scopes print their boot lines only under explicit privacy (SD-60).
+    for (const added of [
+      this.privacy.addScopes(scopes),
+      this.privacy.addScopes(flowScopes, { logger: log }),
+    ]) {
+      findings.push(...added.findings);
+      problems.push(...added.problems);
+    }
+    if (findings.length > 0) return { findings, problems, perFlow };
+    const env = {
+      levelsOf,
+      isRegistered: (name: string) => this.registry.tryGet(name) !== undefined,
+      logger: log,
+    };
+    for (const flow of flows) {
+      const resolved = resolveFlowPrivacy(this.privacy, flow.name, flow.built, env);
+      findings.push(...resolved.findings);
+      problems.push(...resolved.problems);
+      for (const note of resolved.notes) log.warn(note);
+      if (resolved.privacy !== undefined) perFlow.set(flow.name, resolved.privacy);
+    }
+    return { findings, problems, perFlow };
+  }
+
+  /** One scope per declared outbound REST binding, options first, then `@OutboundRest` (SD-64). */
+  private outboundPrivacyScopes(): Record<string, PrivacyScope> {
+    const rest = this.options.outbound?.rest;
+    const specs: OutboundRestSpec[] = [...(rest?.bindings ?? [])];
+    for (const { metadata } of this.annotatedMethods<OutboundRestSpec>(OUTBOUND_REST_METADATA)) {
+      specs.push(metadata);
+    }
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(this.options.channels, name);
+    const scopes: Record<string, PrivacyScope> = {};
+    for (const spec of specs) {
+      const refs = bindingRefsOf(spec, rest?.defaults?.privacy);
+      if (refs !== undefined)
+        scopes[outboundScopeName(refs.name)] = outboundPrivacyScope(refs, levelsOf);
+    }
+    return scopes;
+  }
+
+  private attachFlows(resolution: FlowResolution, privacy: Map<string, FlowPrivacy>): void {
     for (const [channel, care] of resolution.channelCare) {
       this.graph.recordChannelCare(channel, care);
     }
     this.graph.recordCareProfiles(Object.keys(this.care.options.profiles ?? {}));
+    this.recordPrivacyNames();
+    const levelsOf = (name: string): PrivacyLevel[] => channelLevels(this.options.channels, name);
     for (const flow of resolution.flows) {
-      this.graph.recordFlow(flow.name, flow.built, flow.described);
+      const named = flowGraphPrivacy(this.privacy, flow.name, flow.built, flow.described, levelsOf);
+      this.graph.recordFlow(flow.name, flow.built, named.steps, named.options);
       const executorDeps: FlowDeps = {
         registry: this.registry,
         trace: this.trace,
@@ -367,12 +539,27 @@ export class IntegrationRuntime implements OnApplicationShutdown {
         care: this.care,
         stepCare: flow.stepCare,
       };
+      const flowPrivacy = privacy.get(flow.name);
+      if (flowPrivacy !== undefined) executorDeps.privacy = flowPrivacy;
       if (this.options.idempotency?.ttlMs !== undefined) {
         executorDeps.idempotencyTtlMs = this.options.idempotency.ttlMs;
       }
       const flowLog = this.hopLogger();
       if (flowLog !== undefined) executorDeps.logger = flowLog;
       new FlowExecutor(flow.name, flow.built, executorDeps).attachTo(this.registry);
+    }
+  }
+
+  /** SD-59: privacy names of declared channels and the module's profile names in the graph. */
+  private recordPrivacyNames(): void {
+    const channels = this.options.channels;
+    for (const spec of channels) {
+      const names = this.privacy.graphNames({ levels: channelLevels(channels, spec.name) });
+      if (names !== undefined) this.graph.recordChannelPrivacy(spec.name, names);
+    }
+    const privacy = this.options.privacy;
+    if (privacy !== undefined && privacy !== false) {
+      this.graph.recordPrivacyProfiles(Object.keys(privacy.profiles ?? {}));
     }
   }
 
@@ -399,7 +586,22 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     if (channel === undefined) return;
     if (this.registry.tryGet(channel) === undefined)
       this.registry.create({ name: channel, type: 'pubsub' });
-    this.care.setPublisher((event) => this.registry.send(channel, event));
+    this.care.setPublisher((event) => this.registry.send(channel, this.shownEvent(event)));
+  }
+
+  /**
+   * Care events hold names and numbers only; an app `keyLabel` is still trail text, shown with the
+   * privacy of the event's subject: its flow step or target, activator or binding (SD-62).
+   */
+  private shownEvent(event: CareEvent): CareEvent {
+    if (event.keyLabel === undefined) return event;
+    const where = careEventTrail(event, this.privacy);
+    if (!this.privacy.reaches(where)) return event;
+    const keyLabel = this.privacy.textForTrail(event.keyLabel, {
+      ...where,
+      output: TrailOutput.WireTap,
+    });
+    return { ...event, keyLabel };
   }
 
   /** Shutdown: background flow tries stop, then queues drain (plan sec.8.6/sec.9.10). */
@@ -472,11 +674,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     }
     for (const info of this.outbound.bindings()) {
       if (info.channel !== undefined) {
-        const ref = { transport: 'rest' as const, target: info.target };
-        this.graph.recordOutbound(
-          info.channel,
-          info.care === undefined ? ref : { ...ref, care: info.care },
-        );
+        this.graph.recordOutbound(info.channel, graphOutboundRef(info));
       }
       // The binding summary (RS-42) names `tries xN` only when more than one try is allowed.
       if (info.channel !== undefined && /\btries x\d+/.test(info.care ?? '')) {
@@ -487,27 +685,32 @@ export class IntegrationRuntime implements OnApplicationShutdown {
     return trying;
   }
 
-  /** Boot visibility of the annotated entry points; a discovery failure never breaks boot. */
-  private logDiscoveredInbounds(): void {
+  /** The annotated entry points; a discovery failure never breaks boot (S15 line hidden). */
+  private discoverInbounds(): DiscoveredInbound[] {
     const skipped = (error: unknown): void => {
-      this.logger.warn(`inbound discovery skipped: ${String(error)}`);
+      this.logger.warn(`inbound discovery skipped: ${textForLog(this.privacy, String(error))}`);
     };
-    let inbounds: ReturnType<typeof discoverInbounds> = [];
     try {
       const sources = [...this.discovery.getControllers(), ...this.discovery.getProviders()];
-      inbounds = discoverInbounds(sources, {
+      return discoverInbounds(sources, {
         methodNames: (proto) => this.metadataScanner.getAllMethodNames(proto),
         onError: skipped,
       });
     } catch (error) {
       skipped(error);
+      return [];
     }
+  }
+
+  /** Boot visibility of the annotated entry points. */
+  private logDiscoveredInbounds(inbounds: readonly DiscoveredInbound[]): void {
     for (const inbound of inbounds) {
       // RS-03, RS-37: invalid inbound care or carryHeaders fails the boot, outside the guard.
       carriedHeadersOf(inbound.spec);
       const plan = inboundShedPlan(inbound.spec, this.options.inbound, this.care);
       const summary = plan === undefined ? undefined : describeCare(plan);
-      this.graph.recordInbound(inbound.spec, summary);
+      const scope = inboundPrivacyScope(this.options.channels, inbound.spec, this.options.inbound);
+      this.graph.recordInbound(inbound.spec, summary, this.privacy.graphNames(scope));
       this.logger.log(summary === undefined ? inbound.line : `${inbound.line} [${summary}]`);
     }
   }
@@ -515,7 +718,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
   private hopLoggerInstance: HopLogger | undefined;
 
   private hopLogger(): HopLogger | undefined {
-    this.hopLoggerInstance ??= hopLoggerOf(this.options);
+    this.hopLoggerInstance ??= hopLoggerOf(this.options, this.privacy);
     return this.hopLoggerInstance;
   }
 
@@ -526,6 +729,7 @@ export class IntegrationRuntime implements OnApplicationShutdown {
       errorChannel: this.options.errorChannel,
       idempotency: this.idempotency,
       care: this.care,
+      privacy: this.privacy,
     };
     if (this.options.idempotency?.ttlMs !== undefined) {
       deps.idempotencyTtlMs = this.options.idempotency.ttlMs;

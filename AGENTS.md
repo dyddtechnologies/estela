@@ -6,7 +6,9 @@
   (ESM+CJS+d.ts) → jest → dependency-cruiser → madge (circular) + jscpd (clones) → npm audit.
   **MUST pass before you finish any task.**
 - The e2e HTTP tests (`test/orders.e2e.spec.ts`, `test/outbound-rest.e2e.spec.ts`,
-  `test/resilience.e2e.spec.ts`) bind loopback sockets: run them with network permissions.
+  `test/resilience.e2e.spec.ts`, `test/privacy-leak.e2e.spec.ts`,
+  `test/privacy-references.e2e.spec.ts`, `test/privacy-compat.e2e.spec.ts`) bind loopback
+  sockets: run them with network permissions.
 - The Postgres saga e2e (`test/saga-postgres.e2e.spec.ts`) is **skipped unless `ESTELA_PG_URL` is
   set** (CI does not set it). Local target: `ESTELA_PG_URL=postgres://postgres:estela@localhost:55433/estela npx jest test/saga-postgres`.
   Run it whenever you touch `src/saga/postgres/` and paste the result in the PR.
@@ -18,7 +20,10 @@
   `src/resilience/redis/`, `state-port.ts`, `circuit-breaker.ts` or `rate-limiter.ts`, and paste the
   result in the PR.
 - `test/dist-*.spec.ts` check the built package (`dist/`) and are skipped when it is absent: run
-  `npm run build` first (`npm run verify` already builds before it tests).
+  `npm run build` first (`npm run verify` already builds before it tests). `dist-privacy` checks
+  privacy error identity across the ESM and CJS copies and the testing entry's `expectNoLeak`.
+- `test/privacy-readme.spec.ts` runs the README "Privacy" examples and asserts their trail lines
+  verbatim: change it together with the README section.
 
 ## Non-negotiable runtime invariants (SPEC §17 · PLAN §8)
 
@@ -43,6 +48,13 @@
    `headers` step refuses them (build: `RESERVED_HEADER`; run: `FlowHeadersError`) and so does an
    inbound `carryHeaders` target. A new Estela-owned header goes into that list.
    Inbound endpoints copy transport headers only through the explicit `carryHeaders` allowlist.
+10. Privacy (SPI-433): trail writers (logs, records, ledgers, tap copies, error envelopes) write
+   hidden **copies**; never mutate the delivered message, the reply or the thrown error. Every new
+   trail writer goes through `PrivacyEngine` (or the baseline) and gets an `expectNoLeak` test.
+   The one change to delivered data is a step's `Reach.Delivery` (SD-50): it goes through
+   `StepTrailPort.deliver` (`PrivacyEngine.forDelivery`), is built before anything is sent and
+   outside care's tries, and fails with non-retryable `DeliveryCopyError` instead of sending a
+   copy that is not faithful.
 
 ## Layer boundaries (enforced by dependency-cruiser)
 
@@ -59,6 +71,9 @@
   proves the rule on a fixture.
 - `src/resilience/` (`resilience-is-leaf`): never imports `src/outbound`, `src/inbound`,
   `src/activator`, `src/saga` or `src/flow`; those depend on it (edge adapters live with their edge).
+- `src/sensitive/` (`sensitive-no-npm`, `sensitive-is-leaf`): the privacy engine imports no npm
+  package (only `node:` core modules) and no other `src/` file; its log sink is an injected
+  `PrivacyLogger`. `test/sensitive-bounds.spec.ts` proves both rules on fixtures.
 
 ## Adding features (OCP)
 
@@ -76,6 +91,10 @@
   References: `activator-wrapper.ts`, `saga-resilience.ts`, `outbound.resilience.ts`.
 - New shared-state backend for `pace` and `valve` → `CareStatePort` implementation
   (reference: `redisCareState`, which takes a script-evaluation function from the app).
+- New built-in privacy pack or a change to what a pack rule matches → `src/sensitive/packs.ts` +
+  corpus tests + a pack version bump (`secrets@2`); the baseline stays pinned to `secrets@1`.
+- New privacy providers → `FingerprintSecretProvider`, `SealKeyProvider` or a `RegexEngine` (for
+  example over `re2`, injected by the app; Estela never imports it).
 
 ## Ports a consumer implements
 
@@ -84,7 +103,8 @@ Changing one of these (adding a required member, changing a signature) is a brea
 `ChannelFactory` · `InboundTransportStrategy` (its `rawHeaders(context)` is **optional**: without it,
 an inbound `pace.key` gets `{}`) · `CareStatePort` (shared `pace` and `valve` state:
 `takeTurn`, `markShut`, `shutUntil`, `claimProbe`, `clearShut`) · `CareMetricsPort`
-(`counter`, `histogram`, `gauge`). New members on them must be optional.
+(`counter`, `histogram`, `gauge`) · `FingerprintSecretProvider` (`current`) · `SealKeyProvider`
+(`current`, `byId`) · `RegexEngine` (`name`, `compile`). New members on them must be optional.
 
 ## Testing rules
 
@@ -94,7 +114,9 @@ an inbound `pace.key` gets `{}`) · `CareStatePort` (shared `pace` and `valve` s
   `manualCareClock` (deterministic care time; no jest fake timers) ·
   `MemoryCareState` (shared state with fault injection: `down`, `slow`, `hang`, `failNext`) ·
   `collectCareEvents` (events channel) · `bindFlow(flow, registry, { care })` (resolves flow care
-  like module boot, without Nest).
+  like module boot, without Nest) ·
+  `captureTrail` (records every trail write: logs, store, ledger, channels) · `expectNoLeak`
+  (fails when a secret appears in any `LeakForm`; never prints it) · `leakForms`.
 - Test files: `*.spec.ts` under `src/` or `test/` (jest roots).
 - Handlers subscribed to awaited channels must return their promise (never `void p`) —
   producers of `direct` channels wait for full execution (spec §17.3).

@@ -9,6 +9,7 @@ import {
 import { finalize, mergeMap, type Observable } from 'rxjs';
 import { PLAN_B_HEADER, TRIES_LEFT_MESSAGE_HEADER, CareScope } from '../resilience/retry-budget';
 import type { CareEngine } from '../resilience/runtime';
+import type { PrivacyEngine } from '../sensitive/privacy-engine';
 import { busy, inboundShedder, inboundTriesLeft, shedContext } from './inbound.resilience';
 import type { ChannelRegistry } from '../channel-registry';
 import {
@@ -69,6 +70,10 @@ export interface InboundInterceptorDeps {
   resolver?: InboundProviderResolver;
   /** Care engine: inbound lanes and pace, tries left and the plan B mark (RS-27, RS-29, RS-37). */
   care?: CareEngine;
+  /** Privacy engine (SPI-433): what idempotency records keep; absent = 0.9.0 records. */
+  privacy?: PrivacyEngine;
+  /** Compiles the privacy scope of an endpoint boot discovery skipped (SD-44). */
+  ensurePrivacy?: (spec: InboundSpec) => void;
 }
 
 /** Request/reply port that also returns the reply headers (ReplyGateway). */

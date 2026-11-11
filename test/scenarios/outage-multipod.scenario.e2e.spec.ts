@@ -68,8 +68,16 @@ const docker = (...args: string[]): string =>
 const SHUT_MS = 1_200;
 /** How often a pod reads the shared "shut" mark of a key (RS-23). */
 const SYNC_MS = 40;
-/** Longest wait on one shared-state call before the binding degrades (RS-24). */
-const STATE_WAIT_MS = 60;
+/**
+ * Longest wait on one shared-state call before the binding degrades (RS-24). It is a bound on
+ * "Redis does not answer", not a latency estimate: a binding that misses it degrades and skips the
+ * shared mark for STATE_CHECK_MS, so a budget near a loopback round trip under a loaded test run
+ * makes the healthy-Redis tests fail at random. RS-24 never waits for it: a stopped container
+ * refuses the connection at once.
+ */
+const STATE_WAIT_MS = 2_000;
+/** A call decided by local state while Redis is down answers well within this (RS-24). */
+const LOCAL_DECISION_MS = 1_000;
 /** How often a degraded binding checks the shared state again (RS-24). */
 const STATE_CHECK_MS = 250;
 
@@ -424,7 +432,10 @@ d('scenario outage-multipod: a PSP outage seen by two pods sharing Redis', () =>
     name: string,
     bindings: { name: string; path: string; care: (state: CareStatePort) => ValveCare }[],
   ): Promise<Pod> {
+    // The pod connects before it boots, as a production client does, so no care call pays the
+    // connection setup.
     const redis = new PodRedis(redisPort);
+    expect(await redis.command(['PING'])).toBe('PONG');
     const state = redisCareState(redis.evalScript, { prefix });
     const events: CareEvent[] = [];
     const moduleRef = await Test.createTestingModule({
@@ -529,9 +540,11 @@ d('scenario outage-multipod: a PSP outage seen by two pods sharing Redis', () =>
     expect(b.control.valveState(binding)).toEqual({ state: 'flowing' });
     expect(await markOf(binding)).toBeUndefined();
 
-    // The third failure on pod A trips it and writes the shared mark.
+    // The third failure on pod A trips it and writes the shared mark. A degraded binding would
+    // skip that write, so the precondition is checked first.
     await expect(a.send(binding, charge())).rejects.toBeInstanceOf(OutboundHttpError);
     expect(a.control.valveState(binding)).toEqual({ state: 'shut' });
+    expect(a.eventsOf('shared-state.lost')).toHaveLength(0);
     const until = await eventually('shared mark', () => markOf(binding));
     expect(until).toBeGreaterThan(Date.now());
     expect(until).toBeLessThanOrEqual(Date.now() + SHUT_MS);
@@ -619,7 +632,7 @@ d('scenario outage-multipod: a PSP outage seen by two pods sharing Redis', () =>
       for (const pod of [a, b]) {
         const started = Date.now();
         errors.push(await pod.send(binding, charge()).catch((caught: unknown) => caught));
-        expect(Date.now() - started).toBeLessThan(STATE_WAIT_MS + 1_000);
+        expect(Date.now() - started).toBeLessThan(LOCAL_DECISION_MS);
       }
     }
     for (const error of errors) {

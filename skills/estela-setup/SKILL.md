@@ -81,6 +81,47 @@ IntegrationModule.forRoot({
 - Sagas: `new SagaRunner({ transactions, care: { profiles, defaults } })` (or a `CareEngine`)
   resolves profile names of `.outbound(..., { care })` steps.
 
+## Wire privacy (`forRoot({ privacy })`)
+
+The trail is everything Estela writes: logs, idempotency records, saga ledgers, wire-tap copies,
+error envelopes and test captures. Privacy hides values in those copies only; handlers and remote
+services still get the real message.
+
+```ts
+import { Pack, Remember, Show, envFingerprintSecret, type SealKeyProvider } from '@estela/nest';
+
+IntegrationModule.forRoot({
+  channels: [{ name: 'checkout.pay', type: 'direct', privacy: 'card' }],
+  inbound: { privacy: 'card' },                                  // every inbound endpoint
+  privacy: {
+    packs: [Pack.SecretsV1, Pack.PersonalV1],                     // pin pack versions
+    fingerprintSecret: envFingerprintSecret('ESTELA_FP_SECRET', 'ESTELA_FP_SECRET_ID'), // base64, 32+ bytes
+    sealKeys: kmsSealKeys,                                        // { current(), byId(id) }, 32-byte keys
+    profiles: {
+      card: { fields: [{ path: '**.pan', name: 'card.pan', show: Show.Ends, showLast: 4 },
+                       { path: '**.cvv', show: Show.Omitted }] },
+    },
+  },
+});
+// Endpoint records: @InboundRest({ ..., idempotency: { onDuplicate: 'replay', remember: Remember.Sealed } })
+// Sagas: new SagaRunner({ ..., privacy: { engine: moduleRef.get(PrivacyEngine), remember: Remember.Sealed } })
+```
+
+- No option: 0.9.0 behaviour plus the baseline on log lines (`secrets@1`, `DEFAULT_HIDDEN_HEADERS`).
+  `privacy: false` (module level only) restores the 0.9.0 log text.
+- Opting in turns every durable scope it reaches to `Remember.OutcomeOnly`; request/reply
+  endpoints with `onDuplicate: 'replay'` then fail boot (`OUTCOME_ONLY_REPLAY`) until they choose
+  `remember`. Read the boot list of defaulted scopes. `Remember.Everything` needs `rememberReason`.
+- Levels: module, `inbound.privacy`, `ChannelSpec.privacy`, endpoint/activator `privacy`,
+  `SagaRunnerOptions.privacy`, outbound bindings and calls, and in flows
+  `IntegrationFlow.from(source, { privacy })`, a step's and a `fanoutTo`/`jumpTo` target's
+  `privacy`. `Reach.Delivery` (with `reachReason`) is valid only on a step or a target.
+- Boot fails once with `PrivacyConfigError { problems, findings }`; providers that are down fail
+  closed (`SealKeyUnavailableError`, retryable). Inject `PrivacyEngine` for app logs (`forLog`) and
+  exception filters (`errorForTrail`).
+- Custom patterns pass a boot regex-safety check; for patterns it refuses, inject a linear
+  `regexEngine` (for example over `re2`, owned by the app).
+
 ## Wire sagas (TransactionPort, locks, CAS)
 
 ```ts

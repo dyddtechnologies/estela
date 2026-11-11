@@ -6,6 +6,7 @@ import type {
 import type { IntegrationMessage, MessageHeadersInit } from '../message';
 import type { CareError } from '../resilience/resilience.errors';
 import type { Care, CareRefOf, Tries } from '../resilience/resilience.types';
+import type { PrivacyRef } from '../sensitive/privacy.types';
 import type { OutboundRestError } from './outbound.errors';
 
 /** DI token of a singleton provider (same contract as the inbound adapters). */
@@ -104,6 +105,11 @@ export interface OutboundRestCallOptions {
   timeoutMs?: number;
   idempotencyKey?: OutboundKeyParts;
   headers?: Record<string, string | undefined>;
+  /**
+   * Privacy of this call (L5): a profile name, a list of names or an inline policy, unioned over
+   * the binding. Checked on the first call that carries it, before the request is sent (SD-56).
+   */
+  privacy?: PrivacyRef;
 }
 
 /** What every outbound strategy receives about the message being delivered. */
@@ -341,6 +347,11 @@ export interface OutboundRestOptions {
    * the care engine and the 0.9.0 options above act as their 0.9.0 spellings (section 1).
    */
   care?: CareRefOf<OutboundRestCare>;
+  /**
+   * Privacy of the binding (L4): a profile name, a list of names or an inline policy. Module
+   * defaults come first, then the binding; the bound channel's privacy is unioned in (6.6).
+   */
+  privacy?: PrivacyRef;
   /** Translates `OutboundRestError` failures into the error contract of the service. */
   mapError?: OutboundErrorMapperFn | OutboundErrorMapper | OutboundProviderRef<OutboundErrorMapper>;
   /** Injectable for tests. Default: the module `fetchFn`, else `globalThis.fetch`. */
@@ -383,4 +394,6 @@ export interface OutboundRestBindingInfo {
   line: string;
   /** Care summary (RS-42); absent without care. */
   care?: string;
+  /** Privacy names that reach the binding (SD-59); absent without a reference. */
+  privacy?: string[];
 }

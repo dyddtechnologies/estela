@@ -20,7 +20,8 @@ export interface OutboundFailureInfo {
 export function redactUrl(url: string): string {
   const end = url.search(/[?#]/);
   const bare = end === -1 ? url : url.slice(0, end);
-  return bare.replace(/\/\/[^/@]*@/, '//');
+  // Userinfo ends at the LAST '@' of the authority: a password may hold a raw '@'.
+  return bare.replace(/\/\/[^/]*@/, '//');
 }
 
 function describe(info: OutboundFailureInfo, outcome: string): string {

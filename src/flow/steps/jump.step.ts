@@ -38,18 +38,24 @@ export class JumpStep implements FlowStep {
     const jumpReplies: Record<string, unknown> = { ...(ctx.msg.headers.jumpReplies ?? {}) };
     const jumpPlanB: Record<string, boolean> = {};
     const awaited: Promise<void>[] = [];
-    for (const target of normalizeDests(this.dests)) {
+    const targets = normalizeDests(this.dests);
+    // SD-50, SD-51: every hop source is hidden before the first send; the main path keeps ctx.msg.
+    const sources = targets.map((_, index) => ctx.trail?.deliver(ctx.msg, index) ?? ctx.msg);
+    for (const [index, target] of targets.entries()) {
       const care = ctx.care?.target(target.channel);
+      const source = sources[index]!;
       const run =
         care === undefined
           ? this.runJump(
               ctx,
+              source,
               target.channel,
               target.timeoutMs ?? this.defaultTimeoutMs,
               jumpReplies,
             )
-          : runWithCare(ctx, care, target.channel, jumpReplies, jumpPlanB);
-      if (target.wait === false) reportFireAndForget(ctx, target.channel, run, ctx.msg);
+          : runWithCare(ctx, care, source, target.channel, jumpReplies, jumpPlanB);
+      if (target.wait === false)
+        reportFireAndForget(ctx, { channel: target.channel, index }, run, ctx.msg);
       else {
         awaited.push(run.then(() => undefined));
       }
@@ -65,6 +71,7 @@ export class JumpStep implements FlowStep {
 
   private async runJump(
     ctx: FlowStepContext,
+    source: IntegrationMessage,
     channel: string,
     timeoutMs: number,
     jumpReplies: Record<string, unknown>,
@@ -78,7 +85,7 @@ export class JumpStep implements FlowStep {
     });
     try {
       const hop = nextHop(
-        ctx.msg,
+        source,
         { channel, component: `jump:${ctx.flowName}` },
         { reply: replyName },
       );
@@ -98,11 +105,12 @@ export class JumpStep implements FlowStep {
 async function runWithCare(
   ctx: FlowStepContext,
   care: TargetCarePort,
+  source: IntegrationMessage,
   channel: string,
   jumpReplies: Record<string, unknown>,
   jumpPlanB: Record<string, boolean>,
 ): Promise<void> {
-  const result = await jumpWithCare(ctx, care, channel);
+  const result = await jumpWithCare(ctx, care, channel, source);
   jumpReplies[channel] = result.value;
   if (result.planB) jumpPlanB[channel] = true;
 }

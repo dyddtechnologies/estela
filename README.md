@@ -15,7 +15,7 @@
 
   **English** · [Español](./README.es.md) · [Português](./README.pt.md) · [Français](./README.fr.md)
 
-  [Installation](#installation) · [Quick start](#quick-start) · [Channels](#channels) · [Flow DSL](#flow-dsl) · [Tracing](#tracing--idempotency) · [Inbound adapters](#inbound-adapters-reply-mapping--idempotency) · [Observability](#observability) · [Architecture](#architecture)
+  [Installation](#installation) · [Quick start](#quick-start) · [Channels](#channels) · [Flow DSL](#flow-dsl) · [Tracing](#tracing--idempotency) · [Privacy](#privacy) · [Inbound adapters](#inbound-adapters-reply-mapping--idempotency) · [Observability](#observability) · [Architecture](#architecture)
 </div>
 
 ---
@@ -169,7 +169,7 @@ IntegrationFlow.from('wa.inbound')
 ```
 
 - **Reserved names** (`RESERVED_HEADER_NAMES`: `id`, `timestamp`, `correlationId`, `causationId`,
-  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `history`,
+  `traceId`, `spanId`, `parentSpanId`, `replyChannel`, `errorChannel`, `idempotencyKey`, `leftFromKey`, `history`,
   `jumpReplies`, `jumpPlanB`, `triesLeft`, `planB`, `x-integration-jump-reply`) are never written:
   in a fixed object they fail `build()` with `FlowDefinitionError` code `RESERVED_HEADER`; returned
   by a function they fail the run with `FlowHeadersError` (`names` lists them), reported to
@@ -244,6 +244,281 @@ export class RedisIdempotencyStore implements IdempotencyStore {
 forRoot({ channels, idempotency: { store: new RedisIdempotencyStore(redis) } });
 ```
 </details>
+
+## Privacy
+
+*The trail is everything Estela itself writes: logs, idempotency records, saga ledgers, wire-tap
+copies, error envelopes and test captures.* `forRoot({ privacy })` decides what the trail shows of
+private data. Handlers, replies and remote services still receive the real message: only the
+copies Estela writes are hidden, and logging stays on.
+
+**Without the option** every API, delivered message, reply, record, ledger row and tap copy is as
+in 0.9.0. Log lines get a **baseline**: the pinned `secrets@1` pack plus `DEFAULT_HIDDEN_HEADERS`
+(the idempotency key headers are hidden too). Three fixes apply to everyone: an error on
+`error.channel` is written as `{ name, message, code?, status? }` plus hidden own properties (never
+`JSON.stringify` of the raw error), `restOut` errors print `urlForTrail(url)` (no userinfo, query
+or fragment), and `IdempotencyInProgressError.message` no longer holds the key.
+`privacy: false` restores the 0.9.0 log text, with those three fixes kept, and is valid only in
+`forRoot`.
+
+### Marking private data
+
+```ts
+import { IntegrationModule, Pack, Private, Show, envFingerprintSecret } from '@estela/nest';
+
+class Payer {
+  @Private({ show: Show.Ends, showLast: 4 }) pan!: string;   // no reflect-metadata needed
+  @Private() cvv!: string;                                     // [HIDDEN:field]
+}
+
+IntegrationModule.forRoot({
+  channels,
+  privacy: {
+    packs: [Pack.SecretsV1, Pack.PersonalV1],                 // pin versions; Pack.Secrets = latest
+    fields: ['**.ssn', { path: 'customer.email', name: 'customer.email', show: Show.Fingerprint }],
+    headers: ['x-partner-token'],                              // added to DEFAULT_HIDDEN_HEADERS
+    patterns: [{ name: 'acme.ticket', regex: /TCK-\d{6}/, confirm: (m) => !m.endsWith('000000') }],
+    exempt: [{ path: '**.trackingToken', reason: 'opaque carrier id, not a secret' }],
+    fingerprintSecret: envFingerprintSecret('ESTELA_FP_SECRET', 'ESTELA_FP_SECRET_ID'),
+  },
+});
+```
+
+- **Selectors:** `a.b`, `items[*].pan`, `**.pan` (any depth), `["odd.key"]`. A bare name matches the
+  root key only. Keys are case-insensitive by default (`keyCase: KeyCase.Match` to opt out). Estela's
+  trace headers (ids, trace ids, history) can never be hidden; a selector that could reach one
+  fails boot.
+- **`Show`**, strictest first: `Omitted` (key left out) > `Hidden` = `Text` (`[HIDDEN:<rule>]` or
+  your `text`) > `Length` (`[HIDDEN:<rule> len=<n>]`) > `Fingerprint` (`fp:<secretId>:<hex>`, a keyed
+  SHA-256 digest, `fingerprintChars` 12..64, default 16) > `Ends` (`***1111`; never more than half the value,
+  `Hidden` under 8 characters). When two rules hit one path the stricter wins; an inner level can
+  only add, and `exempt` (with a `reason`, logged at boot) is the only way to weaken.
+- **Packs:** `secrets@1` (`secrets.keys`, `secrets.jwt`, `secrets.bearer`, `secrets.basic-url`,
+  `secrets.aws-key-id`, `secrets.query`, `secrets.assignment`, `secrets.pem`) and `personal@1`
+  (`personal.email`, `personal.phone-e164`, `personal.card`). Built-in rules that fingerprint fall
+  back to `Show.Hidden` without a fingerprint secret; your own `Show.Fingerprint` rule without one
+  fails boot (`FINGERPRINT_WITHOUT_SECRET`).
+- **Profiles:** `profiles: { card: { ... } }` with `extends`, referenced by name (`privacy: 'card'`),
+  by list, or as `{ use: 'card', ...more }`. Declaring only profiles changes nothing until a level
+  references one.
+- **Levels:** module (`forRoot`), `inbound.privacy` (every endpoint), `ChannelSpec.privacy`, then
+  `@InboundRest({ privacy })` (and the other inbound decorators), `@ServiceActivator(ch, { privacy })`
+  and `SagaRunnerOptions.privacy`. Endpoints on one channel share its `inbound:<channel>` scope:
+  when they declare a different privacy or `remember`, boot fails (`INBOUND_SCOPE_CONFLICT`,
+  naming both handlers). Outbound: `outbound.rest.defaults.privacy`, then a binding's or
+  `@OutboundRest`'s `privacy` (scope `outbound:<name>`, unioned with its bound channel), and a
+  call's `request(target, message, { privacy })`, checked on the first call that carries it:
+  an unknown name or `false` rejects with `PrivacyConfigError` before the request is sent.
+  `bindGrpcOut(..., { privacy })` takes the reference already; nothing reads it yet. In flows: `IntegrationFlow.from(source, { privacy })`, a step's
+  `{ privacy }` and a `fanoutTo`/`jumpTo` target's `privacy`.
+- **Flows:** a step's trail (`flow:<flow>#<step id>`) unions the module, the source channel, the
+  flow and the step; a send step adds its destination channels and target levels, a wire tap its
+  tap channel. When a step fails, the flow's error envelope and failure record use that step's
+  levels (a `route` adds the channel that failed). A `wait: false` envelope uses its own target
+  only, so a sibling target's rules never apply to it. `remember` and `Reach.Delivery` are refused
+  at flow level, and boot prints one `privacy scope 'flow:…'` line per flow and step that explicit
+  privacy reaches (names and counts, never a rule). When care and privacy findings mix at boot, one
+  `FlowDefinitionError` carries them all (`concern: 'privacy'` or `'care'`); privacy findings alone
+  throw `PrivacyConfigError`. Care events hold names and numbers only; an app `keyLabel` on the
+  events channel is shown with the privacy of the event's flow step (or target), activator or
+  outbound binding.
+- **Added headers:** values set by a `headers` step and transport headers an endpoint copies
+  with `carryHeaders` follow the same `headers` rules on every trail output; the graph shows only
+  their names.
+- **Graph:** `GET /integration/graph` names what reaches each place and nothing more: a `privacy`
+  list (the `secrets@1` baseline, then profile names, pack names with version and `'inline'` for
+  inline rules) on flow steps (with their `id`), `fanoutTo`/`jumpTo` dests, the flow entry's
+  `options`, channel nodes, inbound and outbound refs, and `module.privacyProfiles` when
+  `privacy.profiles` is set. A key appears only where a reference reaches; module rules alone add
+  none. Field paths, regexes, exemptions and every reason stay out of it.
+
+### What durable records remember
+
+`remember` decides what idempotency records and saga ledgers keep. Without privacy it is
+`Remember.Everything` (0.9.0). **Once any privacy rule reaches a durable scope, the default becomes
+`Remember.OutcomeOnly`**, and boot lists every scope whose `remember` was defaulted.
+
+| `remember` | Stored on success | Replay (`onDuplicate: 'replay'`) | Activator duplicate | Saga replay |
+|---|---|---|---|---|
+| `Remember.Everything` (+ `rememberReason`) | the reply, as in 0.9.0 | the reply | re-sends the reply | stored reply |
+| `Remember.AsShown` | the reply as the trail shows it | the hidden reply (explicit opt-in only) | re-sends the hidden reply | hidden reply |
+| `Remember.Sealed` (needs `sealKeys`) | AES-256-GCM sealed reply, bound to scope and key | the real reply | decrypts and re-sends | decrypted in the claim transaction |
+| `Remember.OutcomeOnly` | `{ estelaOutcomeOnly: { v: 1 } }` | request/reply: boot error (`OUTCOME_ONLY_REPLAY`) | no reply, one warn | `replyOnReplay(ctx)` or `ReplayUnavailableError` |
+
+Failures are fail-closed: a seal key provider that is down before the claim throws
+`SealKeyUnavailableError` (retryable, nothing claimed or dispatched); a retired key gives
+`ReplayUnavailableError`; a tampered record gives `SealBrokenError`. None of them re-runs the work.
+All of them are `instanceof PrivacyError` with `kind`, `code` and `retryable`.
+
+### Wire taps
+
+Once explicit privacy reaches a tap, `wireTap(ch)` sends a copy as the trail shows it
+(`copy: TapCopy.AsShown`). A tap that must keep the raw payload says so:
+`wireTap('fraud.raw', { copy: TapCopy.Original, copyReason: 'fraud model needs the full card' })`;
+the reason is logged at boot as an `original-copy tap` line, and its absence fails boot
+(`COPY_REASON_MISSING`). Without privacy the tap shares the payload as in 0.9.0. Either way the
+copy carries no reply routing (`replyChannel`, the jump reply marker), so a tap consumer never
+answers the caller. In a hidden copy each `jumpReplies[<channel>]` value is hidden as a payload with
+the tap's rules plus that channel's and that jump's `privacy`; the keys stay, and later steps and
+`reply({ payload: 'jumpMerge' })` still get the real replies.
+
+### Delivery reach
+
+Privacy never changes what a handler, a destination or the caller receives, with one exception you
+write on a step: `privacy: { fields: ['ssn'], reach: Reach.Delivery, reachReason: 'partner must
+not receive SSN' }`. On `transform` and `handle` it hides the step's output; on `to`, `publish`,
+`fanoutTo`, `jumpTo` and `jump` (or one `fanoutTo`/`jumpTo` target) it hides the copy sent to that
+destination, while the flow's own message stays intact. It hides the payload and each
+`jumpReplies` value with that step's (and target's) own rules only, never module, channel or flow
+rules; other headers are untouched. Unchanged parts keep their reference (Buffers, Dates, class
+instances). When the copy cannot be faithful (a walk limit, a string longer than `maxScanBytes`
+that a pattern must scan, a cycle, a getter or a class instance on a changed path), the step fails
+with `DeliveryCopyError` (`DELIVERY_COPY_FAILED`, not retryable, never retried by care) and nothing
+is sent. Boot logs one `privacy delivery-reach` warn line with the step and the reason; a missing
+reason, or `Reach.Delivery` in `forRoot`, on a channel, an endpoint, a flow, `filter`, `headers`,
+`wireTap` or `route`, fails boot (`DELIVERY_REACH_LEVEL`).
+
+### Example: PCI checkout
+
+```ts
+IntegrationModule.forRoot({
+  privacy: {
+    packs: [Pack.SecretsV1],
+    fingerprintSecret: envFingerprintSecret('ESTELA_FP_SECRET', 'ESTELA_FP_SECRET_ID'),
+    sealKeys: kmsSealKeys,                                           // SealKeyProvider over your KMS
+    profiles: {
+      card: {
+        packs: [Pack.PersonalV1],
+        fields: [
+          { path: '**.pan', name: 'card.pan', show: Show.Ends, showLast: 4 },
+          { path: '**.cvv', name: 'card.cvv', show: Show.Omitted },
+          { path: '**.expiry', name: 'card.expiry' },
+        ],
+      },
+    },
+  },
+  channels: [{ name: 'checkout.pay', type: 'direct', privacy: 'card' },
+             { name: 'psp.charges', type: 'direct', privacy: 'card' },
+             { name: 'checkout.audit', type: 'pubsub' },
+             { name: 'checkout.receipts', type: 'pubsub' }],
+}, [{
+  name: 'checkout',
+  build: () => IntegrationFlow.from('checkout.pay', {                // flow level: every step's trail
+      privacy: { fields: [{ path: '**.billing.email', name: 'billing.email', show: Show.Fingerprint }] } })
+    .handle(price, { id: 'price', privacy: { fields: ['**.coupon'] } }) // step level: this step's trail
+    .wireTap('checkout.audit', { id: 'audit' })                       // TapCopy.AsShown by default
+    .publish('psp.charges', { id: 'charge' })                         // the PSP gets the full card
+    .transform(toReceipt, { id: 'receipt', privacy: {                 // Reach.Delivery: the receipt itself
+      fields: [{ path: '**.pan', show: Show.Ends, showLast: 4 }],
+      reach: Reach.Delivery, reachReason: 'a receipt shows the last 4 digits only' } })
+    .to('checkout.receipts', { id: 'send-receipt' }),
+}]);
+
+@InboundRest({ channel: 'checkout.pay', requestReply: true,
+  idempotency: { onDuplicate: 'replay', remember: Remember.Sealed } })
+```
+
+Trail line: `{"pan":"***1111","expiry":"[HIDDEN:card.expiry]","token":"[HIDDEN:secrets.keys]"}`.
+The `cvv` key is absent and the PSP receives the full order. The receipt channel receives
+`pan: "***1111"`: `Reach.Delivery` hides it in the delivered receipt, not only in the trail. A
+`billing.email` shows as an `fp:` token on every trail output of the flow, and a failing `price`
+step's error envelope also hides any `coupon`. If KMS is down, the call fails with
+`SealKeyUnavailableError`; a tampered record fails with `SealBrokenError`.
+
+### Example: WhatsApp customer numbers
+
+```ts
+IntegrationModule.forRoot({
+  privacy: {
+    packs: [Pack.SecretsV1, Pack.PersonalV1],                         // personal.phone-e164: fingerprint-or-hide
+    fingerprintSecret: envFingerprintSecret('ESTELA_FP_SECRET', 'ESTELA_FP_SECRET_ID'),
+    profiles: {
+      'wa-customer': {
+        fields: [
+          { path: '**.contacts[*].wa_id', name: 'wa.customer', show: Show.Fingerprint },   // no '+', the pattern misses it
+          { path: '**.messages[*].from', name: 'wa.customer', show: Show.Fingerprint },
+          { path: '**.contacts[*].profile.name', name: 'wa.name' },
+        ],
+        exempt: [{ path: '**.metadata.display_phone_number', show: Show.Ends, reason: 'our own WhatsApp sender number' }],
+      },
+    },
+  },
+  channels: [{ name: 'wa.inbound', type: 'direct', privacy: 'wa-customer' },
+             { name: 'wa.audit', type: 'pubsub' },
+             { name: 'wa.agent-inbox', type: 'pubsub' }, { name: 'wa.analytics', type: 'pubsub' }],
+}, [{
+  name: 'wa-inbound',
+  build: () => IntegrationFlow.from('wa.inbound', {                   // flow level: message bodies
+      privacy: { fields: [{ path: '**.messages[*].text.body', name: 'wa.body', show: Show.Length }] } })
+    .wireTap('wa.audit', { id: 'audit' })
+    .fanoutTo([
+      { channel: 'wa.agent-inbox' },                                  // agents read the real message
+      { channel: 'wa.analytics', wait: false, privacy: {              // target level, delivered copy
+        fields: [{ path: '**.contacts[*].wa_id', show: Show.Fingerprint },
+                 { path: '**.messages[*].from', show: Show.Fingerprint },
+                 { path: '**.contacts[*].profile.name', show: Show.Omitted }],
+        reach: Reach.Delivery, reachReason: 'analytics counts customers, never reads their numbers' } },
+    ], { id: 'spread' }),
+}]);
+```
+
+Trail line: `from: "fp:k1:9f2c4ab07d1e33c0"`, `display_phone_number: "***2678"`, `name: "[HIDDEN:wa.name]"`,
+`body: "[HIDDEN:wa.body len=4]"`. The agent inbox gets the real webhook; analytics gets `fp:` tokens
+in `wa_id` and `from`, no `name`, and the real body (the flow-level `Show.Length` rule only shapes
+the trail).
+The same customer always gets the same `fp:` token until `refreshFingerprintSecret()` loads a new
+secret. Without `fingerprintSecret` these explicit `Show.Fingerprint` rules fail boot
+(`FINGERPRINT_WITHOUT_SECRET`); built-in rules such as `personal.phone-e164` hide instead.
+
+> **Not in this build yet:** the gRPC out trail writers that read `bindGrpcOut`'s `privacy`. They
+> are specified in [`docs/ESTELA_SENSITIVE_DATA_SPEC.md`](./docs/ESTELA_SENSITIVE_DATA_SPEC.md)
+> section 18.
+
+### Providers and regex safety
+
+- `FingerprintSecretProvider.current()` returns `{ id, secret }` (32+ bytes); `envFingerprintSecret`
+  reads base64 from env. A failed `refreshFingerprintSecret()` keeps the current secret and warns.
+- `SealKeyProvider` has `current()` and `byId(id)`, each `{ id, key }` with a 32-byte key. Do not
+  retry inside a provider; the caller's retry is the only one.
+- Every pattern is checked at boot: nested or overlapping unbounded quantifiers, backreferences,
+  the sticky flag and patterns that can match an empty string fail boot (`UNSAFE_PATTERN`). The
+  check is conservative; for patterns it refuses, inject a linear engine with
+  `regexEngine` (for example a wrapper over `re2` in your app; Estela never imports it). Built-in
+  rules use RE2-compatible syntax only.
+- Boot fails once, with `PrivacyConfigError { problems, findings }` listing every problem; the info
+  lines name scopes, counts, pack versions and `remember`, never rule bodies or values.
+  `PrivacyEngine.stats()` counts hidden values by rule, output and subject.
+
+### Outside the trail (your code)
+
+- Exception filters and Nest's `ExceptionsHandler`: inject `PrivacyEngine` and log
+  `privacy.errorForTrail(error, { output: TrailOutput.Log })`; never echo an upstream
+  `error.message` to clients. An inbound handler's own throw reaches this surface, not
+  `error.channel`.
+- App logs: `logger.log(privacy.forLog(payload, { channel }))` for anything from a payload.
+- OTel/APM: do not record payloads as span attributes. Heap dumps are secret-bearing.
+- `OutboundHttpError.url/headers/body` stay intact for app code; only trail copies are hidden.
+- Build idempotency keys from opaque ids, never from personal data (keys become storage keys).
+
+### Caveats
+
+- **Opting in** turns durable scopes to `Remember.OutcomeOnly`: request/reply endpoints with
+  `onDuplicate: 'replay'` fail boot until they choose, and activator duplicates stop re-sending
+  replies. Recipe: start with `remember: Remember.Everything` plus a `rememberReason` per scope,
+  read the boot list, then tighten. Taps reached by the new privacy start to receive hidden copies.
+- `Remember.AsShown` replays `[HIDDEN:…]` as data; use it only when callers accept that.
+- Keep every seal key at least as long as the longest record TTL (else `REPLAY_UNAVAILABLE`), and
+  rotate `current()` well before 2^32 seals per key.
+- Use one fingerprint secret per environment; a shared one lets tokens be matched across
+  environments. Fingerprints of phone numbers are pseudonymous, not anonymous: a leaked secret
+  makes them reversible.
+- `Show.Ends` on a customer phone is identifying; prefer `Show.Fingerprint`.
+- Patterns do not see inside base64 or compressed blobs; `expectNoLeak` finds them in tests.
+- `personal.phone-e164` misses numbers without `+` or with spaces, dashes or parentheses; mark
+  those fields. `personal.card` misses a 19-digit card grouped 4-4-4-4-3.
+- `secrets.keys` hides every key named `token`, including harmless ones; `exempt` restores them.
+- A hidden tap copy shares unchanged subtrees with the live message: a subscriber that mutates
+  its copy mutates the main path, as in 0.9.0.
 
 ## Inbound adapters: reply mapping & idempotency
 
@@ -1084,14 +1359,26 @@ An optional `value` is what the caller gets after the message is left; without i
 | A failed send or no answer | `PlanBFailedError`, `plan-b.failed` | `PlanBFailedError`, `plan-b.failed` (a queue accepts with no consumer) |
 
 The left message has the payload, the trace (`traceId`, `correlationId`, `causationId` = the
-failed message id), the `idempotencyKey` and the message's own headers, so a drain can re-send it
-with the same key. It never has reply routing (`replyChannel`, the jump reply marker) or any other
-Estela-owned header, so its consumer cannot answer the caller.
+failed message id) and the message's own headers. It never has reply routing (`replyChannel`, the
+jump reply marker) or any other Estela-owned header, so its consumer cannot answer the caller.
 
-Consume the parking channel with a plain subscriber (`registry.get(name).subscribe(...)`), not
-with a `@ServiceActivator`. An activator claims the `idempotencyKey` the left message keeps, so
-when a drain re-sends the message, fails again and plan B leaves it a second time, the activator
-treats it as a duplicate and the message is dropped without a trace.
+Each leave gets an idempotency key of its own (D42): when the message has an `idempotencyKey` K,
+the left message carries `idempotencyKey: '<K>:left:<uuid>'` (a fresh id per leave) and
+`leftFromKey: K`. So a `@ServiceActivator` on the parking channel is the natural consumer: it takes
+every leave of the same message (a drain that fails again leaves it a second time, and that copy
+arrives too), and its claim still drops a transport redelivery of one leave. A drain sends the
+message on with `leftFromKey` as its key, so the downstream call keeps the original key:
+
+```ts
+@ServiceActivator('wa.reply.parked')
+park(reply: OutboundWhatsApp, msg: IntegrationMessage) {
+  return this.parking.save(reply, { key: msg.headers.leftFromKey }); // drained later with that key
+}
+```
+
+A message left again keeps the first key in `leftFromKey`. A message without a key is left without
+one. `leftFromKey` is reserved, and every trail output (tap copies, logs, error envelopes) shows it
+like `idempotencyKey`: a keyed fingerprint, or hidden without a `fingerprintSecret`.
 
 Where it applies:
 
@@ -1353,6 +1640,23 @@ Care helpers: `manualCareClock()` (deterministic clock, `advance(ms)`), `MemoryC
 state with fault injection: `down()`, `slow(ms)`, `hang()`, `failNext(n)`),
 `collectCareEvents(moduleRef)`, and `bindFlow(flow, registry, { care })` to resolve flow care without
 Nest.
+
+Privacy helpers: `captureTrail()` records every trail write (`capture.logger` for Nest,
+`capture.store(store)`, `capture.ledger(ledger)`, `capture.channel(registry, 'error.channel')`), and
+`expectNoLeak(capture, secrets)` fails when a secret appears in any `LeakForm` (as is, base64 and
+base64url at three offsets, URI, form and JSON encodings) without printing it (the error names the
+secret by its index in `secrets` and its length, e.g. `secrets[2] (24 chars)`, never a value or a
+hash of it). `captureTrail({ keepOriginals: true })` is refused by `expectNoLeak`.
+
+```ts
+import { captureTrail, expectNoLeak } from '@estela/nest/testing';
+
+const capture = captureTrail();
+const app = moduleRef.createNestApplication({ logger: capture.logger });
+// ... forRoot({ idempotency: { store: capture.store(new MemoryIdempotencyStore()) }, privacy }) ...
+await post('/pay', { pan: '4111111111111111' });
+expectNoLeak(capture, ['4111111111111111', idempotencyKey]);
+```
 
 Saga helpers: `MemoryLockPort` (in-process, NOT cross-process), `MemoryTransitionPort`, and
 `testUnitOfWork()` to call a transaction step directly. The published type declarations stay

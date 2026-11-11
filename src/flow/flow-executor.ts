@@ -7,6 +7,7 @@ import type { TraceContext } from '../trace/trace-context';
 import type { HopLogger } from '../trace/hop-logger';
 import type { BuiltFlow } from './integration-flow';
 import type { FlowStepContext, StepOutcome, StepCarePort } from './flow-step';
+import type { FlowPrivacy } from './flow-privacy';
 
 /** Minimal idempotency port (implemented by IdempotencyService). */
 export interface FlowIdempotencyPort {
@@ -32,6 +33,8 @@ export interface FlowDeps {
   care?: CareEngine;
   /** Resolved step care by step index (`FlowParameterResolver`); absent = none. */
   stepCare?: readonly (StepCarePort | undefined)[];
+  /** Trail writers of the flow (SPI-433); absent = the 0.9.0 envelopes, records and taps. */
+  privacy?: FlowPrivacy;
 }
 
 export type FlowExecutionStatus = 'completed' | 'filtered' | 'duplicate';
@@ -43,6 +46,11 @@ export interface FlowExecutionResult {
 
 interface RunFrame {
   planB(): boolean;
+}
+
+/** The index of the step that failed this run; the flow sinks use its subject (SD-45). */
+interface FailedStep {
+  at?: number;
 }
 
 const DEFAULT_IDEMPOTENCY_TTL_MS = 3_600_000;
@@ -98,17 +106,19 @@ export class FlowExecutor {
       const acquired = await claim.idem.begin(scope, claim.key, ttl);
       if (!acquired) return { status: 'duplicate' };
     }
+    const failed: FailedStep = {};
     try {
-      const result = await this.runTracked(input, frame);
+      const result = await this.runTracked(input, frame, failed);
       if (claim !== undefined) {
         await settleClaim(claim.idem, scope, claim.key, result, frame?.planB() === true);
       }
       return result;
     } catch (error) {
       if (claim !== undefined) {
-        await claim.idem.fail(scope, claim.key, error).catch(() => undefined);
+        const stored = this.deps.privacy?.storedError(error, failed.at) ?? error;
+        await claim.idem.fail(scope, claim.key, stored).catch(() => undefined);
       }
-      await this.reportError(input, error).catch(() => undefined);
+      await this.reportError(input, error, failed.at).catch(() => undefined);
       throw error;
     }
   }
@@ -127,9 +137,10 @@ export class FlowExecutor {
   private async runTracked(
     input: IntegrationMessage,
     frame: RunFrame | undefined,
+    failed: FailedStep,
   ): Promise<FlowExecutionResult> {
     const log = this.deps.logger;
-    const run = (): Promise<FlowExecutionResult> => this.runSteps(input, frame);
+    const run = (): Promise<FlowExecutionResult> => this.runSteps(input, frame, failed);
     if (log === undefined) {
       return this.deps.trace.runWithMessage(input, run);
     }
@@ -149,6 +160,7 @@ export class FlowExecutor {
   private async runSteps(
     input: IntegrationMessage,
     frame: RunFrame | undefined,
+    failed: FailedStep,
   ): Promise<FlowExecutionResult> {
     let msg = input;
     for (const [index, step] of this.built.steps.entries()) {
@@ -167,6 +179,7 @@ export class FlowExecutor {
           ? { status: 'filtered', msg }
           : { status: 'completed', msg };
       }
+      failed.at = index;
       throw outcome.error;
     }
     return { status: 'completed', msg };
@@ -187,12 +200,23 @@ export class FlowExecutor {
     const care = this.deps.stepCare?.[index];
     if (care !== undefined) ctx.care = care;
     if (frame !== undefined) ctx.planB = () => frame.planB();
+    const privacy = this.deps.privacy;
+    if (privacy !== undefined) ctx.trail = privacy.step(index);
     return ctx;
   }
 
-  private async reportError(input: IntegrationMessage, error: unknown): Promise<void> {
+  private async reportError(
+    input: IntegrationMessage,
+    error: unknown,
+    step: number | undefined,
+  ): Promise<void> {
+    const privacy = this.deps.privacy;
     const envelope = createMessage(
-      { flow: this.flowName, error, causedBy: input.headers.id },
+      {
+        flow: this.flowName,
+        error: privacy === undefined ? error : privacy.envelopeError(error, step),
+        causedBy: input.headers.id,
+      },
       {
         traceId: input.headers.traceId,
         correlationId: input.headers.correlationId,

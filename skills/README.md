@@ -5,9 +5,9 @@ SKILL.md-compatible runtime) adopt ESTELA as the messaging standard.
 
 | Skill | Purpose |
 |---|---|
-| [`estela-setup`](./estela-setup/SKILL.md) | Wire `IntegrationModule.forRoot` into a NestJS app |
+| [`estela-setup`](./estela-setup/SKILL.md) | Wire `IntegrationModule.forRoot` into a NestJS app (care, privacy, sagas) |
 | [`estela-flows`](./estela-flows/SKILL.md) | Author channels/flows/activators with the invariants |
-| [`estela-testing`](./estela-testing/SKILL.md) | Deterministic tests with the `/testing` subpath |
+| [`estela-testing`](./estela-testing/SKILL.md) | Deterministic tests with the `/testing` subpath (incl. `expectNoLeak`) |
 | [`estela-review`](./estela-review/SKILL.md) | PR review checklist (invariants) |
 
 ## Install

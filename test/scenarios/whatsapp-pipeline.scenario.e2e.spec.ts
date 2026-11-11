@@ -3,7 +3,7 @@ import 'reflect-metadata';
 import { Inject, Injectable, Logger, type INestApplication } from '@nestjs/common';
 import { ExecutionContextHost } from '@nestjs/core/helpers/execution-context-host';
 import { Test } from '@nestjs/testing';
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { lastValueFrom, of } from 'rxjs';
@@ -19,18 +19,33 @@ import {
   MemoryIdempotencyStore,
   OnQuota,
   OutboundHttpError,
+  Pack,
   PlanBMode,
+  Remember,
   ServiceActivator,
+  Show,
+  TrailOutput,
   type CareClassifierFn,
   type CareContext,
   type CareEvent,
   type CareProfile,
   type CareStatePort,
+  type FingerprintSecretProvider,
   type FlowDefinition,
   type InboundInterceptorDeps,
   type IntegrationMessage,
+  type PrivacyModuleOptions,
+  type SealKey,
+  type SealKeyProvider,
 } from '../../src/index';
-import { MemoryCareState, manualCareClock, type ManualCareClock } from '../../src/testing';
+import {
+  MemoryCareState,
+  captureTrail,
+  expectNoLeak,
+  manualCareClock,
+  type ManualCareClock,
+  type TrailCapture,
+} from '../../src/testing';
 
 /**
  * Scenario "whatsapp-pipeline": a WhatsApp message that ms-whatsapp submits over gRPC is answered
@@ -53,6 +68,12 @@ import { MemoryCareState, manualCareClock, type ManualCareClock } from '../../sr
  * Tenant and sender keys travel as message headers: `carryHeaders` copies the `x-organization-id`
  * metadata into `organizationId`, a `headers` step adds `businessNumber` from the submit, and the
  * `valve.key` / `pace.key` functions read both from the headers, never from the payload.
+ *
+ * Privacy (SPI-433): the trail shows the customer number as a keyed fingerprint, the business
+ * number by its last 4 digits and the message text by its length, on every trail output. Inbound
+ * shapes (`from` = customer) take the `wa-inbound` profile on the endpoint and both flows; the
+ * outbound shape (`to` = customer) takes `wa-outbound` on the send step and its activator. Records
+ * are sealed, so a duplicate submit still replays the real reply.
  */
 
 jest.setTimeout(30_000);
@@ -374,6 +395,55 @@ function profiles(state: CareStatePort): Record<string, CareProfile> {
 
 const hmac = (key: string): string => createHmac('sha256', KEY_SECRET).update(key).digest('hex');
 
+// ---------- Privacy: what the trail shows of a WhatsApp message ----------
+
+/** Fixture key material, derived from fixed labels: the run is deterministic. */
+const derive = (label: string): Buffer =>
+  createHash('sha256').update(`whatsapp-pipeline scenario ${label}`).digest();
+const fingerprintSecret: FingerprintSecretProvider = {
+  current: () => Promise.resolve({ id: 'wa-fp-1', secret: derive('fingerprint') }),
+};
+const sealKey: SealKey = { id: 'kms-wa-1', key: derive('seal') };
+const sealKeys: SealKeyProvider = {
+  current: () => Promise.resolve(sealKey),
+  byId: (id) => Promise.resolve(id === sealKey.id ? sealKey : undefined),
+};
+
+const customer = (path: string) => ({ path, name: 'wa.customer', show: Show.Fingerprint }) as const;
+const business = (path: string) => ({ path, name: 'wa.business', show: Show.Ends }) as const;
+const textLength = (path: string) => ({ path, name: 'wa.body', show: Show.Length }) as const;
+
+const privacy: PrivacyModuleOptions = {
+  packs: [Pack.SecretsV1],
+  fingerprintSecret,
+  sealKeys,
+  // Sealed records replay the real reply to a duplicate submit and re-send it on a duplicate send.
+  remember: Remember.Sealed,
+  profiles: {
+    'wa-inbound': {
+      fields: [
+        customer('**.from'),
+        business('**.to'),
+        business('**.businessNumber'),
+        textLength('**.body'),
+        textLength('**.conversation.history[*].text'),
+        { path: '**.profileName', name: 'wa.name' },
+      ],
+      // The sender header the `headers` step adds and the pace key reads.
+      headers: ['businessNumber'],
+    },
+    'wa-outbound': {
+      fields: [
+        customer('**.to'),
+        business('**.from'),
+        business('**.businessNumber'),
+        textLength('**.body'),
+      ],
+      headers: ['businessNumber'],
+    },
+  },
+};
+
 // ---------- Endpoint and activators ----------
 
 const POD = 'WHATSAPP_PIPELINE_POD';
@@ -391,6 +461,7 @@ class WhatsAppInboundGrpc {
       onDuplicate: 'replay',
     },
     care: { lanes: { count: 50 }, pace: { perSecond: 100, burst: 200 } },
+    privacy: 'wa-inbound',
   })
   submit(request: SubmitInbound): SubmitInbound {
     return request;
@@ -412,7 +483,7 @@ class WhatsAppSendActivator {
     @Inject('CARE_CLOCK') private readonly clock: ManualCareClock,
   ) {}
 
-  @ServiceActivator('wa.send', { care: 'wa-send' })
+  @ServiceActivator('wa.send', { care: 'wa-send', privacy: 'wa-outbound' })
   send(request: OutboundWhatsApp, msg: IntegrationMessage): Promise<unknown> {
     const record: SendRecord = {
       pod: this.pod,
@@ -443,6 +514,21 @@ class HandoffActivator {
     const routing = msg.headers.jumpReplies?.['routing.resolve'] as Routing;
     handoffs.push({ pod: this.pod, request, routing });
     return { status: 'handed-off', inReplyTo: request.messageSid, reason: routing.reason };
+  }
+}
+
+/**
+ * The parking lot: plan B leaves unsent replies on the wa.reply.parked queue and nobody waits on
+ * them. Each leave has a key of its own (D42), so the same reply left again after a failed drain
+ * reaches this activator too; `leftFromKey` is the key the drain sends it on with.
+ */
+@Injectable()
+class ParkingActivator {
+  constructor(@Inject(POD) private readonly pod: string) {}
+
+  @ServiceActivator('wa.reply.parked', { privacy: 'wa-outbound' })
+  park(request: OutboundWhatsApp, msg: IntegrationMessage): void {
+    parked.push({ pod: this.pod, request, headers: msg.headers });
   }
 }
 
@@ -499,7 +585,7 @@ function toOutboundMessage(payload: unknown, msg: IntegrationMessage): OutboundW
 const waInbound: FlowDefinition = {
   name: 'wa-inbound',
   build: () =>
-    IntegrationFlow.from('wa.inbound')
+    IntegrationFlow.from('wa.inbound', { privacy: 'wa-inbound' })
       .filter((payload) => (payload as SubmitInbound).body.trim().length > 0, {
         id: 'skip-empty',
         whenDropped: { reply: ignoredReply },
@@ -519,12 +605,12 @@ const waInbound: FlowDefinition = {
 const waTurn: FlowDefinition = {
   name: 'wa-turn',
   build: () =>
-    IntegrationFlow.from('wa.turn')
+    IntegrationFlow.from('wa.turn', { privacy: 'wa-inbound' })
       // The jump waits longer than the LLM's whole patience (20 s), so care decides the outcome.
       .jumpTo([{ channel: LLM_BINDING, timeoutMs: 21_000 }], { id: 'llm' })
       .wireTap('wa.audit', { id: 'audit' })
       .transform(toOutboundMessage, { id: 'to-outbound' })
-      .to('wa.send', { id: 'send' }),
+      .to('wa.send', { id: 'send', privacy: 'wa-outbound' }),
 };
 
 // ---------- Boot and gRPC driver ----------
@@ -563,6 +649,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
   let clock: ManualCareClock;
   let state: MemoryCareState;
   let store: MemoryIdempotencyStore;
+  let trail: TrailCapture;
 
   beforeAll(async () => {
     provider = await startLlmProvider();
@@ -576,6 +663,7 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     clock = manualCareClock();
     state = new MemoryCareState(() => clock.wall());
     store = new MemoryIdempotencyStore();
+    trail = captureTrail();
     provider.seen.length = 0;
     provider.script.length = 0;
     provider.hold = false;
@@ -600,7 +688,8 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         IntegrationModule.forRoot(
           {
             logging: { banner: false },
-            idempotency: { store },
+            idempotency: { store: trail.store(store) },
+            privacy,
             channels: [
               { name: 'wa.inbound', type: 'direct' },
               { name: 'routing.resolve', type: 'direct' },
@@ -666,20 +755,14 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         RoutingActivator,
         WhatsAppSendActivator,
         HandoffActivator,
+        ParkingActivator,
         AuditActivator,
       ],
     }).compile();
     const app = moduleRef.createNestApplication({ logger: false });
     await app.listen(0, '127.0.0.1');
-    // The parking lot: plan B leaves unsent replies on this queue and nobody waits on it. A plain
-    // subscriber, not an activator: an activator claims the idempotencyKey the left message keeps,
-    // so the same reply left again after a failed drain would be a silent duplicate.
-    app
-      .get(ChannelRegistry)
-      .get('wa.reply.parked')
-      .subscribe((msg) => {
-        parked.push({ pod: name, request: msg.payload as OutboundWhatsApp, headers: msg.headers });
-      });
+    trail.channel(app.get(ChannelRegistry), 'error.channel');
+    trail.channel(app.get(ChannelRegistry), 'estela.care.events');
     const interceptor = new InboundInterceptor(app.get<InboundInterceptorDeps>(INBOUND_DEPS));
     const endpoint = app.get(WhatsAppInboundGrpc);
     const pod: Pod = {
@@ -720,9 +803,9 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
   }
 
   const sentBodies = (): string[] => whatsapp.sent.map((s) => s.request.body);
-  /** A drain worker re-sends a parked reply with the key and the tenant headers it was left with. */
+  /** A drain worker re-sends a parked reply with the key it was left from and its tenant headers. */
   const drainHeaders = (entry: (typeof parked)[number]) => ({
-    idempotencyKey: String(entry.headers.idempotencyKey),
+    idempotencyKey: String(entry.headers.leftFromKey),
     organizationId: entry.headers.organizationId,
     businessNumber: entry.headers.businessNumber,
   });
@@ -771,10 +854,10 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     expect(audited[0]?.headers).not.toHaveProperty('replyChannel');
     expect(audited[0]?.headers).not.toHaveProperty('x-integration-jump-reply');
     expect(outcome).not.toEqual(expect.objectContaining({ reply: { audited: true } }));
-    // Tenant and sender travel as headers end to end, on the tap copy too.
+    // Tenant and sender travel as headers end to end; the tap copy hides the sender header.
     expect(audited[0]?.headers).toMatchObject({
       organizationId: ORG_FARMACRO,
-      businessNumber: BUSINESS_NUMBER,
+      businessNumber: '[HIDDEN:header]',
     });
     expect((await inboundRecord(request.messageSid))?.status).toBe('completed');
     expect(pod.events.filter((e) => e.type === 'plan-b.used')).toHaveLength(0);
@@ -971,10 +1054,13 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     // Plan B left the reply on the queue without waiting: the parked copy cannot answer anyone.
     expect(parked[0]?.headers).not.toHaveProperty('replyChannel');
     expect(parked[0]?.headers).toMatchObject({
-      idempotencyKey: request.messageSid,
+      leftFromKey: request.messageSid,
       organizationId: ORG_FARMACRO,
       businessNumber: BUSINESS_NUMBER,
     });
+    expect(
+      String(parked[0]?.headers.idempotencyKey).startsWith(`${request.messageSid}:left:`),
+    ).toBe(true);
     expect(
       pod.events.filter((e) => e.binding === SEND_BINDING && e.type === 'plan-b.used'),
     ).toHaveLength(1);
@@ -985,11 +1071,29 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     ]);
     expect((await inboundRecord(request.messageSid))?.status).not.toBe('completed');
 
-    // ms-whatsapp is back: draining the parked reply sends it once, with the same key.
-    await pod.registry.send('wa.send', parked[0]!.request, drainHeaders(parked[0]!));
+    // The first drain finds ms-whatsapp still down: plan B leaves the same reply a second time,
+    // and the parking activator takes it (D42: each leave has a key of its own).
+    whatsapp.failNext = 3;
+    const failedDrain = pod.registry.send('wa.send', parked[0]!.request, drainHeaders(parked[0]!));
+    await until('the first drain try', () => whatsapp.attempts.length === 4);
+    await clock.advance(300);
+    await until('the second drain try', () => whatsapp.attempts.length === 5);
+    await clock.advance(600);
+    await failedDrain;
+    await until('the reply parked again', () => parked.length === 2);
+    expect(whatsapp.attempts.slice(3).every((a) => a.idempotencyKey === request.messageSid)).toBe(
+      true,
+    );
+    expect(parked[1]?.request).toEqual(parked[0]?.request);
+    expect(parked[1]?.headers.leftFromKey).toBe(request.messageSid);
+    expect(parked[1]?.headers.idempotencyKey).not.toBe(parked[0]?.headers.idempotencyKey);
+
+    // ms-whatsapp is back: draining the parked reply sends it once, with the key it was left from.
+    await pod.registry.send('wa.send', parked[1]!.request, drainHeaders(parked[1]!));
     expect(whatsapp.sent.map((s) => [s.request.inReplyTo, s.request.body])).toEqual([
       [request.messageSid, LLM_TEXT],
     ]);
+    expect(whatsapp.sent[0]?.idempotencyKey).toBe(request.messageSid);
   });
 
   it('RS-22 RS-23 RS-37 RS-21: a 120-message burst on two pods: inbound sheds before any claim, and sends keep 20/s + burst 40 across both pods', async () => {
@@ -1096,13 +1200,15 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         inbounds: Record<string, unknown>[];
         outbounds: Record<string, unknown>[];
       }[];
-      module?: { careProfiles?: string[] };
+      module?: { careProfiles?: string[]; privacyProfiles?: string[] };
     };
     const steps = (flow: string) => graph.flows.find((f) => f.name === flow)?.steps;
+    // The graph names the privacy profiles that reach each step, never a rule (SD-59).
+    const inbound = ['secrets@1', 'wa-inbound'];
     expect(steps('wa-inbound')).toEqual([
-      { kind: 'filter', id: 'skip-empty', whenDropped: 'reply' },
-      { kind: 'headers', id: 'sender', computed: true },
-      { kind: 'handle', id: 'load-conversation' },
+      { kind: 'filter', id: 'skip-empty', whenDropped: 'reply', privacy: inbound },
+      { kind: 'headers', id: 'sender', computed: true, privacy: inbound },
+      { kind: 'handle', id: 'load-conversation', privacy: inbound },
       {
         kind: 'jump',
         id: 'routing',
@@ -1111,16 +1217,23 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
             channel: 'routing.resolve',
             care: 'patience 300ms · total 800ms · tries x2 · plan-b',
             repeatableBy: 'declared',
+            privacy: inbound,
           },
         ],
+        privacy: inbound,
       },
-      { kind: 'route', id: 'dispatch' },
+      { kind: 'route', id: 'dispatch', privacy: inbound },
     ]);
     expect(steps('wa-turn')).toEqual([
-      { kind: 'jump', id: 'llm', dests: [{ channel: LLM_BINDING, timeoutMs: 21_000 }] },
-      { kind: 'wireTap', id: 'audit', channel: 'wa.audit' },
-      { kind: 'transform', id: 'to-outbound' },
-      { kind: 'to', id: 'send', channel: 'wa.send' },
+      {
+        kind: 'jump',
+        id: 'llm',
+        dests: [{ channel: LLM_BINDING, timeoutMs: 21_000, privacy: inbound }],
+        privacy: inbound,
+      },
+      { kind: 'wireTap', id: 'audit', channel: 'wa.audit', privacy: inbound },
+      { kind: 'transform', id: 'to-outbound', privacy: inbound },
+      { kind: 'to', id: 'send', channel: 'wa.send', privacy: [...inbound, 'wa-outbound'] },
     ]);
     const node = (channel: string) => graph.nodes.find((n) => n.channel === channel);
     expect(node(LLM_BINDING)?.outbounds).toEqual([
@@ -1139,9 +1252,11 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
         requestReply: true,
         care: 'lanes · pace',
         carries: ['organizationId'],
+        privacy: inbound,
       }),
     ]);
     expect(graph.module?.careProfiles).toEqual(['llm-turn', 'routing', 'wa-send']);
+    expect(graph.module?.privacyProfiles).toEqual(['wa-inbound', 'wa-outbound']);
     for (const value of [
       CUSTOMER_NUMBER,
       '50255501234',
@@ -1154,5 +1269,70 @@ describe('scenario whatsapp-pipeline: WhatsApp inbound message to AI reply (SPI-
     ]) {
       expect(text).not.toContain(value);
     }
+  });
+  it('SD-25 SD-14 SD-27: every trail output shows the customer number as a fingerprint, the business number by its last 4 and the text by its length', async () => {
+    for (const level of ['log', 'warn', 'error', 'debug', 'verbose'] as const) {
+      jest
+        .spyOn(Logger.prototype, level)
+        .mockImplementation((message: unknown, ...rest: unknown[]): void => {
+          trail.logger[level]?.(message, ...rest);
+        });
+    }
+    const pod = await startPod();
+    const request = submit();
+    expect(await pod.submit(request)).toMatchObject({ ok: true });
+    // A second customer message whose send fails once: tries, care events and error lines.
+    whatsapp.failNext = 1;
+    const outcome = pod.submit(submit({ body: '¿Y el precio?' }));
+    await until('the first send try', () => whatsapp.attempts.length === 2);
+    await clock.advance(300);
+    expect(await outcome).toMatchObject({ ok: true });
+    await until('both audit copies', () => audited.length === 2);
+
+    // The tap copy, as the audit activator receives it.
+    const tapped = audited[0]!.payload as ConversationTurn;
+    const token = tapped.from;
+    expect(token).toMatch(/^fp:wa-fp-1:[0-9a-f]{16}$/);
+    expect((audited[1]!.payload as ConversationTurn).from).toBe(token);
+    expect(tapped.to).toBe('***8427');
+    expect(tapped.businessNumber).toBe('***8427');
+    expect(tapped.body).toBe(`[HIDDEN:wa.body len=${CUSTOMER_TEXT.length}]`);
+    expect(tapped.profileName).toBe('[HIDDEN:wa.name]');
+    expect(tapped.conversation.history.map((turn) => turn.text)).toEqual([
+      '[HIDDEN:wa.body len=13]',
+      expect.stringMatching(/^\[HIDDEN:wa\.body len=\d+\]$/),
+    ]);
+    expect(audited[0]!.headers.businessNumber).toBe('[HIDDEN:header]');
+
+    // Every trail output: records, envelopes, care events, log lines and the tap copies.
+    const taps = audited.map((msg) => ({
+      output: TrailOutput.WireTap,
+      where: 'channel wa.audit',
+      text: JSON.stringify(msg),
+    }));
+    const everything = { ...trail, writes: [...trail.writes, ...taps] };
+    const outputs = new Set(everything.writes.map((write) => write.output));
+    expect([...outputs].sort()).toEqual(['log', 'store', 'wiretap']);
+    expect(trail.writes.some((write) => write.where === 'channel estela.care.events')).toBe(true);
+    for (const write of everything.writes) {
+      for (const [, body] of write.text.matchAll(/"body":"([^"]*)"/g)) {
+        expect(body).toMatch(/^\[HIDDEN:wa\.body len=\d+\]$/);
+      }
+    }
+    expectNoLeak(everything, [
+      CUSTOMER_NUMBER,
+      '50255501234',
+      BUSINESS_NUMBER,
+      '50224618427',
+      CUSTOMER_TEXT,
+      'Ana López',
+    ]);
+    // The business path got every value as ms-whatsapp sent it (SD-02).
+    expect(whatsapp.sent[0]?.request).toMatchObject({
+      from: `whatsapp:${BUSINESS_NUMBER}`,
+      to: `whatsapp:${CUSTOMER_NUMBER}`,
+      businessNumber: BUSINESS_NUMBER,
+    });
+    expect(provider.seen[0]?.body.contents.at(-1)?.parts[0]?.text).toBe(CUSTOMER_TEXT);
   });
 });

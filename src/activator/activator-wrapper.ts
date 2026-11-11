@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import type { SubscribeOptions, Unsubscribe } from '../channel';
 import type { ChannelRegistry } from '../channel-registry';
 import { ACTIVATOR_METADATA, type ActivatorMetadata } from '../decorators';
@@ -20,6 +21,11 @@ import {
 } from '../resilience/retry-budget';
 import type { CareEngine } from '../resilience/runtime';
 import { TryOverdueError } from '../resilience/timeout';
+import type { PrivacyEngine } from '../sensitive/privacy-engine';
+import { TrailOutput } from '../sensitive/privacy-engine';
+import type { RecordCodec, RecordSealer } from '../sensitive/sealed-record';
+import { OUTCOME_ONLY_RECORD_KEY, SEALED_RECORD_KEY } from '../sensitive/sealed-record';
+import { envelopeBody, storedError } from '../trace/trail';
 
 export interface ActivatorDeps {
   registry: ChannelRegistry;
@@ -30,7 +36,11 @@ export interface ActivatorDeps {
   logger?: HopLogger;
   /** Care engine: message scopes, the plan B mark and `@ServiceActivator({ care })`. */
   care?: CareEngine;
+  /** Privacy engine (SPI-433): records, envelopes and the SD-34 warning; absent = 0.9.0. */
+  privacy?: PrivacyEngine;
 }
+
+const privacyLog = new Logger('EstelaPrivacy');
 
 interface ActivatorCare {
   executor?: CareExecutor<unknown>;
@@ -200,16 +210,8 @@ async function invokeInScope(
   frame: { planB(): boolean } | undefined,
 ): Promise<void> {
   const { registry } = deps;
-  const idem = deps.idempotency;
-  const key =
-    typeof msg.headers.idempotencyKey === 'string' ? msg.headers.idempotencyKey : undefined;
-  if (idem !== undefined && key !== undefined) {
-    const acquired = await idem.begin(scope, key, deps.idempotencyTtlMs);
-    if (!acquired) {
-      await resendCachedResult(scope, key, msg, deps);
-      return; // duplicate silent (spec sec.7.1 step 6)
-    }
-  }
+  const claim = await claimActivator(scope, msg, deps);
+  if (claim === 'duplicate') return; // duplicate silent (spec sec.7.1 step 6)
   const method = (
     binding.instance as Record<string, ((...args: unknown[]) => unknown) | undefined>
   )[binding.methodName];
@@ -219,11 +221,12 @@ async function invokeInScope(
   try {
     const result = await runActivatorMethod(binding, scope, msg, deps, method);
     const planB = frame?.planB() === true;
-    if (idem !== undefined && key !== undefined) await settleClaim(idem, scope, key, result, planB);
+    if (claim !== undefined) await settleClaim(claim, scope, result, planB);
     await replyToCaller(result, msg, registry, planB);
   } catch (error) {
-    if (idem !== undefined && key !== undefined) {
-      await settleFailedClaim(idem, scope, key, error, frame).catch(() => undefined);
+    if (claim !== undefined) {
+      const stored = storedError(deps.privacy, error, { scope }, claim.codec?.remember);
+      await settleFailedClaim(claim.idem, scope, claim.key, stored, frame).catch(() => undefined);
     }
     await reportActivatorError(scope, msg, error, deps).catch(() => undefined);
     throw error;
@@ -305,21 +308,55 @@ async function replyToCaller(
   });
 }
 
-async function settleClaim(
-  idem: IdempotencyService,
+/** A claimed activator key and what its records keep (8.2). */
+interface ActivatorClaim {
+  idem: IdempotencyService;
+  key: string;
+  codec: RecordCodec | undefined;
+  /** The record encoder of the scope's `remember`; absent keeps the record as it is. */
+  sealer: RecordSealer | undefined;
+}
+
+/**
+ * Claims the message key: undefined without idempotency, `'duplicate'` once a repeat was answered
+ * from its record. SD-32: the seal key is fetched before the claim; a provider failure claims nothing.
+ */
+async function claimActivator(
   scope: string,
-  key: string,
+  msg: IntegrationMessage,
+  deps: ActivatorDeps,
+): Promise<ActivatorClaim | 'duplicate' | undefined> {
+  const idem = deps.idempotency;
+  const key = msg.headers.idempotencyKey;
+  if (idem === undefined || typeof key !== 'string') return undefined;
+  const privacy = deps.privacy;
+  const codec = privacy?.off === false ? privacy.recordCodec(scope, TrailOutput.Store) : undefined;
+  const sealer = await codec?.prepare();
+  if (await idem.begin(scope, key, deps.idempotencyTtlMs)) return { idem, key, codec, sealer };
+  await resendCachedResult(scope, key, msg, deps, codec);
+  return 'duplicate';
+}
+
+async function settleClaim(
+  claim: ActivatorClaim,
+  scope: string,
   result: unknown,
   planB: boolean,
 ): Promise<void> {
+  const { idem, key, sealer } = claim;
   if (planB) {
     await settleWithoutStoring(idem, scope, key);
     return;
   }
+  if (result === undefined) {
+    await idem.complete(scope, key, { completed: true });
+    return;
+  }
+  const record = { cachedResult: result };
   await idem.complete(
     scope,
     key,
-    result !== undefined ? { cachedResult: result } : { completed: true },
+    sealer === undefined ? record : sealer.encode(scope, key, record),
   );
 }
 
@@ -338,15 +375,37 @@ async function resendCachedResult(
   key: string,
   msg: IntegrationMessage,
   deps: ActivatorDeps,
+  codec: RecordCodec | undefined,
 ): Promise<void> {
   const idem = deps.idempotency;
   const record = idem !== undefined ? await idem.get(scope, key) : undefined;
-  const cached =
-    record?.result !== undefined && 'cachedResult' in record.result
-      ? record.result.cachedResult
-      : undefined;
+  const result = await decodedResult(scope, key, record?.result, codec);
+  if (result === 'outcome-only') {
+    // SD-34: nothing to re-send; the warning names the scope, never the key.
+    if (typeof msg.headers.replyChannel === 'string' && msg.headers.replyChannel.length > 0) {
+      privacyLog.warn(`privacy: ${scope} duplicate has an outcome-only record; no reply sent`);
+    }
+    return;
+  }
+  const cached = result !== undefined && 'cachedResult' in result ? result.cachedResult : undefined;
   if (cached === undefined) return; // no cached result -> silence (spec sec.7.1)
   await replyToCaller(cached, msg, deps.registry);
+}
+
+/** The stored result as written, or decoded when the scope's codec wrote it (8.2). */
+async function decodedResult(
+  scope: string,
+  key: string,
+  stored: Record<string, unknown> | undefined,
+  codec: RecordCodec | undefined,
+): Promise<Record<string, unknown> | 'outcome-only' | undefined> {
+  if (stored === undefined) return undefined;
+  if (stored[SEALED_RECORD_KEY] === undefined && stored[OUTCOME_ONLY_RECORD_KEY] === undefined) {
+    return stored;
+  }
+  if (codec === undefined) return 'outcome-only';
+  const decoded = await codec.decode(scope, key, stored);
+  return 'outcomeOnly' in decoded && decoded.outcomeOnly === true ? 'outcome-only' : decoded;
 }
 
 async function reportActivatorError(
@@ -359,7 +418,7 @@ async function reportActivatorError(
     {
       activator: scope,
       jumpEphemeral: isJumpEphemeral(msg),
-      error: serializeError(error),
+      error: envelopeBody(deps.privacy, serializeError(error), { scope }),
       causedBy: msg.headers.id,
     },
     {

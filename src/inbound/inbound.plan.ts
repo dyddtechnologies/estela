@@ -1,5 +1,6 @@
 import { carriedHeadersOf, type CarriedHeader } from './inbound.carry';
 import { HttpExceptionFailureCodec, type InboundFailurePolicy } from './inbound.failure';
+import { TrailOutput, type PrivacyEngine } from '../sensitive/privacy-engine';
 import {
   clientKeyReader,
   toStorePort,
@@ -30,6 +31,13 @@ export interface InboundPlanDeps {
   idempotency?: InboundStoreSource & { readonly ttlMs?: number };
   defaults?: InboundDefaults;
   resolver?: InboundProviderResolver;
+  /** Privacy engine (SPI-433): the record codec of each endpoint; absent = 0.9.0 records. */
+  privacy?: PrivacyEngine;
+  /**
+   * Compiles the privacy scope of an endpoint that boot discovery skipped (SD-44); throws
+   * PrivacyConfigError before any claim.
+   */
+  ensurePrivacy?: (spec: InboundSpec) => void;
 }
 
 /** Endpoint options merged with the module defaults, with every strategy resolved. */
@@ -246,10 +254,23 @@ function resolveIdempotency(
     failure,
     codec: resolveCodec(options.failureCodec, deps.resolver),
   };
+  Object.assign(plan, recordsOf(spec, deps.privacy));
   if (options.key !== undefined) {
     plan.key = resolveStrategy<InboundKeyResolverFn>(options.key, 'resolveKey', deps.resolver);
   }
   return plan;
+}
+
+/** The record codec of an endpoint (SPI-433, 7.3); none when privacy is off or absent. */
+function recordsOf(
+  spec: InboundSpec,
+  privacy: PrivacyEngine | undefined,
+): Pick<InboundIdempotencyPlan, 'records'> {
+  if (privacy?.off !== false) return {};
+  const scope = `inbound:${spec.channel}`;
+  return {
+    records: { engine: privacy, scope, codec: privacy.recordCodec(scope, TrailOutput.Store) },
+  };
 }
 
 /**
@@ -257,6 +278,7 @@ function resolveIdempotency(
  * strategy and validates the combination. Throws `InboundError` on a misconfiguration.
  */
 export function resolveInboundPlan(spec: InboundSpec, deps: InboundPlanDeps): InboundPlan {
+  deps.ensurePrivacy?.(spec);
   const merged = mergeIdempotency(spec, deps.defaults);
   const failure = resolveFailure(merged.options.onFailure, deps.resolver);
   const plan: InboundPlan = {

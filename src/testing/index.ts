@@ -19,6 +19,9 @@ export { testUnitOfWork, type TestUnitOfWork } from './test-unit-of-work';
 export { manualCareClock, type ManualCareClock } from './manual-resilience-clock';
 export { MemoryCareState } from './memory-resilience-state-port';
 export { collectCareEvents } from './resilience-events';
+export { captureTrail, type TrailCapture, type TrailWrite } from './capture-trail';
+export { expectNoLeak } from './expect-no-leak';
+export { LeakForm, leakForms } from './leak-forms';
 
 /** Semantic alias from spec sec.14: same invariants as `createMessage`. */
 export function createTestMessage<T>(
