@@ -93,6 +93,7 @@ function paramsOf(
 ): StepParams {
   const params: { -readonly [K in keyof StepParams]: StepParams[K] } = {};
   if (opts?.id !== undefined) params.id = opts.id;
+  if (opts?.privacy !== undefined) params.privacy = opts.privacy;
   if (care !== undefined) params.care = care;
   if (targets !== undefined) params.targets = targets;
   return params;
@@ -214,7 +215,8 @@ export class IntegrationFlow {
     return this.push(new ToStep(channel, paramsOf(opts, opts?.care, [{ channel }])));
   }
 
-  reply(options?: ReplyOptions & StepCommonOptions): this {
+  /** `reply` takes an id only: the reply is the caller's data and has no privacy (18.3). */
+  reply(options?: ReplyOptions & Pick<StepCommonOptions, 'id'>): this {
     this.refuseCare('reply', options);
     const { id, ...replyOptions } = options ?? {};
     const params = paramsOf(id === undefined ? undefined : { id }, undefined);

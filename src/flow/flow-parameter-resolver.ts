@@ -173,10 +173,11 @@ export function definitionErrorOf(findings: readonly FlowParameterFinding[]): Er
 }
 
 /**
- * Boot resolver of the flow parameter model (RS-67), care concern only (minimal
- * scaffolding pending SPI-433, SD-67). It builds every flow once, resolves every reference of
- * every subject over L4 > L3 > L2 > L1 (RS-51), collects every finding and then throws one error
- * or logs each warning once.
+ * Boot resolver of the flow parameter model (RS-67), care concern. The privacy references the
+ * DSL captures (`FlowOptions.privacy`, `StepParams.privacy`, target `privacy`, SD-67) have no
+ * pass here yet (SD-55). It builds every flow once, resolves every reference of every subject
+ * over L4 > L3 > L2 > L1 (RS-51), collects every finding and then throws one error or logs each
+ * warning once.
  */
 export class FlowParameterResolver {
   private readonly findings: FlowParameterFinding[] = [];

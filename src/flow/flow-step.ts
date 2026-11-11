@@ -1,6 +1,7 @@
 import type { ChannelRegistry } from '../channel-registry';
 import type { IntegrationMessage } from '../message';
 import type { CareRef } from '../resilience/resilience.types';
+import type { PrivacyRef } from '../sensitive/privacy.types';
 import type { TraceContext } from '../trace/trace-context';
 
 /**
@@ -97,15 +98,14 @@ export interface FlowStep {
   readonly params?: StepParams | undefined;
 }
 
-// ---------- Flow parameter model (minimal scaffolding pending SPI-433, SD-67) ----------
+// ---------- Flow parameter model (SD-67) ----------
 
-/**
- * Options every step accepts. Only `id` exists here; the privacy concern (SPI-433) adds its
- * member to this interface.
- */
+/** Options every step except `reply` accepts (SD-47). */
 export interface StepCommonOptions {
   /** Stable step id; default `<kind>#<index>`; unique per flow (DUPLICATE_STEP_ID). */
   id?: string;
+  /** L4 privacy of the step's own sinks; never shown by `describe()` (SD-47, SD-65). */
+  privacy?: PrivacyRef;
 }
 
 /** Options of a step that accepts care (L4). */
@@ -119,6 +119,8 @@ export interface JumpOptions {
   timeoutMs?: number;
   care?: CareRef;
   id?: string;
+  /** L4 privacy of the jump step (SD-47). */
+  privacy?: PrivacyRef;
 }
 
 /** Flow-level defaults (L3), split by step family (RS-55). */
@@ -129,6 +131,8 @@ export interface FlowOptions {
     /** `to`, `publish`, `route` and `fanoutTo`. */
     send?: CareRef;
   };
+  /** L3 privacy: every sink of the flow, never a delivered value (SD-46). */
+  privacy?: PrivacyRef;
 }
 
 /** Parameters a step carries for the boot resolver (RS-67). */
@@ -139,6 +143,8 @@ export interface StepParams {
   readonly care?: CareRef;
   /** Static targets; `route` resolves its targets at run time. */
   readonly targets?: readonly FlowTarget[];
+  /** L4 step privacy; a target's own reference stays on that target (SD-47). */
+  readonly privacy?: PrivacyRef;
 }
 
 // ---------- Mixed destinations (spec sec.6.2) ----------
@@ -154,6 +160,8 @@ export type FanoutDest = string | FanoutTargetInput;
 /** A target of `fanoutTo` / `jumpTo`; its own care replaces the step's part by part. */
 export interface FlowTarget extends FanoutTargetInput {
   care?: CareRef;
+  /** Privacy of this target's hop sinks only; siblings resolve independently (SD-47). */
+  privacy?: PrivacyRef;
 }
 
 export type FlowDest = string | FlowTarget;
@@ -162,11 +170,17 @@ export function normalizeDests(dests: readonly FlowDest[]): FlowTarget[] {
   return dests.map((dest) => (typeof dest === 'string' ? { channel: dest } : dest));
 }
 
-/** A target as the graph shows it: the care reference is never described (RS-66). */
+/**
+ * A target as the graph shows it: care and privacy references are never described (RS-66,
+ * SD-65), so the 0.9.0 graph stays deep-equal.
+ */
 export function describeDest(target: FlowTarget): Record<string, unknown> {
-  if (!Object.hasOwn(target, 'care')) return target as unknown as Record<string, unknown>;
+  if (!Object.hasOwn(target, 'care') && !Object.hasOwn(target, 'privacy')) {
+    return target as unknown as Record<string, unknown>;
+  }
   const described: Record<string, unknown> = { ...target };
   delete described.care;
+  delete described.privacy;
   return described;
 }
 
