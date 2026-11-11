@@ -25,10 +25,12 @@ import { OutboundHttpError } from '../src/outbound/outbound.errors';
 import { MemoryIdempotencyLedger } from '../src/saga/idempotency-ledger';
 import { saga } from '../src/saga/saga';
 import { SagaRunner } from '../src/saga/saga-runner';
+import { envFingerprintSecret } from '../src/sensitive/fingerprint-secret';
 import { PrivacyEngine, TrailOutput } from '../src/sensitive/privacy-engine';
-import { Pack, Remember } from '../src/sensitive/privacy.types';
+import { Pack, Reach, Remember, Show } from '../src/sensitive/privacy.types';
 import type { SealKey } from '../src/sensitive/seal-key';
 import { HopLogger } from '../src/trace/hop-logger';
+import type { IntegrationMessage } from '../src/message';
 import { captureTrail } from '../src/testing/capture-trail';
 import { expectNoLeak } from '../src/testing/expect-no-leak';
 
@@ -39,6 +41,8 @@ const PHONE = '+50212345678';
 const EMAIL = 'canary.person@example.com';
 const CARD = '4111111111111111';
 const IDEM_KEY = 'idem-CANARY-KEY-0001';
+const SSN = '078-05-1120';
+const LOAN_CARD = '5555555555554444';
 
 const capture = captureTrail();
 const store = new MemoryIdempotencyStore();
@@ -147,6 +151,33 @@ const FailFlow: FlowDefinition = {
     }),
 };
 
+/**
+ * The section 18.3 flow: profiles at L1, a channel profile, flow and step privacy, a tap hidden by
+ * default, a jump whose reply holds a card number and a `Reach.Delivery` transform. A second tap
+ * after the jump puts `jumpReplies` on a sink (SD-53).
+ */
+const LoanFlow: FlowDefinition = {
+  name: 'loan',
+  build: () =>
+    IntegrationFlow.from('loan.requests', { privacy: 'personal' })
+      .handle((p) => ({ ...(p as object), enriched: true }), {
+        id: 'enrich',
+        privacy: { fields: ['ssn'] },
+      })
+      .wireTap('loan.audit', { id: 'audit' })
+      .jumpTo([{ channel: 'credit.check', privacy: 'card' }], { id: 'credit' })
+      .wireTap('loan.audit', { id: 'audit-after-credit' })
+      .transform((p) => ({ ...(p as object), shape: 'partner' }), {
+        id: 'partner',
+        privacy: {
+          fields: ['ssn'],
+          reach: Reach.Delivery,
+          reachReason: 'partner must not receive SSN',
+        },
+      })
+      .to('partner.out', { id: 'send' }),
+};
+
 @Module({
   imports: [
     IntegrationModule.forRoot(
@@ -157,6 +188,10 @@ const FailFlow: FlowDefinition = {
           { name: 'fail.in', type: 'direct' },
           { name: 'notify.send', type: 'direct' },
           { name: 'audit', type: 'pubsub' },
+          { name: 'loan.requests', type: 'direct' },
+          { name: 'loan.audit', type: 'pubsub' },
+          { name: 'credit.check', type: 'direct', privacy: 'card' },
+          { name: 'partner.out', type: 'direct' },
         ],
         idempotency: { store: capture.store(store) },
         logging: { hops: true, level: 'debug', banner: false },
@@ -164,9 +199,18 @@ const FailFlow: FlowDefinition = {
           packs: [Pack.SecretsV1, Pack.PersonalV1],
           fields: ['**.contact.email'],
           sealKeys,
+          fingerprintSecret: envFingerprintSecret('ESTELA_FP_SECRET', 'ESTELA_FP_SECRET_ID', {
+            ESTELA_FP_SECRET: randomBytes(32).toString('base64'),
+            ESTELA_FP_SECRET_ID: 'k1',
+          }),
+          profiles: {
+            personal: { packs: [Pack.PersonalV1], fields: ['**.ssn'] },
+            card: { fields: [{ path: '**.pan', show: Show.Ends, showLast: 4 }] },
+            'card-personal': { extends: ['card', 'personal'] },
+          },
         },
       },
-      [PayFlow, FailFlow],
+      [PayFlow, FailFlow, LoanFlow],
     ),
   ],
   controllers: [Checkout],
@@ -187,6 +231,7 @@ describe('privacy leak e2e: no secret reaches any trail output at debug level (S
     url = await app.getUrl();
     capture.channel(moduleRef.get(ChannelRegistry), 'error.channel');
     capture.channel(moduleRef.get(ChannelRegistry), 'audit');
+    capture.channel(moduleRef.get(ChannelRegistry), 'loan.audit');
   }, 20_000);
 
   afterAll(async () => {
@@ -250,5 +295,53 @@ describe('privacy leak e2e: no secret reaches any trail output at debug level (S
     expect([...outputs].sort()).toEqual(['error-envelope', 'ledger', 'log', 'store', 'wiretap']);
     expect(capture.writes.some((w) => w.text.includes('hop'))).toBe(true);
     expectNoLeak(capture, [JWT, API_KEY, PHONE, EMAIL, CARD, IDEM_KEY]);
+  }, 20_000);
+  it('the section 18.3 flow keeps every secret off the trail and delivers SD-54 values', async () => {
+    const registry = app!.get(ChannelRegistry);
+    const creditReply = { score: 720, pan: LOAN_CARD };
+    const credit: IntegrationMessage[] = [];
+    registry.get('credit.check').subscribe((msg) => {
+      credit.push(msg);
+      return registry.send(String(msg.headers.replyChannel), creditReply);
+    });
+    const partner: IntegrationMessage[] = [];
+    let partnerDown = false;
+    registry.get('partner.out').subscribe((msg) => {
+      partner.push(msg);
+      if (partnerDown) {
+        const refused = new Error(`partner refused applicant ${EMAIL}`);
+        return Promise.reject(Object.assign(refused, { ssn: SSN, phone: PHONE }));
+      }
+      return Promise.resolve();
+    });
+    const request = { applicant: { email: EMAIL, phone: PHONE }, ssn: SSN };
+    await registry.send('loan.requests', request);
+    partnerDown = true;
+    await registry.send('loan.requests', request).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Delivered values (SD-54, SD-50): the credit check gets the real data; the partner gets
+    // everything but the SSN, and the real jump reply.
+    expect(credit[0]?.payload).toEqual({ ...request, enriched: true });
+    const sent = partner[0]!;
+    expect(sent.payload).toEqual({
+      applicant: { email: EMAIL, phone: PHONE },
+      ssn: '[HIDDEN:field]',
+      enriched: true,
+      shape: 'partner',
+    });
+    const replies = sent.headers.jumpReplies!;
+    expect(replies['credit.check']).toBe(creditReply);
+    expect(request.ssn).toBe(SSN);
+
+    // Trail copies: both taps are hidden by default and the later one hides the jump reply.
+    const taps = capture.writes.filter((write) => write.where === 'channel loan.audit');
+    expect(taps).toHaveLength(4);
+    expect(taps.some((write) => write.text.includes('"pan":"***4444"'))).toBe(true);
+    const envelopes = capture.writes.filter(
+      (write) => write.output === TrailOutput.ErrorEnvelope && write.text.includes('"loan"'),
+    );
+    expect(envelopes).toHaveLength(1);
+    expectNoLeak(capture, [SSN, LOAN_CARD, EMAIL, PHONE]);
   }, 20_000);
 });
